@@ -33,7 +33,8 @@ trying a game and adding a profile for it.
 
 ## What you need
 
-- An R36S (or a close clone) with ArkOS. Other systems are untested.
+- An R36S (or a close clone) with ArkOS. Other systems, dArkOS and
+  dArkOSRE included, are untested.
 - A PC for the build: Linux with [podman](https://podman.io) or Docker, or
   Windows with [Docker Desktop](https://www.docker.com/products/docker-desktop/)
   or [Podman Desktop](https://podman-desktop.io).

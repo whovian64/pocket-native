@@ -1492,6 +1492,25 @@ fn open(names: &[&str]) -> Option<libloading::Library> {
     names.iter().find_map(|name| unsafe { libloading::Library::new(name) }.ok())
 }
 
+/// the EGL, GBM and Mali libraries this process loaded, and whether it can
+/// use the Mali device, for telling why EGL would not start.
+fn drawing_libraries() -> String {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
+    let mut found: Vec<&str> = maps
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(5))
+        .filter(|path| {
+            let file = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+            ["egl", "gbm", "gles", "mali"].iter().any(|name| file.contains(name))
+        })
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    // SAFETY: access only looks the path up
+    let mali = unsafe { libc::access(c"/dev/mali0".as_ptr(), libc::R_OK | libc::W_OK) } == 0;
+    format!("loaded {}, /dev/mali0 {}", found.join(" "), if mali { "usable" } else { "not usable" })
+}
+
 fn gbm_display(loaded: &egl::Egl) -> Option<egl::types::EGLDisplay> {
     let library = open(&["libgbm.so.1", "libgbm.so"])?;
     let create = symbol(&library, "gbm_create_device");
@@ -1591,13 +1610,21 @@ impl Egl {
         // SAFETY: as in new, and the window is the GBM surface Kms made
         unsafe {
             let kms = Kms::open()?;
-            let library = open(&["libEGL.so.1", "libEGL.so"]).ok_or("could not load libEGL")?;
-            let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]);
+            // the Mali driver is GBM, EGL and GLES in one library, and its GBM
+            // device only works with its own EGL; dArkOS points libEGL.so.1
+            // at glvnd and Mesa instead
+            let together = !symbol(&kms.gbm, "eglGetDisplay").is_null();
+            let (egl_names, gles_names): (&[&str], &[&str]) = match together {
+                true => (&["libgbm.so.1", "libgbm.so"], &["libgbm.so.1", "libgbm.so"]),
+                false => (&["libEGL.so.1", "libEGL.so"], &["libGLESv2.so.2", "libGLESv2.so"]),
+            };
+            let library = open(egl_names).ok_or("could not load libEGL")?;
+            let gles = open(gles_names);
             let loaded = egl::Egl::load_with(|name| symbol(&library, name));
             let display = loaded.GetDisplay(kms.device as glutin_egl_sys::EGLNativeDisplayType);
             let (mut major, mut minor) = (0, 0);
             if display.is_null() || loaded.Initialize(display, &mut major, &mut minor) == 0 {
-                return Err("could not initialize EGL on the GBM device".into());
+                return Err(format!("could not initialize EGL on the GBM device, 0x{:X}, {}", loaded.GetError(), drawing_libraries()));
             }
             loaded.BindAPI(egl::OPENGL_ES_API);
             let attributes = [egl::RENDERABLE_TYPE as i32, egl::OPENGL_ES3_BIT as i32, egl::SURFACE_TYPE as i32, egl::WINDOW_BIT as i32, egl::NONE as i32];

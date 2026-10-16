@@ -25,7 +25,7 @@ engine=$(command -v podman || command -v docker) || { echo "the build needs podm
 image=pocket-native-build:$(sha256sum "$repo/scripts/container/Containerfile" | cut -c1-12)
 if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
     echo "== making the build container, once"
-        "$engine" build -f "$repo/scripts/container/Containerfile" -t "$image" "$repo/scripts/container"
+    "$engine" build -f "$repo/scripts/container/Containerfile" -t "$image" "$repo/scripts/container"
 fi
 
 mkdir -p "$out/.work"

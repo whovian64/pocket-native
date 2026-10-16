@@ -10,7 +10,8 @@ Other games may or may not boot.
 
 ## What you need
 
-- An R36S (or a close clone) with ArkOS. Other systems are untested.
+- An R36S (or a close clone) with ArkOS. Other systems, dArkOS and
+  dArkOSRE included, are untested.
 - A PC for the build: Linux with podman or Docker, or Windows with
   Docker Desktop or Podman Desktop. On Windows it has to be running
   before you start.
@@ -97,7 +98,17 @@ running. Start it, let it finish starting, and run the build again.
 
 **The game is not under Ports.** The folder is in the wrong place, or
 EmulationStation has not been restarted. The whole `Pocket Native`
-folder goes inside `ports`, not just the files in it.
+folder goes inside `ports`, not just the files in it. If it still does
+not show up, your system may only list launchers sitting directly in
+`ports`: move the `.sh` files and the `pocket-native` folder out of
+`Pocket Native` into `ports` itself, side by side.
+
+**A black screen with choppy sound, and FN pauses but shows no menu.**
+The handheld's GPU did not start, so the game is drawing in software,
+far too slowly to show anything. No setting fixes that. Older builds
+did this on dArkOS and dArkOSRE, so build the game again with the
+current version. If it still happens, the game's `log.txt` has a line
+with `could not initialize EGL`, please post it in an issue.
 
 **A game other than Omega Ruby or Alpha Sapphire does not start, or
 runs badly.** That is expected for now. Its `log.txt`, in the game's
