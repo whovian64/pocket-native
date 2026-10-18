@@ -1713,7 +1713,21 @@ impl Egl {
             let library = open(egl_names).ok_or("could not load libEGL")?;
             let gles = open(gles_names);
             let loaded = egl::Egl::load_with(|name| symbol(&library, name));
-            let display = loaded.GetDisplay(kms.device as glutin_egl_sys::EGLNativeDisplayType);
+            // the Mali blob's legacy eglGetDisplay returns no display for a GBM
+            // device (g29p1 on the RG52 Mini); the platform call works
+            const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
+            let platform = ["eglGetPlatformDisplay", "eglGetPlatformDisplayEXT"]
+                .iter()
+                .map(|name| symbol(&library, name))
+                .find(|address| !address.is_null());
+            let display = match platform {
+                Some(address) => {
+                    let get: extern "C" fn(u32, *mut c_void, *const i32) -> egl::types::EGLDisplay =
+                        std::mem::transmute(address);
+                    get(EGL_PLATFORM_GBM_KHR, kms.device, std::ptr::null())
+                }
+                None => loaded.GetDisplay(kms.device as glutin_egl_sys::EGLNativeDisplayType),
+            };
             let (mut major, mut minor) = (0, 0);
             if display.is_null() || loaded.Initialize(display, &mut major, &mut minor) == 0 {
                 return Err(format!("could not initialize EGL on the GBM device, 0x{:X}, {}", loaded.GetError(), drawing_libraries()));
