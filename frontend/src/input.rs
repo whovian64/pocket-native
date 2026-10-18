@@ -55,7 +55,7 @@ pub fn gamepad() -> Option<(String, String)> {
     let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
     devices.split("\n\n").find_map(|block| {
         let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?;
-        if !name.contains("Gamepad") && !name.contains("Controller") && !name.contains("Joypad") && !name.contains("joypad") && !h700_pad(name) {
+        if !name.contains("Gamepad") && !name.contains("Controller") && !name.contains("Joypad") && !name.contains("joypad") && !h700_pad(name) && !rk3562_pad(name) {
             return None;
         }
         let handlers = block.lines().find_map(|line| line.strip_prefix("H: Handlers="))?;
@@ -70,18 +70,43 @@ fn h700_pad(name: &str) -> bool {
     name == "Deeplay-keys" || name == "ANBERNIC-keys" || (name.starts_with("Anbernic RG") && !name.contains("ARC"))
 }
 
+/// the RK3562 handhelds' own pad (the RG52 Mini, the RG43H Pro), from a
+/// kernel driver that gives the usual gamepad codes and sticks of 32767
+/// either way. /proc/bus/input/devices puts the name in quotes.
+fn rk3562_pad(name: &str) -> bool {
+    name.trim_matches('"') == "rk3562-joystick"
+}
+
 pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
     // they come in as the R36S's
     let h700 = h700_pad(&name);
     // Anbernic's RK3566 handhelds (RG353, RG503) give select, start, the
     // sticks' buttons and the right stick the usual numbers
     let rk3566 = name.starts_with("retrogame_joypad");
-    log::info!("buttons from {name}{}", if h700 { ", numbered as on Anbernic's H700 handhelds" } else if rk3566 { ", numbered as on Anbernic's RK3566 handhelds" } else { "" });
+    // the RK3562 handhelds give them the usual numbers too, with the
+    // sticks on the usual axes
+    let rk3562 = rk3562_pad(&name);
+    log::info!(
+        "buttons from {name}{}",
+        if h700 {
+            ", numbered as on Anbernic's H700 handhelds"
+        } else if rk3566 {
+            ", numbered as on Anbernic's RK3566 handhelds"
+        } else if rk3562 {
+            ", numbered as on the RK3562 handhelds"
+        } else {
+            ""
+        }
+    );
     // the R36S's stick each of axes 0 to 5 is, scaled to its travel
     let sticks = if h700 {
         Some([None, None, Some(0), Some(1), Some(3), Some(4)])
     } else if rk3566 {
         Some([Some(0), Some(1), Some(3), None, None, Some(4)])
+    } else if rk3562 {
+        // left stick on ABS_X and ABS_Y, right on ABS_RX and ABS_RY, the
+        // triggers on ABS_Z and ABS_RZ, which are buttons here
+        Some([Some(0), Some(1), None, Some(3), Some(4), None])
     } else {
         None
     };
@@ -103,6 +128,8 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                         h700_button(code)
                     } else if rk3566 {
                         rk3566_button(code)
+                    } else if rk3562 {
+                        rk3562_button(code)
                     } else {
                         code
                     };
@@ -162,6 +189,24 @@ fn rk3566_button(code: u16) -> u16 {
         316 => FN,
         317 => L3,
         318 => R3,
+        other => other,
+    }
+}
+
+/// an RK3562 handheld's button as the R36S numbers it: select, start, home
+/// and the sticks' buttons have the usual gamepad codes (314 to 318), as on
+/// the RK3566 handhelds, and the extra FN or back button the first
+/// trigger-happy code (704), which the R36S numbers select, so it is
+/// another FN here. The face buttons, shoulders, triggers and d-pad already
+/// have the R36S's numbers.
+fn rk3562_button(code: u16) -> u16 {
+    match code {
+        314 => SELECT,
+        315 => START,
+        316 => FN,
+        317 => L3,
+        318 => R3,
+        704 => FN,
         other => other,
     }
 }

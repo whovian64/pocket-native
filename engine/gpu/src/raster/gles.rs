@@ -1363,6 +1363,65 @@ fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Progra
     }
 }
 
+const ROTATE_SOURCE: &str = r#"#version 310 es
+precision highp float;
+uniform highp sampler2D canvas;
+uniform vec4 rect;
+uniform int turn;
+layout(location = 0) out vec4 color;
+void main() {
+    vec2 p = (gl_FragCoord.xy - rect.xy) / rect.zw;
+    if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) {
+        color = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    vec2 uv = turn == 0 ? vec2(1.0 - p.y, p.x) : vec2(p.y, 1.0 - p.x);
+    color = vec4(texture(canvas, uv).rgb, 1.0);
+}
+"#;
+
+/// a landscape canvas the screens are laid out in and drawn into, which is
+/// turned a quarter onto a portrait panel and fitted with black bars.
+#[derive(Clone, Copy)]
+struct Canvas {
+    texture: glow::Texture,
+    framebuffer: glow::Framebuffer,
+    program: glow::Program,
+    width: i32,
+    height: i32,
+}
+
+/// which way to turn the canvas onto the panel, 0 clockwise, 1 counter
+/// clockwise, none when the panel is landscape. ZAKURO_PANEL_ROTATE=0 turns
+/// nothing, 90 turns clockwise, 270 counter clockwise, and unset turns
+/// clockwise on a portrait panel.
+fn panel_turn(width: i32, height: i32) -> Option<i32> {
+    static CHOICE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let choice = CHOICE.get_or_init(|| std::env::var("ZAKURO_PANEL_ROTATE").ok());
+    match choice.as_deref() {
+        Some("0") | Some("off") => None,
+        Some("90") => Some(0),
+        Some("270") => Some(1),
+        _ => (height > width).then_some(0),
+    }
+}
+
+/// the size of the layout the screens are placed in, 640x480 unless
+/// ZAKURO_CANVAS=WIDTHxHEIGHT says otherwise.
+fn canvas_size() -> (i32, i32) {
+    static SIZE: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        std::env::var("ZAKURO_CANVAS")
+            .ok()
+            .and_then(|value| {
+                let (width, height) = value.split_once('x')?;
+                Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+            })
+            .filter(|&(width, height)| width > 0 && height > 0)
+            .unwrap_or((640, 480))
+    })
+}
+
 fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
     disturb();
     PANEL.with(|panel| {
@@ -1387,12 +1446,42 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                     empty
                 }
             };
-            let (width, height, framebuffer) = match &panel.output {
+            let (panel_width, panel_height, panel_framebuffer) = match &panel.output {
                 Output::Kms(kms) => {
                     let (width, height) = kms.size();
                     (width, height, None)
                 }
                 Output::Offscreen(framebuffer) => (640, 480, Some(*framebuffer)),
+            };
+            // a portrait panel under a landscape layout: everything is drawn
+            // into a canvas of the layout's size, which is turned onto the
+            // panel at the end
+            let turn = match &panel.output {
+                Output::Kms(_) => panel_turn(panel_width, panel_height),
+                Output::Offscreen(_) => None,
+            };
+            let (width, height, framebuffer) = match turn {
+                Some(_) => {
+                    let (canvas_width, canvas_height) = canvas_size();
+                    let canvas = match panel.canvas {
+                        Some(canvas) if (canvas.width, canvas.height) == (canvas_width, canvas_height) => canvas,
+                        _ => {
+                            let texture = gl.create_texture()?;
+                            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                            gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, canvas_width, canvas_height);
+                            let framebuffer = gl.create_framebuffer()?;
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
+                            let program = link(&gl, PACK_VERTEX_SOURCE, ROTATE_SOURCE)?;
+                            let made = Canvas { texture, framebuffer, program, width: canvas_width, height: canvas_height };
+                            panel.canvas = Some(made);
+                            log::info!("drawing a {canvas_width}x{canvas_height} layout turned onto the {panel_width}x{panel_height} panel");
+                            made
+                        }
+                    };
+                    (canvas_width, canvas_height, Some(canvas.framebuffer))
+                }
+                None => (panel_width, panel_height, panel_framebuffer),
             };
             gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
             gl.viewport(0, 0, width, height);
@@ -1510,6 +1599,29 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                 }
                 return Ok(());
             }
+            if let (Some(turn), Some(canvas)) = (turn, panel.canvas) {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.viewport(0, 0, panel_width, panel_height);
+                gl.disable(glow::SCISSOR_TEST);
+                gl.disable(glow::BLEND);
+                gl.color_mask(true, true, true, true);
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                // the canvas on its side, fitted to the panel and centred
+                let (turned_width, turned_height) = (canvas.height as f32, canvas.width as f32);
+                let scale = (panel_width as f32 / turned_width).min(panel_height as f32 / turned_height);
+                let (rect_width, rect_height) = (turned_width * scale, turned_height * scale);
+                let (left, bottom) = ((panel_width as f32 - rect_width) / 2.0, (panel_height as f32 - rect_height) / 2.0);
+                gl.use_program(Some(canvas.program));
+                gl.uniform_1_i32(gl.get_uniform_location(canvas.program, "canvas").as_ref(), 0);
+                gl.uniform_1_i32(gl.get_uniform_location(canvas.program, "turn").as_ref(), turn);
+                gl.uniform_4_f32(gl.get_uniform_location(canvas.program, "rect").as_ref(), left, bottom, rect_width, rect_height);
+                gl.bind_vertex_array(Some(empty));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_sampler(0, Some(linear));
+                gl.bind_texture(glow::TEXTURE_2D, Some(canvas.texture));
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
             if panel.egl.egl.SwapBuffers(panel.egl.display, panel.egl.surface) == 0 {
                 return Err("could not swap the panel's buffers".into());
             }
@@ -1541,6 +1653,8 @@ struct Panel {
     overlay: Option<(glow::Program, glow::VertexArray, glow::Buffer, glow::Buffer)>,
     overlay_textures: HashMap<u64, (glow::Texture, [u32; 2])>,
     between: Between,
+    /// the landscape canvas a portrait panel's picture is drawn into first.
+    canvas: Option<Canvas>,
 }
 
 thread_local! {
@@ -2649,7 +2763,7 @@ impl Worker {
                         None => None,
                     };
                     if let Some(output) = output {
-                        PANEL.with(|screen| *screen.borrow_mut() = Some(Panel { egl, output, program: None, textures: [None, None], empty: None, linear: None, overlay: None, overlay_textures: HashMap::new(), between: Between::default() }));
+                        PANEL.with(|screen| *screen.borrow_mut() = Some(Panel { egl, output, program: None, textures: [None, None], empty: None, linear: None, overlay: None, overlay_textures: HashMap::new(), between: Between::default(), canvas: None }));
                     }
                     let gl: &'static glow::Context = Box::leak(Box::new(gl));
                     GL_CONTEXT.set(Some(gl));
