@@ -182,16 +182,18 @@ fn main() {
     // as boot takes it
     let script = std::env::var("ZAKURO_INPUT").map(|spec| parse_input_script(&spec)).unwrap_or_default();
     // ZAKURO_SHOT_AT=frame,frame saves both screens at those frames into the
-    // temporary directory, as boot does
+    // temporary directory, as boot does, or a probe's directory in place of
+    // its own eight
     // ZAKURO_HOST_PROFILE=from,frames samples where this process's threads
     // spend their time over those frames, into the temporary directory
     let host_profile = std::env::var("ZAKURO_HOST_PROFILE").ok().and_then(|spec| {
         let (from, frames) = spec.split_once(',')?;
         Some((from.parse::<u64>().ok()?, frames.parse::<u64>().ok()?))
     });
-    let shots: HashSet<u64> = match &probe {
-        Some(probe) => probe.shot_frames(),
-        None => std::env::var("ZAKURO_SHOT_AT").unwrap_or_default().split(',').filter_map(|frame| frame.parse().ok()).collect(),
+    let shots: HashSet<u64> = match (&probe, std::env::var("ZAKURO_SHOT_AT")) {
+        (_, Ok(frames)) => frames.split(',').filter_map(|frame| frame.parse().ok()).collect(),
+        (Some(probe), Err(_)) => probe.shot_frames(),
+        (None, Err(_)) => HashSet::new(),
     };
     let mut stopped = None;
     let keys_script = std::env::var("ZAKURO_KEYS").map(|spec| input::parse_keys(&spec)).unwrap_or_default();

@@ -4,7 +4,8 @@
 cpu=/sys/devices/system/cpu/cpufreq/policy0
 gpu=$(ls -d /sys/devices/platform/*.gpu/devfreq/*.gpu 2>/dev/null | head -1)
 dmc=/sys/devices/platform/dmc/devfreq/dmc
-set_to() { echo "$2" | sudo -n tee "$1" >/dev/null 2>&1; }
+# Knulli runs ports as root, with no sudo
+set_to() { if [ "$(id -u)" = 0 ]; then echo "$2" > "$1"; else echo "$2" | sudo -n tee "$1" >/dev/null; fi 2>/dev/null; }
 
 case "$1" in
     performance) governors="performance performance performance" ;;

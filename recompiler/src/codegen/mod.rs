@@ -304,9 +304,60 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
 }
 
 fn write_function(out: &mut String, program: &Program, scope: &Scope, entry: u32, function: &Function) {
+    let mut body = String::new();
+    write_body(&mut body, program, scope, entry, function);
+    let head = format!("void {}(Context *ctx) {{\n", name(scope.prefix, entry, function.mode == Mode::Thumb));
+    match flags_in_locals(&body) {
+        Some(body) => {
+            out.push_str("#undef RECOMP_SYNC_OUT\n#undef RECOMP_SYNC_IN\n");
+            out.push_str("#define RECOMP_SYNC_OUT() RECOMP_FLAGS_OUT()\n#define RECOMP_SYNC_IN() RECOMP_FLAGS_IN()\n");
+            out.push_str(&head);
+            out.push_str("    RECOMP_FLAGS_DECL\n");
+            out.push_str(&body);
+            out.push_str("#undef RECOMP_SYNC_OUT\n#undef RECOMP_SYNC_IN\n");
+            out.push_str("#define RECOMP_SYNC_OUT() do {} while (0)\n#define RECOMP_SYNC_IN() do {} while (0)\n");
+        }
+        None => {
+            out.push_str(&head);
+            out.push_str(&body);
+        }
+    }
+}
+
+/// a function's body with the flags named by the F_ macros, which built with
+/// RECOMP_FLAG_LOCALS are locals the compiler keeps in registers and drops
+/// when nothing reads them before they are set again, stored to the context
+/// only where code outside the function can see them. None when the function
+/// never touches them.
+fn flags_in_locals(body: &str) -> Option<String> {
+    const CONDITIONS: [&str; 14] = ["C_EQ", "C_NE", "C_CS", "C_CC", "C_MI", "C_PL", "C_VS", "C_VC", "C_HI", "C_LS", "C_GE", "C_LT", "C_GT", "C_LE"];
+    let mut out = String::with_capacity(body.len() + body.len() / 8);
+    let mut used = CONDITIONS.iter().any(|condition| body.contains(condition));
+    let mut rest = body;
+    while let Some(at) = rest.find("ctx->") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 5..];
+        let mut chars = after.chars();
+        match (chars.next(), chars.next()) {
+            (Some(flag @ ('n' | 'z' | 'c' | 'v')), next) if !next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') => {
+                out.push_str("F_");
+                out.push(flag.to_ascii_uppercase());
+                rest = &after[1..];
+                used = true;
+            }
+            _ => {
+                out.push_str("ctx->");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    used.then(|| out.replace("return;", "{ RECOMP_SYNC_OUT(); return; }"))
+}
+
+fn write_body(out: &mut String, program: &Program, scope: &Scope, entry: u32, function: &Function) {
     let thumb = function.mode == Mode::Thumb;
     let state = if thumb { "ctx->thumb" } else { "!ctx->thumb" };
-    emit!(out, "void {}(Context *ctx) {{", name(scope.prefix, entry, thumb));
     if scope.relative {
         emit!(out, "    const uint32_t module_base = {}base;", scope.prefix);
     }

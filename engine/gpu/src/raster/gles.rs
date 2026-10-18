@@ -1051,8 +1051,8 @@ impl Kms {
     /// SAFETY: plain libdrm and GBM calls on the descriptor and device this
     /// opens, with the structs they return read before they are freed
     unsafe fn open() -> Result<Kms, String> {
-        let drm = open(&["libdrm.so.2", "libdrm.so"]).ok_or("could not load libdrm")?;
-        let gbm = open(&["libgbm.so.1", "libgbm.so"]).ok_or("could not load libgbm")?;
+        let drm = open(&["libdrm.so.2", "libdrm.so"]).map_err(|why| format!("could not load libdrm, {why}"))?;
+        let gbm = open(&["libgbm.so.1", "libgbm.so"]).map_err(|why| format!("could not load libgbm, {why}"))?;
         let path = CString::new("/dev/dri/card0").map_err(|error| error.to_string())?;
         let fd = libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC);
         if fd < 0 {
@@ -1220,6 +1220,36 @@ impl Kms {
     }
 }
 
+/// the layouts and the menu are made for a 640x480 panel, others get them
+/// scaled to fit and centred.
+#[derive(Clone, Copy)]
+struct Fit {
+    scale: f32,
+    left: f32,
+    top: f32,
+}
+
+impl Fit {
+    fn new(width: i32, height: i32) -> Fit {
+        let scale = (width as f32 / 640.0).min(height as f32 / 480.0);
+        Fit { scale, left: (width as f32 - 640.0 * scale) / 2.0, top: (height as f32 - 480.0 * scale) / 2.0 }
+    }
+
+    fn x(self, x: i32) -> i32 {
+        (self.left + x as f32 * self.scale).round() as i32
+    }
+
+    fn y(self, y: i32) -> i32 {
+        (self.top + y as f32 * self.scale).round() as i32
+    }
+
+    /// left, top, width and height.
+    fn area(self, [left, top, width, height]: [i32; 4]) -> [i32; 4] {
+        let (x, y) = (self.x(left), self.y(top));
+        [x, y, self.x(left + width) - x, self.y(top + height) - y]
+    }
+}
+
 enum Part {
     Cursor { x: i32, y: i32 },
     /// a screen's buffer, the top one's version when it is interpolated.
@@ -1257,7 +1287,7 @@ void main() {
 /// draws a user interface over the screens, its textures made the first time
 /// they come and kept by their id.
 /// SAFETY: on the GL thread, with the panel's framebuffer bound
-unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::Overlay, (width, height): (i32, i32)) -> Result<(), String> {
+unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::Overlay, height: i32, fit: Fit) -> Result<(), String> {
     let (program, array, vertices, indices) = match panel.overlay {
         Some(made) => made,
         None => {
@@ -1308,9 +1338,10 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
             gl.delete_texture(texture);
         }
     }
-    gl.viewport(0, 0, width, height);
+    let [x, y, width, tall] = fit.area([0, 0, 640, 480]);
+    gl.viewport(x, height - y - tall, width, tall);
     gl.use_program(Some(program));
-    gl.uniform_2_f32(gl.get_uniform_location(program, "size").as_ref(), width as f32, height as f32);
+    gl.uniform_2_f32(gl.get_uniform_location(program, "size").as_ref(), 640.0, 480.0);
     gl.uniform_1_i32(gl.get_uniform_location(program, "source").as_ref(), 0);
     gl.bind_vertex_array(Some(array));
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
@@ -1323,6 +1354,7 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
     for mesh in &overlay.meshes {
         let Some(&(texture, _)) = panel.overlay_textures.get(&mesh.texture) else { continue };
         let [left, top, right, bottom] = mesh.clip.map(|edge| edge as i32);
+        let [left, top, right, bottom] = [fit.x(left), fit.y(top), fit.x(right), fit.y(bottom)];
         gl.scissor(left, height - bottom, right - left, bottom - top);
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         let bytes = std::slice::from_raw_parts(mesh.vertices.as_ptr().cast::<u8>(), std::mem::size_of_val(mesh.vertices.as_slice()));
@@ -1336,7 +1368,12 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
     Ok(())
 }
 
+/// held while the GL thread or the compiler thread compiles: Mali's driver
+/// on the RX6H crashed in the compiler thread with both at it.
+static COMPILER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
+    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: on the GL thread, the shaders are deleted once linked
     unsafe {
         let program = gl.create_program()?;
@@ -1451,38 +1488,10 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                     let (width, height) = kms.size();
                     (width, height, None)
                 }
+                Output::Fbdev(window) => (window[0] as i32, window[1] as i32, None),
                 Output::Offscreen(framebuffer) => (640, 480, Some(*framebuffer)),
             };
-            // a portrait panel under a landscape layout: everything is drawn
-            // into a canvas of the layout's size, which is turned onto the
-            // panel at the end
-            let turn = match &panel.output {
-                Output::Kms(_) => panel_turn(panel_width, panel_height),
-                Output::Offscreen(_) => None,
-            };
-            let (width, height, framebuffer) = match turn {
-                Some(_) => {
-                    let (canvas_width, canvas_height) = canvas_size();
-                    let canvas = match panel.canvas {
-                        Some(canvas) if (canvas.width, canvas.height) == (canvas_width, canvas_height) => canvas,
-                        _ => {
-                            let texture = gl.create_texture()?;
-                            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                            gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, canvas_width, canvas_height);
-                            let framebuffer = gl.create_framebuffer()?;
-                            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
-                            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
-                            let program = link(&gl, PACK_VERTEX_SOURCE, ROTATE_SOURCE)?;
-                            let made = Canvas { texture, framebuffer, program, width: canvas_width, height: canvas_height };
-                            panel.canvas = Some(made);
-                            log::info!("drawing a {canvas_width}x{canvas_height} layout turned onto the {panel_width}x{panel_height} panel");
-                            made
-                        }
-                    };
-                    (canvas_width, canvas_height, Some(canvas.framebuffer))
-                }
-                None => (panel_width, panel_height, panel_framebuffer),
-            };
+            let fit = Fit::new(width, height);
             gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
             gl.viewport(0, 0, width, height);
             gl.disable(glow::SCISSOR_TEST);
@@ -1512,8 +1521,9 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
             for part in parts {
                 let (texture, screen, upright, area, smooth) = match part {
                     Part::Cursor { x, y } => {
+                        let (x, y) = (fit.x(x), fit.y(y));
                         gl.enable(glow::SCISSOR_TEST);
-                        for (size, shade) in [(7, 0.0), (5, 1.0)] {
+                        for (size, shade) in [(7, 0.0), (5, 1.0)].map(|(size, shade)| ((size as f32 * fit.scale) as i32 | 1, shade)) {
                             gl.scissor(x - size / 2, height - y - size / 2, size, size);
                             gl.clear_color(shade, shade, shade, 1.0);
                             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -1522,6 +1532,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                         continue;
                     }
                     Part::Surface { texture, screen, area, smooth, top, picture } => {
+                        let area = fit.area(area);
                         let step = match picture {
                             Some(version) => panel.between.step((texture, version)),
                             None => {
@@ -1549,7 +1560,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                         (texture, screen, 0, area, smooth)
                     }
                     Part::Overlay(overlay) => {
-                        draw_overlay(&gl, panel, &overlay, (width, height))?;
+                        draw_overlay(&gl, panel, &overlay, height, fit)?;
                         continue;
                     }
                     Part::Pixels { index, pixels, width, height, area, smooth } => {
@@ -1571,7 +1582,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                         };
                         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                         gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&pixels)));
-                        (texture, [width as i32, height as i32, 0, 0], 1, area, smooth)
+                        (texture, [width as i32, height as i32, 0, 0], 1, fit.area(area), smooth)
                     }
                 };
                 let y = height - area[1] - area[3];
@@ -1628,7 +1639,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
         }
         match &mut panel.output {
             Output::Kms(kms) => kms.flip(),
-            Output::Offscreen(_) => Ok(()),
+            Output::Fbdev(_) | Output::Offscreen(_) => Ok(()),
         }
     })
 }
@@ -1638,6 +1649,9 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
 /// saves each time, numbered in place of a % in the name.
 enum Output {
     Kms(Kms),
+    /// the framebuffer device's size, the window a Mali driver built for
+    /// it takes, kept where EGL was given it.
+    Fbdev(Box<[u16; 2]>),
     Offscreen(glow::Framebuffer),
 }
 
@@ -1692,10 +1706,18 @@ fn symbol(library: &libloading::Library, name: &str) -> *const c_void {
     unsafe { library.get::<*const c_void>(name.as_bytes_with_nul()).map_or(std::ptr::null(), |symbol| *symbol) }
 }
 
-fn open(names: &[&str]) -> Option<libloading::Library> {
-    // SAFETY: loading the system's EGL and GLES libraries runs their
-    // initializers, which is what using them takes
-    names.iter().find_map(|name| unsafe { libloading::Library::new(name) }.ok())
+/// the first of the names that loads, else why the first did not.
+fn open(names: &[&str]) -> Result<libloading::Library, String> {
+    let mut first = None;
+    for name in names {
+        // SAFETY: loading the system's EGL and GLES libraries runs their
+        // initializers, which is what using them takes
+        match unsafe { libloading::Library::new(name) } {
+            Ok(library) => return Ok(library),
+            Err(why) => _ = first.get_or_insert(why.to_string()),
+        }
+    }
+    Err(first.unwrap_or_default())
 }
 
 /// the EGL, GBM and Mali libraries this process loaded, and whether it can
@@ -1718,7 +1740,7 @@ fn drawing_libraries() -> String {
 }
 
 fn gbm_display(loaded: &egl::Egl) -> Option<egl::types::EGLDisplay> {
-    let library = open(&["libgbm.so.1", "libgbm.so"])?;
+    let library = open(&["libgbm.so.1", "libgbm.so"]).ok()?;
     let create = symbol(&library, "gbm_create_device");
     if create.is_null() {
         return None;
@@ -1750,8 +1772,8 @@ fn gbm_display(loaded: &egl::Egl) -> Option<egl::types::EGLDisplay> {
 
 impl Egl {
     fn new() -> Result<(Egl, glow::Context), String> {
-        let library = open(&["libEGL.so.1", "libEGL.so"]).ok_or("could not load libEGL")?;
-        let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]);
+        let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
+        let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
         let loaded = egl::Egl::load_with(|name| symbol(&library, name));
         // SAFETY: plain EGL calls with attribute lists that end in NONE and
         // live as long as each call
@@ -1824,8 +1846,8 @@ impl Egl {
                 true => (&["libgbm.so.1", "libgbm.so"], &["libgbm.so.1", "libgbm.so"]),
                 false => (&["libEGL.so.1", "libEGL.so"], &["libGLESv2.so.2", "libGLESv2.so"]),
             };
-            let library = open(egl_names).ok_or("could not load libEGL")?;
-            let gles = open(gles_names);
+            let library = open(egl_names).map_err(|why| format!("could not load libEGL, {why}"))?;
+            let gles = open(gles_names).ok();
             let loaded = egl::Egl::load_with(|name| symbol(&library, name));
             // the Mali blob's legacy eglGetDisplay returns no display for a GBM
             // device (g29p1 on the RG52 Mini); the platform call works
@@ -1860,29 +1882,92 @@ impl Egl {
                     visual as u32 == GBM_FORMAT_XRGB8888
                 })
                 .ok_or("no EGL config for the panel")?;
-            let context_attributes = [egl::CONTEXT_CLIENT_VERSION as i32, 3, egl::CONTEXT_MINOR_VERSION as i32, 1, egl::NONE as i32];
-            let context = loaded.CreateContext(display, config, egl::NO_CONTEXT, context_attributes.as_ptr());
-            if context.is_null() {
-                return Err(format!("could not create an OpenGL ES 3.1 context, 0x{:X}", loaded.GetError()));
-            }
-            let surface = loaded.CreateWindowSurface(display, config, kms.surface as glutin_egl_sys::EGLNativeWindowType, std::ptr::null());
-            if surface.is_null() {
-                return Err(format!("could not make a window surface, 0x{:X}", loaded.GetError()));
-            }
-            if loaded.MakeCurrent(display, surface, surface, context) == 0 {
-                return Err(format!("could not make the context current, 0x{:X}", loaded.GetError()));
-            }
-            loaded.SwapInterval(display, 0);
-            let gl = glow::Context::from_loader_function(|name| {
-                let direct = gles.as_ref().map_or(std::ptr::null(), |gles| symbol(gles, name));
-                if !direct.is_null() {
-                    return remember(name, direct);
-                }
-                let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
-                remember(name, loaded.GetProcAddress(c_name.as_ptr()) as *const c_void)
-            });
-            Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface }, gl, kms))
+            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, kms.surface as glutin_egl_sys::EGLNativeWindowType, 0)?;
+            Ok((egl, gl, kms))
         }
+    }
+
+    /// screens through the framebuffer device, for a Mali driver built for
+    /// it rather than for GBM, as on Allwinner's H700 under Knulli.
+    fn new_fbdev() -> Result<(Egl, glow::Context, Box<[u16; 2]>), String> {
+        // SAFETY: FBIOGET_VSCREENINFO fills the 160 bytes of the screen's
+        // fb_var_screeninfo, its size first, and the EGL calls are as in new
+        unsafe {
+            let fd = libc::open(c"/dev/fb0".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC);
+            if fd < 0 {
+                return Err("could not open /dev/fb0".into());
+            }
+            let mut info = [0u32; 40];
+            let read = libc::ioctl(fd, 0x4600, info.as_mut_ptr());
+            libc::close(fd);
+            if read < 0 {
+                return Err("could not read the size of /dev/fb0".into());
+            }
+            let window = Box::new([info[0] as u16, info[1] as u16]);
+            let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
+            let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
+            let loaded = egl::Egl::load_with(|name| symbol(&library, name));
+            let display = loaded.GetDisplay(egl::DEFAULT_DISPLAY);
+            let (mut major, mut minor) = (0, 0);
+            if display.is_null() || loaded.Initialize(display, &mut major, &mut minor) == 0 {
+                return Err(format!("could not initialize EGL for /dev/fb0, 0x{:X}, {}", loaded.GetError(), drawing_libraries()));
+            }
+            loaded.BindAPI(egl::OPENGL_ES_API);
+            let attributes = [
+                egl::RENDERABLE_TYPE as i32,
+                egl::OPENGL_ES3_BIT as i32,
+                egl::SURFACE_TYPE as i32,
+                egl::WINDOW_BIT as i32,
+                egl::RED_SIZE as i32,
+                8,
+                egl::GREEN_SIZE as i32,
+                8,
+                egl::BLUE_SIZE as i32,
+                8,
+                egl::NONE as i32,
+            ];
+            let (mut config, mut count) = (std::ptr::null(), 0);
+            if loaded.ChooseConfig(display, attributes.as_ptr(), &mut config, 1, &mut count) == 0 || count == 0 {
+                return Err("no EGL config for /dev/fb0".into());
+            }
+            // the driver flips on the framebuffer, at the next refresh
+            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, window.as_ptr() as glutin_egl_sys::EGLNativeWindowType, 1)?;
+            Ok((egl, gl, window))
+        }
+    }
+
+    /// an OpenGL ES 3.1 context drawing to a window, swapping its buffers
+    /// interval refreshes apart.
+    unsafe fn on_window(
+        (library, gles): (libloading::Library, Option<libloading::Library>),
+        loaded: egl::Egl,
+        display: egl::types::EGLDisplay,
+        config: egl::types::EGLConfig,
+        window: glutin_egl_sys::EGLNativeWindowType,
+        interval: i32,
+    ) -> Result<(Egl, glow::Context), String> {
+        let context_attributes = [egl::CONTEXT_CLIENT_VERSION as i32, 3, egl::CONTEXT_MINOR_VERSION as i32, 1, egl::NONE as i32];
+        let context = loaded.CreateContext(display, config, egl::NO_CONTEXT, context_attributes.as_ptr());
+        if context.is_null() {
+            return Err(format!("could not create an OpenGL ES 3.1 context, 0x{:X}", loaded.GetError()));
+        }
+        let surface = loaded.CreateWindowSurface(display, config, window, std::ptr::null());
+        if surface.is_null() {
+            return Err(format!("could not make a window surface, 0x{:X}", loaded.GetError()));
+        }
+        if loaded.MakeCurrent(display, surface, surface, context) == 0 {
+            return Err(format!("could not make the context current, 0x{:X}", loaded.GetError()));
+        }
+        loaded.SwapInterval(display, interval);
+        let gl = glow::Context::from_loader_function(|name| {
+            let direct = gles.as_ref().map_or(std::ptr::null(), |gles| symbol(gles, name));
+            if !direct.is_null() {
+                return remember(name, direct);
+            }
+            let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
+            remember(name, loaded.GetProcAddress(c_name.as_ptr()) as *const c_void)
+        });
+        Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface }, gl))
     }
 
     /// a context sharing this one's objects, made current on the calling
@@ -1920,10 +2005,17 @@ impl Egl {
         }
     }
 
-    fn new_with_panel() -> Result<(Egl, glow::Context, Option<Kms>), String> {
+    fn new_with_panel() -> Result<(Egl, glow::Context, Option<Output>), String> {
         if std::env::var_os("ZAKURO_KMS").is_some() {
-            let (egl, gl, kms) = Egl::new_kms()?;
-            return Ok((egl, gl, Some(kms)));
+            return match Egl::new_kms() {
+                Ok((egl, gl, kms)) => Ok((egl, gl, Some(Output::Kms(kms)))),
+                Err(error) if std::path::Path::new("/dev/fb0").exists() => {
+                    let (egl, gl, window) = Egl::new_fbdev().map_err(|fbdev| format!("{error}, and {fbdev}"))?;
+                    log::info!("{error}, the screens go through /dev/fb0, {}x{}", window[0], window[1]);
+                    Ok((egl, gl, Some(Output::Fbdev(window))))
+                }
+                Err(error) => Err(error),
+            };
         }
         let (egl, gl) = Egl::new()?;
         Ok((egl, gl, None))
@@ -2630,6 +2722,7 @@ type ProgramKey = ([u32; FRAGMENT_CONSTANTS], bool, Vec<u32>, u64);
 /// when it was made before, its samplers on the texture units.
 fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Option<&std::path::Path>) -> Result<glow::Program, String> {
     let started = std::time::Instant::now();
+    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: the context is current on this thread, the shaders are deleted
     // once linked into the program
     unsafe {
@@ -2746,10 +2839,10 @@ impl Worker {
         let handle = thread::Builder::new()
             .name("gles".into())
             .spawn(move || match Egl::new_with_panel() {
-                Ok((egl, gl, kms)) => {
+                Ok((egl, gl, output)) => {
                     let egl: &'static Egl = Box::leak(Box::new(egl));
-                    let output = match kms {
-                        Some(kms) => Some(Output::Kms(kms)),
+                    let output = match output {
+                        Some(output) => Some(output),
                         // SAFETY: on the GL thread, its context current
                         None if std::env::var_os("ZAKURO_PANEL_SHOT").is_some() => unsafe {
                             let image = gl.create_renderbuffer().expect("a renderbuffer for the panel");
@@ -3287,6 +3380,7 @@ impl Gles {
 
     fn compute(&self, source: &str) -> Result<glow::Program, String> {
         let gl = &self.gl;
+        let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // SAFETY: the context is current, the shader is deleted once linked
         unsafe {
             let program = gl.create_program()?;
@@ -3935,6 +4029,13 @@ impl Gles {
         surface.dirty = Some((0, surface.height));
         surface.checked = false;
         surface.picture = None;
+        // what the surfaces inside the fill drew before it is gone
+        let end = addr as u64 + len as u64;
+        for (other, s) in self.surfaces.iter_mut().enumerate() {
+            if other != index && s.dirty.is_some() && s.addr >= addr && s.addr as u64 + s.size() as u64 <= end {
+                (s.dirty, s.picture) = (None, None);
+            }
+        }
         Ok(true)
     }
 
@@ -3947,12 +4048,21 @@ impl Gles {
 
     pub(crate) fn before_fill<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32, _width: u32) -> Result<(), String> {
         let end = addr as u64 + len as u64;
-        let partial: Vec<usize> = (0..self.surfaces.len())
+        let (dropped, partial): (Vec<usize>, Vec<usize>) = (0..self.surfaces.len())
             .filter(|&i| {
                 let s = &self.surfaces[i];
                 s.dirty_overlaps(addr, len) && (s.addr < addr || s.addr as u64 + s.size() as u64 > end)
             })
-            .collect();
+            .partition(|&i| matches!(self.surfaces[i].kind, Kind::Depth(_)) && crate::fast_with(crate::speedup::CLEARS));
+        // a depth buffer a fill runs over in part is another buffer's memory
+        // by now, its depth past the fill went with the frame that drew it:
+        // Smash clears its bottom screen over the top screen's depth
+        for index in dropped {
+            let s = &mut self.surfaces[index];
+            s.shadow.resize(s.size() as usize, 0);
+            memory.read(s.addr, &mut s.shadow);
+            (s.dirty, s.checked, s.picture) = (None, false, None);
+        }
         if !partial.is_empty() {
             self.write_back(memory, partial)?;
         }

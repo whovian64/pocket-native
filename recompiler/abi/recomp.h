@@ -216,20 +216,20 @@ static inline void (mem_write32)(Context *ctx, uint32_t address, uint32_t value)
 #define mem_write32(ctx, address, value) do { uint32_t __v = (value); __builtin_memcpy((ctx)->fastmem + (uint32_t)(address), &__v, 4); } while (0)
 #endif
 
-#define C_EQ (ctx->z)
-#define C_NE (!ctx->z)
-#define C_CS (ctx->c)
-#define C_CC (!ctx->c)
-#define C_MI (ctx->n)
-#define C_PL (!ctx->n)
-#define C_VS (ctx->v)
-#define C_VC (!ctx->v)
-#define C_HI (ctx->c && !ctx->z)
-#define C_LS (!ctx->c || ctx->z)
-#define C_GE (ctx->n == ctx->v)
-#define C_LT (ctx->n != ctx->v)
-#define C_GT (!ctx->z && ctx->n == ctx->v)
-#define C_LE (ctx->z || ctx->n != ctx->v)
+#define C_EQ (F_Z)
+#define C_NE (!F_Z)
+#define C_CS (F_C)
+#define C_CC (!F_C)
+#define C_MI (F_N)
+#define C_PL (!F_N)
+#define C_VS (F_V)
+#define C_VC (!F_V)
+#define C_HI (F_C && !F_Z)
+#define C_LS (!F_C || F_Z)
+#define C_GE (F_N == F_V)
+#define C_LT (F_N != F_V)
+#define C_GT (!F_Z && F_N == F_V)
+#define C_LE (F_Z || F_N != F_V)
 
 static inline uint32_t ror32(uint32_t value, uint32_t amount) {
     amount &= 31;
@@ -539,12 +539,37 @@ static void vfp_vector(Context *ctx, int op, int wide, int d, int n, int m) {
 
 #define RECOMP_DEPTH_LIMIT 2048
 
+/* the flags as a function sees them. built with RECOMP_FLAG_LOCALS they are
+   locals of the functions that use them, stored where code outside reads
+   them and loaded back after a call, otherwise the context's own */
+#ifdef RECOMP_FLAG_LOCALS
+#define F_N f_n
+#define F_Z f_z
+#define F_C f_c
+#define F_V f_v
+#define RECOMP_FLAGS_DECL uint8_t f_n = ctx->n, f_z = ctx->z, f_c = ctx->c, f_v = ctx->v;
+#define RECOMP_FLAGS_OUT() do { ctx->n = f_n; ctx->z = f_z; ctx->c = f_c; ctx->v = f_v; } while (0)
+#define RECOMP_FLAGS_IN() do { f_n = ctx->n; f_z = ctx->z; f_c = ctx->c; f_v = ctx->v; } while (0)
+#else
+#define F_N (ctx->n)
+#define F_Z (ctx->z)
+#define F_C (ctx->c)
+#define F_V (ctx->v)
+#define RECOMP_FLAGS_DECL
+#define RECOMP_FLAGS_OUT() do {} while (0)
+#define RECOMP_FLAGS_IN() do {} while (0)
+#endif
+#define RECOMP_SYNC_OUT() do {} while (0)
+#define RECOMP_SYNC_IN() do {} while (0)
+
 /* a guest call, leaving the caller too when the host has to take over. */
 #define CALL(code) do { \
+    RECOMP_SYNC_OUT(); \
     if (UNLIKELY(++ctx->depth > RECOMP_DEPTH_LIMIT)) { ctx->depth--; ctx->exit = EXIT_UNWIND; return; } \
     code(ctx); \
     ctx->depth--; \
     if (UNLIKELY(ctx->exit)) return; \
+    RECOMP_SYNC_IN(); \
 } while (0)
 
 /* runs whatever code the host has for r15. */
@@ -565,6 +590,7 @@ static inline void recomp_call(Context *ctx) {
 /* a return that may switch to Thumb. */
 #define RETURN_TO(value) do { \
     uint32_t v_ = (value); \
+    RECOMP_SYNC_OUT(); \
     ctx->thumb = v_ & 1; \
     ctx->r[15] = v_ & (ctx->thumb ? ~1u : ~3u); \
     return; \
@@ -581,12 +607,14 @@ static inline void recomp_call(Context *ctx) {
 #define BUDGET(address, count) \
     if (UNLIKELY((ctx->budget -= (count)) < 0)) { \
         ctx->budget += (count); \
+        RECOMP_SYNC_OUT(); \
         ctx->r[15] = (address); \
         ctx->exit = EXIT_BUDGET; \
         return; \
     }
 
 #define SVC(next, number) do { \
+    RECOMP_SYNC_OUT(); \
     ctx->r[15] = (next); \
     ctx->svc = (number); \
     ctx->exit = EXIT_SVC; \
@@ -594,8 +622,10 @@ static inline void recomp_call(Context *ctx) {
 } while (0)
 
 #define INTERPRET(address, opcode) do { \
+    RECOMP_SYNC_OUT(); \
     ctx->host->interpret(ctx, (address), (opcode)); \
     if (UNLIKELY(ctx->exit)) return; \
+    RECOMP_SYNC_IN(); \
 } while (0)
 
 /* a function written by hand to run instead of the one at address, odd for

@@ -206,8 +206,8 @@ struct Voice {
     /// samples left in the buffer being played, and how long it is.
     remaining: u32,
     length: u32,
-    /// input consumed but not yet a whole sample.
-    fraction: f64,
+    /// input consumed but not yet a whole sample, in 2^-32 of one.
+    fraction: u32,
     current_buffer_id: u16,
     last_buffer_id: u16,
     /// set when a new queued buffer starts, reported once.
@@ -237,7 +237,7 @@ impl Default for Voice {
             decoded: Vec::new(),
             remaining: 0,
             length: 0,
-            fraction: 0.0,
+            fraction: 0,
             current_buffer_id: 0,
             last_buffer_id: 0,
             buffer_update: false,
@@ -265,7 +265,7 @@ impl Voice {
         self.length = buffer.length;
         self.remaining = buffer.length - start;
         self.position = start;
-        self.fraction = 0.0;
+        self.fraction = 0;
         self.current_buffer_id = buffer.id;
         self.last_buffer_id = 0;
         self.buffer_update = buffer.from_queue && !buffer.has_played;
@@ -315,11 +315,11 @@ impl Voice {
     fn sample(&self, memory: &mut impl SampleMemory) -> [i16; 2] {
         let at = self.length - self.remaining;
         let x0 = self.input(memory, at);
-        if self.interpolation == Interpolation::None || self.fraction == 0.0 {
+        if self.interpolation == Interpolation::None || self.fraction == 0 {
             return x0;
         }
         let x1 = self.input(memory, at + 1);
-        let between = |a: i16, b: i16| (a as f64 + (b as f64 - a as f64) * self.fraction) as i16;
+        let between = |a: i16, b: i16| (a as i64 + (((b as i64 - a as i64) * self.fraction as i64) >> 32)) as i16;
         [between(x0[0], x1[0]), between(x0[1], x1[1])]
     }
 
@@ -342,6 +342,8 @@ impl Voice {
         }
 
         self.position = self.length - self.remaining;
+        // each output sample consumes rate input samples, counted in 2^-32
+        let step = (self.rate * 4_294_967_296.0) as u64;
         let mut output = 0;
         while output < FRAME_SAMPLES {
             if self.remaining == 0 && !self.dequeue(memory) {
@@ -349,10 +351,9 @@ impl Voice {
             }
             self.frame[output] = self.sample(memory);
             output += 1;
-            // each output sample consumes rate input samples.
-            let input = self.fraction + self.rate;
-            let consumed = (input.floor() as u32).min(self.remaining);
-            self.fraction = (input - consumed as f64).max(0.0);
+            let input = self.fraction as u64 + step;
+            let consumed = ((input >> 32) as u32).min(self.remaining);
+            self.fraction = (input - ((consumed as u64) << 32)).min(u32::MAX as u64) as u32;
             self.remaining -= consumed;
         }
         self.filters.process(&mut self.frame[..output]);

@@ -341,9 +341,10 @@ fn turned(v: [f32; 3], by: [f32; 3]) -> [f32; 3] {
 
 /// parses frame:BUTTON[+BUTTON...] entries separated by commas, where @XxY
 /// touches the bottom screen at X, Y and CUP, CDOWN, CLEFT and CRIGHT push
-/// the circle pad.
+/// the circle pad, into frame order.
 pub fn parse_input_script(spec: &str) -> Vec<(u64, PadState, Option<(u16, u16)>)> {
-    spec.split(',')
+    let mut script: Vec<_> = spec
+        .split(',')
         .filter_map(|entry| {
             let (frame, buttons) = entry.trim().split_once(':')?;
             let mut touch = None;
@@ -378,13 +379,17 @@ pub fn parse_input_script(spec: &str) -> Vec<(u64, PadState, Option<(u16, u16)>)
             })?;
             Some((frame.trim().parse().ok()?, buttons, touch))
         })
-        .collect()
+        .collect();
+    script.sort_by_key(|entry| entry.0);
+    script
 }
 
 /// what a script parsed by parse_input_script holds down on a frame, each
 /// entry for six frames.
 pub fn scripted_input(script: &[(u64, PadState, Option<(u16, u16)>)], frame: u64) -> InputState {
-    let held = || script.iter().filter(|(start, ..)| (*start..*start + 6).contains(&frame));
+    // the script is in frame order, the entries held are those that began
+    // in the last six frames
+    let held = || script[script.partition_point(|(start, ..)| start + 6 <= frame)..script.partition_point(|(start, ..)| *start <= frame)].iter();
     let buttons = held().fold(PadState::empty(), |held, (_, buttons, _)| held | *buttons);
     let touch = held().find_map(|(.., touch)| *touch);
     // the circle pad's directions push it all the way

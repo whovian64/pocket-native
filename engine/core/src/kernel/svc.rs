@@ -384,8 +384,11 @@ fn create_thread(system: &mut System) {
         priority,
         processor_id,
     );
-    // the new thread's TLS page has to exist before it runs.
+    // the new thread's TLS page has to exist before it runs, and its entry
+    // starts empty when an ended thread had it
     system.map_tls_page(id);
+    let tls = system.kernel.thread(id).tls;
+    system.memory.write_bytes(tls, &[0; zakuro_common::memory_map::TLS_ENTRY_SIZE as usize]);
 
     let handle = system.kernel.thread_handle(id);
     log::debug!(

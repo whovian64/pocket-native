@@ -134,6 +134,8 @@ pub struct System {
     /// last presentation, and the presentations since one was made whether
     /// anything changed or not.
     panel: (Option<([Option<[i32; 4]>; 2], Option<(i32, i32)>, bool, bool, usize)>, u32),
+    /// the buffers the screens were given last, as virtual addresses.
+    screen_buffers: Vec<u32>,
     /// the dynamic module loader's state.
     pub cro: cro::CroManager,
     /// errors the title reported through err:f, newest last.
@@ -220,6 +222,7 @@ impl System {
             realtime_gpu: false,
             showing: [None, None],
             panel: (None, 0),
+            screen_buffers: Vec::new(),
             cro: cro::CroManager::default(),
             fatal_errors: Vec::new(),
             undefined_seen: BTreeMap::new(),
@@ -583,19 +586,14 @@ impl System {
 
     /// the earliest tick any blocked thread or armed timer wants to wake at.
     fn next_wakeup(&self) -> Option<u64> {
-        let threads = self
-            .kernel
-            .threads
-            .iter()
-            .filter(|t| t.status.is_blocked())
-            .filter_map(|t| t.wakeup_at);
+        let threads = self.kernel.next_thread_wakeup();
         let timers = self.kernel.objects.iter().filter_map(|(_, object)| {
             match object {
                 kernel::object::KObject::Timer(timer) => timer.fire_at,
                 _ => None,
             }
         });
-        threads.chain(timers).min()
+        threads.into_iter().chain(timers).min()
     }
 
     /// everything that happens between frames, vertical blank, input, clock.
@@ -641,6 +639,7 @@ impl System {
         // both LCDs finish scanning out, in that order.
         services::gsp::signal_interrupt(self, services::gsp::InterruptId::Pdc0);
         services::gsp::signal_interrupt(self, services::gsp::InterruptId::Pdc1);
+        services::cam::frame(self);
 
     }
 
@@ -830,6 +829,14 @@ impl System {
         stride: u32,
         format: u32,
     ) {
+        for buffer in [left, right].map(|buffer| services::gsp::physical_to_virtual(self, buffer)) {
+            if buffer != 0 && !self.screen_buffers.contains(&buffer) {
+                if self.screen_buffers.len() == 8 {
+                    self.screen_buffers.remove(0);
+                }
+                self.screen_buffers.push(buffer);
+            }
+        }
         self.gpu_work(&[], move |gpu, _, _| gpu.set_framebuffer(screen, active, left, right, stride, format));
     }
 
@@ -878,9 +885,21 @@ impl System {
         output_dimensions: u32,
         flags: u32,
     ) {
-        self.gpu_work(&[services::gsp::InterruptId::Ppf], move |gpu, _, guest| {
+        // a picture for a screen is done as far as the title can tell once
+        // the GPU has it: Smash sends the top screen's only when it hears the
+        // bottom screen's went, which from the GPU thread comes once the
+        // frame before is drawn, too late for it
+        let to_screen = self.gpu_queue.is_some() && {
+            let output = services::gsp::physical_to_virtual(self, output);
+            self.screen_buffers.iter().any(|&buffer| output.abs_diff(buffer) < 0x1000)
+        };
+        let interrupts: &[_] = if to_screen { &[] } else { &[services::gsp::InterruptId::Ppf] };
+        self.gpu_work(interrupts, move |gpu, _, guest| {
             gpu.display_transfer(guest, input, output, input_dimensions, output_dimensions, flags);
         });
+        if to_screen {
+            services::gsp::signal_interrupt(self, services::gsp::InterruptId::Ppf);
+        }
     }
 
     pub fn texture_copy(

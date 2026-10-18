@@ -1,6 +1,7 @@
 //! high-level service emulation.
 
 pub mod apt;
+pub mod cam;
 pub mod cecd;
 pub mod err;
 pub mod cfg;
@@ -68,6 +69,7 @@ pub struct ServiceState {
     pub y2r: y2r::Y2rState,
     pub nfc: nfc::NfcState,
     pub cecd: cecd::CecdState,
+    pub cam: cam::CamState,
     /// commands we logged as unimplemented, so the log stays readable and the
     /// diagnostics overlay can show what a title is actually asking for.
     pub unimplemented: BTreeMap<(String, u16), u32>,
@@ -104,6 +106,7 @@ pub fn handle_request(system: &mut System, target: Target) {
         "frd:u" | "frd:a" => frd::handle(system, &buffer, header),
         "nfc:u" | "nfc:m" => nfc::handle(system, &buffer, header),
         "cecd:u" | "cecd:s" => cecd::handle(system, &buffer, header),
+        "cam:u" => cam::handle(system, &buffer, header),
         _ => misc::handle(system, &buffer, header, &name),
     };
 
@@ -309,6 +312,37 @@ mod tests {
             _ => false,
         };
         assert!(signaled);
+        assert!(system.services.unimplemented.is_empty());
+    }
+
+    /// with no cameras a title waiting for a picture gets a black one each
+    /// frame, Bravely Default's fatal error was waiting on no event at all.
+    #[test]
+    fn cameras_see_black() {
+        use zakuro_cpu::Bus;
+        let (mut system, buffer) = system_with_thread();
+        let destination = buffer.address() + 0x400;
+        // SetReceiving(destination, port 1, 16 bytes, unit 16)
+        buffer.set(&mut system.memory, 0, Header::new(0x0007, 4, 2).0);
+        for (index, value) in [(1, destination), (2, 1), (3, 16), (4, 16)] {
+            buffer.set(&mut system.memory, index, value);
+        }
+        handle_request(&mut system, Target::service("cam:u".into(), 0));
+        assert_eq!(buffer.header(&mut system.memory), Header::new(0x0007, 1, 2));
+        let object = system.kernel.resolve(buffer.get(&mut system.memory, 3)).expect("a real event");
+
+        // StartCapture(port 1)
+        buffer.set(&mut system.memory, 0, Header::new(0x0001, 1, 0).0);
+        buffer.set(&mut system.memory, 1, 1);
+        handle_request(&mut system, Target::service("cam:u".into(), 0));
+        cam::frame(&mut system);
+
+        let signaled = match system.kernel.objects.get(object) {
+            Some(crate::kernel::object::KObject::Event(event)) => event.signaled,
+            _ => false,
+        };
+        assert!(signaled);
+        assert_eq!(system.memory.read32(destination), 0x8010_8010);
         assert!(system.services.unimplemented.is_empty());
     }
 

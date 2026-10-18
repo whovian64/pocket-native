@@ -32,6 +32,9 @@ pub struct Kernel {
 
     /// next free slot in the TLS area.
     next_tls_slot: u32,
+    /// the TLS entries of threads that ended, which the next threads get
+    /// before a new slot, as some titles start a thread every few frames.
+    free_tls: Vec<VAddr>,
 
     pub process_id: u32,
     pub program_id: u64,
@@ -68,6 +71,7 @@ impl Kernel {
             live: Vec::new(),
             current_thread: None,
             next_tls_slot: 0,
+            free_tls: Vec::new(),
             process_id: 0x22,
             program_id,
             memory_region,
@@ -86,6 +90,9 @@ impl Kernel {
 
     /// allocates the next TLS page slot for a new thread.
     pub fn allocate_tls(&mut self) -> VAddr {
+        if let Some(addr) = self.free_tls.pop() {
+            return addr;
+        }
         let addr = TLS_AREA_VADDR + self.next_tls_slot * TLS_ENTRY_SIZE;
         self.next_tls_slot += 1;
         addr
@@ -428,10 +435,12 @@ impl Kernel {
 
     /// whether a thread besides the current one could run.
     pub fn others_ready(&self) -> bool {
-        self.threads
-            .iter()
-            .enumerate()
-            .any(|(id, thread)| Some(id as ThreadId) != self.current_thread && thread.is_runnable())
+        self.live.iter().any(|&id| Some(id) != self.current_thread && self.threads[id as usize].is_runnable())
+    }
+
+    /// the earliest tick a blocked thread wants to wake at.
+    pub fn next_thread_wakeup(&self) -> Option<u64> {
+        self.live.iter().map(|&id| &self.threads[id as usize]).filter(|t| t.status.is_blocked()).filter_map(|t| t.wakeup_at).min()
     }
 
     pub fn sleep_current(&mut self, ticks: u64, tick: u64) {
@@ -448,6 +457,9 @@ impl Kernel {
     /// would block whoever waits on it next forever.
     pub fn end_thread(&mut self, id: ThreadId) {
         let thread = &mut self.threads[id as usize];
+        if thread.status != ThreadStatus::Dead {
+            self.free_tls.push(thread.tls);
+        }
         thread.status = ThreadStatus::Dead;
         thread.clear_wait();
         thread.wait_result = None;
