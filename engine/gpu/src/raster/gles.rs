@@ -72,6 +72,8 @@ uniform int flip;
 uniform int input_format;
 uniform int output_format;
 uniform int source_row;
+uniform int source_column;
+uniform int target_row;
 uniform int source_height;
 
 uint expand(uint value, uint bits) {
@@ -107,13 +109,13 @@ void main() {
                 y = input_height - 1 - y;
             }
             int row = source_height - 1 - (source_row + y);
-            vec4 texel = imageLoad(source, ivec2(x, row));
+            vec4 texel = imageLoad(source, ivec2(source_column + x, row));
             sum += quantize(uvec4(round(texel * 255.0)), input_format);
         }
     }
     uint count = uint(scale.x * scale.y);
     uvec4 pixel = quantize((sum + count / 2u) / count, output_format);
-    imageStore(target, ivec2(at.x, output_height - 1 - at.y), vec4(pixel) / 255.0);
+    imageStore(target, ivec2(at.x, output_height - 1 - (target_row + at.y)), vec4(pixel) / 255.0);
 }
 "#;
 
@@ -478,6 +480,36 @@ fn pooled<T: Send + 'static>(worker: &Worker, gl: GlRef, (pool, coming): (&mut V
         pool.extend(names);
     }
     Ok(pool.pop().expect("a name was made"))
+}
+
+thread_local! {
+    /// what the next sync is for, so that its wait says so in the log.
+    static SYNC_WHY: std::cell::Cell<&'static str> = const { std::cell::Cell::new("sync") };
+}
+
+/// names what the next sync on this thread is for.
+pub(crate) fn sync_why(why: &'static str) {
+    SYNC_WHY.with(|cell| cell.set(why));
+}
+
+/// a copy or transfer of a drawing left to the CPU, which reads it back,
+/// in the log the first few times, with the drawing it reads, for telling
+/// which a game needs done on the GPU.
+fn left_to_cpu(what: &str, input: u32, len: u32, details: String, surfaces: &[Surface]) {
+    static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let Some(s) = surfaces.iter().find(|s| s.dirty_overlaps(input, len)) else { return };
+    if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 200 {
+        return;
+    }
+    log::info!(
+        "{what} left to the CPU, {len} bytes from {input:08X}, {details}; the drawing there is {:08X} {}x{} {:?} {} rows {:?}",
+        s.addr,
+        s.width,
+        s.height,
+        s.kind,
+        if s.tiled { "tiled" } else { "linear" },
+        s.dirty
+    );
 }
 
 fn wait_from(name: &'static str) {
@@ -3043,6 +3075,9 @@ pub struct Gles {
     copiers: Option<([glow::Program; 3], glow::VertexArray)>,
     copies: rustc_hash::FxHashMap<DrawnTexture, (glow::Texture, glow::Framebuffer)>,
     copied: rustc_hash::FxHashMap<DrawnTexture, (glow::Texture, u64, u32)>,
+    /// the memory rows a texture over a drawing last had, to upload them
+    /// again only when they change.
+    over_drawing: rustc_hash::FxHashMap<DrawnTexture, Vec<u8>>,
     flushes: u64,
     /// display transfers so far, the clock occlusion culling keeps time by.
     pictures: u64,
@@ -3131,6 +3166,7 @@ impl Gles {
                 copiers: None,
                 copies: Default::default(),
                 copied: Default::default(),
+                over_drawing: Default::default(),
                 flushes: 0,
                 pictures: 0,
                 warned_logic_op: false,
@@ -3255,6 +3291,29 @@ impl Gles {
             .map(|index| (index, (texture.addr - self.surfaces[index].addr) / tile_rows * 8))
     }
 
+    /// a texture that starts with rows nothing drew and goes on into a
+    /// drawing, as Fire Emblem Awakening samples its picture for an effect:
+    /// the drawing and how many rows of memory come before it, which the
+    /// copy takes from memory as they are.
+    fn texture_over_drawing(&self, texture: &DrawnTexture) -> Option<(usize, u32)> {
+        static FROM_MEMORY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *FROM_MEMORY.get_or_init(|| std::env::var_os("ZAKURO_NO_PAST_DRAWING").is_some()) {
+            return None;
+        }
+        let kind = Kind::Color(texture.format);
+        let tile_rows = 8 * texture.width * kind.bytes();
+        let (index, lead) = self.surfaces.iter().enumerate().find_map(|(index, s)| {
+            let offset = s.addr.checked_sub(texture.addr).filter(|&offset| offset > 0 && offset % tile_rows == 0)?;
+            let lead = offset / tile_rows * 8;
+            let fits = s.kind == kind && s.tiled && !s.stale && s.dirty.is_some() && s.width == texture.width && lead < texture.height && texture.height <= lead + s.height;
+            fits.then_some((index, lead))
+        })?;
+        // the rows before it as memory has them, which another drawing there
+        // would not be
+        let lead_bytes = lead / 8 * tile_rows;
+        (!self.surfaces.iter().any(|s| s.dirty_overlaps(texture.addr, lead_bytes))).then_some((index, lead))
+    }
+
     /// the surface a drawn texture is the whole of, as it is, which a draw
     /// into another surface samples in place, upside down, rather than a copy.
     fn whole_surface(&self, texture: &DrawnTexture) -> Option<usize> {
@@ -3272,7 +3331,7 @@ impl Gles {
         if *FROM_MEMORY.get_or_init(|| crate::switch("ZAKURO_NO_GPU_TEXTURES", "drawn textures read from memory")) {
             return false;
         }
-        self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some())
+        self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some()) || self.texture_over_drawing(texture).is_some()
     }
 
     fn copy_objects(&mut self, texture: &DrawnTexture) -> Result<(([glow::Program; 3], glow::VertexArray), (glow::Texture, glow::Framebuffer)), String> {
@@ -3316,7 +3375,12 @@ impl Gles {
         Ok((copiers, (copy, framebuffer)))
     }
 
-    fn copy_texture(&mut self, texture: &DrawnTexture) -> Result<glow::Texture, String> {
+    fn copy_texture<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture) -> Result<glow::Texture, String> {
+        if self.texture_source(texture).is_none() {
+            if let Some((source, lead)) = self.texture_over_drawing(texture) {
+                return self.copy_over_drawing(memory, texture, source, lead);
+            }
+        }
         let (source, row) = self.texture_source(texture).ok_or("the buffer a texture was drawn into is gone")?;
         let (([color, depth, stencil], empty), (copy, framebuffer)) = self.copy_objects(texture)?;
         let surface = &self.surfaces[source];
@@ -3388,7 +3452,198 @@ impl Gles {
         Ok(copy)
     }
 
+    /// the copy of a texture whose first rows are memory and the rest a
+    /// drawing: the drawing's rows drawn in on the GPU as copy_texture does,
+    /// the rows before them uploaded from memory.
+    fn copy_over_drawing<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture, source: usize, lead: u32) -> Result<glow::Texture, String> {
+        let (([color, _, _], empty), (copy, framebuffer)) = self.copy_objects(texture)?;
+        let (width, height) = (texture.width, texture.height);
+        let bpp = texture.format.bytes_per_pixel();
+        let length = (lead * width) as usize * bpp;
+        // the memory rows, compared with what they were rather than hashed,
+        // which a byte at a time took a fifth of the GPU thread's time
+        let unchanged = match (memory.slice(texture.addr, length), self.over_drawing.get(texture)) {
+            (Some(now), Some(before)) => now == &before[..],
+            (None, Some(before)) => {
+                let mut now = vec![0u8; length];
+                memory.read(texture.addr, &mut now);
+                now == *before
+            }
+            (_, None) => false,
+        };
+        let surface = &self.surfaces[source];
+        let stamp = (surface.texture, surface.version, u32::MAX - lead);
+        let drawn_again = self.copied.insert(*texture, stamp) != Some(stamp);
+        if unchanged && !drawn_again {
+            return Ok(copy);
+        }
+        let mut bytes = vec![0u8; length];
+        memory.read(texture.addr, &mut bytes);
+        let image = surface.texture;
+        // the copy's row y is the texture's row y, the drawing's first row
+        // the texture's row lead
+        let base = surface.height as i32 - 1 + lead as i32;
+        let opaque = matches!(texture.format, ColorFormat::Rgb8 | ColorFormat::Rgb565) as i32;
+        let levels = match texture.format {
+            ColorFormat::Rgba8 | ColorFormat::Rgb8 => [255.0; 4],
+            ColorFormat::Rgb565 => [31.0, 63.0, 31.0, 255.0],
+            ColorFormat::Rgb5A1 => [31.0, 31.0, 31.0, 1.0],
+            ColorFormat::Rgba4 => [15.0; 4],
+        };
+        let rows = (!unchanged).then(|| {
+            let mut rows = vec![0u8; (lead * width * 4) as usize];
+            for y in 0..lead {
+                for x in 0..width {
+                    let at = pixel_offset(true, x, y, width, bpp as u32);
+                    let out = ((y * width + x) * 4) as usize;
+                    rows[out..out + 4].copy_from_slice(&texture.format.decode(&bytes[at..at + bpp]));
+                }
+            }
+            rows
+        });
+        self.over_drawing.insert(*texture, bytes);
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            flush_clears(Some(image));
+            disturb();
+            // SAFETY: on the GL thread, the copy is the texture's size, the
+            // drawing's rows are read inside it and the upload covers the
+            // rows before them
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.viewport(0, 0, width as i32, height as i32);
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(0, lead as i32, width as i32, (height - lead) as i32);
+                gl.disable(glow::BLEND);
+                gl.disable(glow::DEPTH_TEST);
+                gl.disable(glow::STENCIL_TEST);
+                gl.disable(glow::CULL_FACE);
+                gl.bind_vertex_array(Some(empty));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_sampler(0, None);
+                gl.bind_texture(glow::TEXTURE_2D, Some(image));
+                gl.color_mask(true, true, true, true);
+                gl.use_program(Some(color));
+                gl.uniform_1_i32(gl.get_uniform_location(color, "source").as_ref(), 0);
+                gl.uniform_1_i32(gl.get_uniform_location(color, "base").as_ref(), base);
+                gl.uniform_1_i32(gl.get_uniform_location(color, "opaque").as_ref(), opaque);
+                gl.uniform_4_f32_slice(gl.get_uniform_location(color, "levels").as_ref(), &levels);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                gl.disable(glow::SCISSOR_TEST);
+                if let Some(rows) = &rows {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(copy));
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, lead as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rows)));
+                }
+            }
+        });
+        Ok(copy)
+    }
+
+    /// a texture copy of whole rows of tiles of a picture the GPU drew and
+    /// has not written to memory, done on the GPU as a display transfer that
+    /// keeps the layout and format: done on the CPU, the picture would have
+    /// to be read back first, which stalls the GPU every time. false leaves
+    /// it to the CPU. widths and skips are in bytes, as the copy gives them.
+    pub(crate) fn texture_copy<M: GpuMemory>(&mut self, memory: &mut M, input: u32, output: u32, size: u32, input_lines: (u32, u32), output_lines: (u32, u32)) -> Result<bool, String> {
+        let done = self.texture_copy_on_gpu(memory, input, output, size, input_lines, output_lines)?;
+        if !done {
+            let details = format!("to {output:08X}, lines of (bytes, skip) {input_lines:?} into {output_lines:?}");
+            left_to_cpu("a texture copy", input, size, details, &self.surfaces);
+        }
+        Ok(done)
+    }
+
+    fn texture_copy_on_gpu<M: GpuMemory>(&mut self, memory: &mut M, input: u32, output: u32, size: u32, input_lines: (u32, u32), output_lines: (u32, u32)) -> Result<bool, String> {
+        static CPU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // Drawn texture copies set to Memory in the menu leaves these to the
+        // CPU too, the way out if one goes wrong
+        let cpu = || std::env::var_os("ZAKURO_NO_GPU_TEXTURES").is_some() || crate::switch("ZAKURO_CPU_TEXTURE_COPIES", "texture copies on the CPU");
+        if *CPU.get_or_init(cpu) {
+            return Ok(false);
+        }
+        if size == 0 {
+            return Ok(false);
+        }
+        let Some((addr, width, column, copy, output_width, format)) = self.surfaces.iter().find_map(|s| {
+            let Kind::Color(format) = s.kind else { return None };
+            if !s.tiled || s.dirty.is_none() {
+                return None;
+            }
+            let bpp = s.kind.bytes();
+            let (tile, tile_row) = (64 * bpp, 8 * s.row_bytes());
+            let offset = input.checked_sub(s.addr)?;
+            if offset + size > s.size() || !offset.is_multiple_of(tile) {
+                return None;
+            }
+            // a line of the input is whole rows of tiles, or the same few
+            // tiles of each row of tiles, part of the picture's width
+            let line = match input_lines {
+                (0, _) | (_, 0) => tile_row,
+                (bytes, skip) if bytes + skip == tile_row => bytes,
+                _ => return None,
+            };
+            let start = offset % tile_row;
+            if !line.is_multiple_of(tile) || !size.is_multiple_of(line) || start + line > tile_row || (line == tile_row && start != 0) {
+                return None;
+            }
+            let (row, column) = (offset / tile_row * 8, start / tile * 8);
+            // the output one run of bytes, a texture just as wide, or lines
+            // as long as the input's with whole tiles between them, the
+            // left of a wider texture's rows of tiles
+            let output_width = match output_lines {
+                (0, _) | (_, 0) => line / bpp / 8,
+                (bytes, skip) if bytes == line && skip.is_multiple_of(tile) => (bytes + skip) / bpp / 8,
+                _ => return None,
+            };
+            Some((s.addr + row / 8 * tile_row, s.width, column, (line / bpp / 8, size / line * 8), output_width, format))
+        }) else {
+            return Ok(false);
+        };
+        let transfer = Transfer {
+            input: addr,
+            output,
+            input_width: width,
+            input_height: copy.1,
+            output_width,
+            output_height: copy.1,
+            copy,
+            scale: (1, 1),
+            flip: false,
+            input_linear: false,
+            output_tiled: true,
+            input_format: format,
+            output_format: format,
+            column,
+        };
+        self.display_transfer_on_gpu(memory, &transfer)
+    }
+
     pub(crate) fn display_transfer<M: GpuMemory>(&mut self, memory: &mut M, transfer: &Transfer) -> Result<bool, String> {
+        let done = self.display_transfer_on_gpu(memory, transfer)?;
+        if !done {
+            let t = transfer;
+            let len = t.input_width * t.input_height * Kind::Color(t.input_format).bytes();
+            let details = format!(
+                "{}x{} {:?} {} to {:08X} {}x{} {:?} {}, copying {:?} scaled {:?}{}",
+                t.input_width,
+                t.input_height,
+                t.input_format,
+                if t.input_linear { "linear" } else { "tiled" },
+                t.output,
+                t.output_width,
+                t.output_height,
+                t.output_format,
+                if t.output_tiled { "tiled" } else { "linear" },
+                t.copy,
+                t.scale,
+                if t.flip { " flipped" } else { "" }
+            );
+            left_to_cpu("a display transfer", t.input, len, details, &self.surfaces);
+        }
+        Ok(done)
+    }
+
+    fn display_transfer_on_gpu<M: GpuMemory>(&mut self, memory: &mut M, transfer: &Transfer) -> Result<bool, String> {
         let _timed = timed(0);
         self.pictures += 1;
         let t = transfer;
@@ -3413,7 +3668,7 @@ impl Gles {
             .max_by_key(|(s, _)| (s.dirty.is_some(), s.height))
             .map(|(s, row)| (s.addr, (s.width, s.height), row))
         else {
-            return Ok(false);
+            return self.transfer_below_memory(memory, t);
         };
         let input_end = addr as u64 + (input_size.0 * input_size.1 * input_kind.bytes()) as u64;
         let output_end = t.output as u64 + (t.output_width * t.output_height * output_kind.bytes()) as u64;
@@ -3455,11 +3710,107 @@ impl Gles {
             int("input_format", format_index(t.input_format));
             int("output_format", format_index(t.output_format));
             int("source_row", row as i32);
+            int("source_column", t.column as i32);
+            int("target_row", 0);
             int("source_height", input_size.1 as i32);
             gl.bind_image_texture(0, Some(source_texture), 0, false, 0, glow::READ_ONLY, glow::RGBA8);
             gl.bind_image_texture(1, Some(target_texture), 0, false, 0, glow::WRITE_ONLY, glow::RGBA8);
             gl.dispatch_compute(t.copy.0.div_ceil(8), t.copy.1.div_ceil(8), 1);
             gl.memory_barrier(glow::ALL_BARRIER_BITS);
+        });
+        let target = &mut self.surfaces[target];
+        target.drew((0, target.height));
+        target.screen_batch += 1;
+        self.end_batch();
+        Ok(true)
+    }
+
+    /// a display transfer whose input starts with rows nothing drew and
+    /// goes on into a drawing to its end, as Fire Emblem Awakening shrinks
+    /// its picture for an effect: the rows from memory and the drawing each
+    /// go through the transfer on the GPU, into their parts of the output,
+    /// rather than the drawing being read back for the CPU.
+    fn transfer_below_memory<M: GpuMemory>(&mut self, memory: &mut M, t: &Transfer) -> Result<bool, String> {
+        if t.flip || t.input_linear || t.column != 0 {
+            return Ok(false);
+        }
+        let (input_kind, output_kind) = (Kind::Color(t.input_format), Kind::Color(t.output_format));
+        let tile_rows = 8 * t.input_width * input_kind.bytes();
+        let rows = t.copy.1 * t.scale.1;
+        let Some((addr, size, lead)) = self.surfaces.iter().find_map(|s| {
+            let offset = s.addr.checked_sub(t.input).filter(|&offset| offset > 0 && offset % tile_rows == 0)?;
+            let lead = offset / tile_rows * 8;
+            let fits = s.kind == input_kind && s.tiled && s.width == t.input_width && s.dirty.is_some() && lead < rows && lead.is_multiple_of(t.scale.1) && rows <= lead + s.height;
+            fits.then_some((s.addr, (s.width, s.height), lead))
+        }) else {
+            return Ok(false);
+        };
+        // the rows before the drawing come from memory as they are, which
+        // another drawing there would make a read back again
+        let lead_bytes = lead / 8 * tile_rows;
+        if self.surfaces.iter().any(|s| s.dirty_overlaps(t.input, lead_bytes)) {
+            return Ok(false);
+        }
+        let input_end = addr as u64 + (size.0 * size.1 * input_kind.bytes()) as u64;
+        let output_end = t.output as u64 + (t.output_width * t.output_height * output_kind.bytes()) as u64;
+        if (t.input as u64) < output_end && (t.output as u64) < input_end {
+            return Ok(false);
+        }
+        self.current()?;
+        let (before, drawing, target) = loop {
+            let before = self.surface_rows(memory, t.input, (t.input_width, lead), input_kind, true, None)?;
+            let drawing = self.surface_rows(memory, addr, size, input_kind, true, None)?;
+            let target = self.surface_rows(memory, t.output, (t.output_width, t.output_height), output_kind, t.output_tiled, None)?;
+            if [before, drawing, target].iter().all(|&i| self.surfaces[i].checked) {
+                break (before, drawing, target);
+            }
+        };
+        let program = match self.transfer {
+            Some(program) => program,
+            None => {
+                let worker = self.worker.clone();
+                let program = worker.run(|| self.compute(TRANSFER_SOURCE))?;
+                self.transfer = Some(program);
+                program
+            }
+        };
+        let gl = self.gl;
+        let t = t.clone();
+        let split = lead / t.scale.1;
+        // each part: its source, the source's height, and the output rows
+        // it fills, from and how many
+        let parts = [
+            (self.surfaces[before].texture, lead, 0, split),
+            (self.surfaces[drawing].texture, size.1, split, t.copy.1 - split),
+        ];
+        let target_texture = self.surfaces[target].texture;
+        self.worker.post(move || unsafe {
+            disturb();
+            // SAFETY: on the GL thread, every texture has immutable rgba8
+            // storage and each dispatch stays inside them
+            gl.use_program(Some(program));
+            let int = |name: &str, value: i32| gl.uniform_1_i32(gl.get_uniform_location(program, name).as_ref(), value);
+            let pair = |name: &str, x: u32, y: u32| gl.uniform_2_i32(gl.get_uniform_location(program, name).as_ref(), x as i32, y as i32);
+            pair("scale", t.scale.0, t.scale.1);
+            int("input_height", t.input_height as i32);
+            int("output_height", t.output_height as i32);
+            int("flip", 0);
+            int("input_format", format_index(t.input_format));
+            int("output_format", format_index(t.output_format));
+            int("source_row", 0);
+            int("source_column", 0);
+            gl.bind_image_texture(1, Some(target_texture), 0, false, 0, glow::WRITE_ONLY, glow::RGBA8);
+            for (source, height, first, count) in parts {
+                if count == 0 {
+                    continue;
+                }
+                pair("size", t.copy.0, count);
+                int("source_height", height as i32);
+                int("target_row", first as i32);
+                gl.bind_image_texture(0, Some(source), 0, false, 0, glow::READ_ONLY, glow::RGBA8);
+                gl.dispatch_compute(t.copy.0.div_ceil(8), count.div_ceil(8), 1);
+                gl.memory_barrier(glow::ALL_BARRIER_BITS);
+            }
         });
         let target = &mut self.surfaces[target];
         target.drew((0, target.height));
@@ -4129,8 +4480,14 @@ impl Gles {
         Ok(true)
     }
 
-    pub(crate) fn prepare_read<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32) -> Result<(), String> {
+    pub(crate) fn prepare_read<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32, texture: Option<&crate::raster::DrawnTexture>) -> Result<(), String> {
         if self.surfaces.iter().any(|s| s.dirty_overlaps(addr, len)) {
+            let details = match texture {
+                Some(t) => format!("a {}x{} {:?} texture", t.width, t.height, t.format),
+                None => "a texture in a format no drawing has".to_owned(),
+            };
+            left_to_cpu("a texture read", addr, len, details, &self.surfaces);
+            sync_why("sync to read");
             self.sync(memory, addr, len)?;
         }
         Ok(())
@@ -4170,6 +4527,7 @@ impl Gles {
                 s.picture = None;
             }
         }
+        sync_why("sync before overwriting");
         self.sync(memory, addr, len)
     }
 
@@ -4224,7 +4582,7 @@ impl Gles {
         }
         if !self.worker.here() {
             let worker = self.worker.clone();
-            wait_from("sync");
+            wait_from(SYNC_WHY.with(|cell| cell.replace("sync")));
             return worker.run(|| self.sync(memory, addr, len));
         }
         let overlapping: Vec<usize> = (0..self.surfaces.len()).filter(|&i| self.surfaces[i].overlaps(addr, len)).collect();
@@ -4684,7 +5042,7 @@ impl Gles {
                             sources[unit] = Some(self.surfaces[index].texture);
                             self.surfaces[index].texture
                         }
-                        None => self.copy_texture(drawn)?,
+                        None => self.copy_texture(memory, drawn)?,
                     },
                     None => self.texture(texture)?,
                 };
@@ -4965,6 +5323,219 @@ impl Gles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// guest memory as one flat block from address zero.
+    struct Flat(Vec<u8>);
+
+    impl GpuMemory for Flat {
+        fn read(&mut self, addr: u32, out: &mut [u8]) {
+            out.copy_from_slice(&self.0[addr as usize..addr as usize + out.len()]);
+        }
+
+        fn write(&mut self, addr: u32, data: &[u8]) {
+            self.0[addr as usize..addr as usize + data.len()].copy_from_slice(data);
+        }
+    }
+
+    /// the copy of a drawn texture as the GPU holds it, RGBA rows from the
+    /// texture's first.
+    fn read_copy(gles: &mut Gles, texture: &DrawnTexture) -> Vec<u8> {
+        let (_, framebuffer) = gles.copies[texture];
+        let (gl, width, height) = (gles.gl, texture.width, texture.height);
+        let worker = gles.worker.clone();
+        worker.run(move || unsafe {
+            let mut data = vec![0u8; (width * height * 4) as usize];
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+            gl.read_pixels(0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut data)));
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            data
+        })
+    }
+
+    #[test]
+    fn a_drawn_texture_that_starts_in_memory_is_copied_on_the_gpu() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let format = ColorFormat::Rgba8;
+        let (base, width, lead, drawn) = (0x1000u32, 32u32, 16u32, 32u32);
+        let mut memory = Flat(vec![0; 0x20000]);
+        let bytes = width * (lead + drawn) * 4;
+        for (i, byte) in memory.0[base as usize..(base + bytes) as usize].iter_mut().enumerate() {
+            *byte = (i * 29 + i / 3) as u8;
+        }
+        let decoded = |memory: &Flat, addr: u32, rows: u32| {
+            let mut out = vec![0u8; (width * rows * 4) as usize];
+            for y in 0..rows {
+                for x in 0..width {
+                    let at = (addr + pixel_offset(true, x, y, width, 4) as u32) as usize;
+                    let o = ((y * width + x) * 4) as usize;
+                    out[o..o + 4].copy_from_slice(&format.decode(&memory.0[at..at + 4]));
+                }
+            }
+            out
+        };
+        let drawing = base + lead / 8 * 8 * width * 4;
+        let index = gles.surface_rows(&mut memory, drawing, (width, drawn), Kind::Color(format), true, None).unwrap();
+        gles.surfaces[index].drew((0, drawn));
+        // the case that already worked, a texture the drawing is the whole of
+        // but for its copy, to check which way up the copy is
+        let inside = DrawnTexture { addr: drawing, width, height: drawn, format };
+        assert!(gles.holds(&inside));
+        gles.copy_texture(&mut memory, &inside).unwrap();
+        assert_eq!(read_copy(&mut gles, &inside), decoded(&memory, drawing, drawn));
+        // memory's rows first, then the drawing's
+        let over = DrawnTexture { addr: base, width, height: lead + drawn, format };
+        assert!(gles.holds(&over));
+        gles.copy_texture(&mut memory, &over).unwrap();
+        assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
+        // again unchanged, then with memory's rows changed, which the copy
+        // takes up
+        gles.copy_texture(&mut memory, &over).unwrap();
+        assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
+        for byte in &mut memory.0[base as usize..base as usize + 64] {
+            *byte ^= 0x5A;
+        }
+        gles.copy_texture(&mut memory, &over).unwrap();
+        assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
+        // the drawing stayed on the GPU
+        assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
+    }
+
+    #[test]
+    fn a_shrinking_transfer_from_memory_into_a_drawing_matches_the_console() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let format = ColorFormat::Rgba8;
+        let (input, output, width, lead, drawn) = (0x1000u32, 0x10000u32, 32u32, 16u32, 32u32);
+        let mut memory = Flat(vec![0; 0x20000]);
+        let bytes = width * (lead + drawn) * 4;
+        for (i, byte) in memory.0[input as usize..(input + bytes) as usize].iter_mut().enumerate() {
+            *byte = (i * 37 + i / 5) as u8;
+        }
+        // the drawing starts two rows of tiles in, as Fire Emblem Awakening's
+        let drawing = input + lead / 8 * 8 * width * 4;
+        let index = gles.surface_rows(&mut memory, drawing, (width, drawn), Kind::Color(format), true, None).unwrap();
+        gles.surfaces[index].drew((0, drawn));
+        let (out_width, out_height) = (width / 2, (lead + drawn) / 2);
+        let transfer = Transfer {
+            input,
+            output,
+            input_width: width,
+            input_height: lead + drawn,
+            output_width: out_width,
+            output_height: out_height,
+            copy: (out_width, out_height),
+            scale: (2, 2),
+            flip: false,
+            input_linear: false,
+            output_tiled: true,
+            input_format: format,
+            output_format: format,
+            column: 0,
+        };
+        let mut expected = vec![0u8; (out_width * out_height * 4) as usize];
+        for y in 0..out_height {
+            for x in 0..out_width {
+                let mut sum = [0u32; 4];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let at = (input + pixel_offset(true, x * 2 + dx, y * 2 + dy, width, 4) as u32) as usize;
+                    let pixel = format.decode(&memory.0[at..at + 4]);
+                    for c in 0..4 {
+                        sum[c] += pixel[c] as u32;
+                    }
+                }
+                let at = pixel_offset(true, x, y, out_width, 4);
+                format.encode(sum.map(|c| ((c + 2) / 4) as u8), &mut expected[at..at + 4]);
+            }
+        }
+        assert!(gles.display_transfer(&mut memory, &transfer).unwrap());
+        // the drawing stayed on the GPU, nothing read it back
+        assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
+        gles.flush(&mut memory).unwrap();
+        assert_eq!(&memory.0[output as usize..output as usize + expected.len()], &expected[..]);
+    }
+
+    #[test]
+    fn a_texture_copy_of_a_drawing_stays_on_the_gpu_and_copies_it_exactly() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let (source, target, width, height) = (0x1000u32, 0x8000u32, 32u32, 32u32);
+        for format in [ColorFormat::Rgba8, ColorFormat::Rgb565] {
+            let size = width * height * format.bytes_per_pixel() as u32;
+            let mut memory = Flat(vec![0; 0x20000]);
+            for (i, byte) in memory.0[source as usize..(source + size) as usize].iter_mut().enumerate() {
+                *byte = (i * 37 + i / 5) as u8;
+            }
+            let index = gles.surface_rows(&mut memory, source, (width, height), Kind::Color(format), true, None).unwrap();
+            gles.surfaces[index].drew((0, height));
+            // the second and third rows of tiles, as a game copies part of one
+            let tile_rows = 8 * width * format.bytes_per_pixel() as u32;
+            assert!(gles.texture_copy(&mut memory, source + tile_rows, target, 2 * tile_rows, (0, 0), (0, 0)).unwrap());
+            gles.flush(&mut memory).unwrap();
+            let copied = &memory.0[target as usize..(target + 2 * tile_rows) as usize];
+            let original = &memory.0[(source + tile_rows) as usize..(source + 3 * tile_rows) as usize];
+            assert_eq!(copied, original, "{format:?}");
+            // part of the width, the way Fire Emblem Awakening copies a
+            // strip of its picture for an effect: lines of a few tiles, the
+            // rest of each row of tiles skipped, as the CPU would copy it
+            let tile = 64 * format.bytes_per_pixel() as u32;
+            for (first_tile, tiles, rows_of_tiles) in [(0u32, 2u32, 3u32), (1, 1, 2), (2, 2, 1)] {
+                let start = source + tile_rows + first_tile * tile;
+                let (line, skip) = (tiles * tile, tile_rows - tiles * tile);
+                let size = line * rows_of_tiles;
+                let mut expected = Vec::new();
+                for i in 0..rows_of_tiles {
+                    let at = (start + i * (line + skip)) as usize;
+                    expected.extend_from_slice(&memory.0[at..at + line as usize]);
+                }
+                let target = 0xC000;
+                // drawn again, the last check wrote it back
+                let index = gles.surfaces.iter().position(|s| s.addr == source && s.kind == Kind::Color(format)).unwrap();
+                gles.surfaces[index].drew((0, height));
+                assert!(gles.texture_copy(&mut memory, start, target, size, (line, skip), (line, 0)).unwrap(), "{format:?} {first_tile} {tiles}");
+                gles.flush(&mut memory).unwrap();
+                assert_eq!(&memory.0[target as usize..(target + size) as usize], &expected[..], "{format:?} {first_tile} {tiles}");
+            }
+            // into the same layout, gaps and all, as its battles save the
+            // picture: the columns between the lines keep what was there
+            {
+                let index = gles.surfaces.iter().position(|s| s.addr == source && s.kind == Kind::Color(format)).unwrap();
+                gles.surfaces[index].drew((0, height));
+                let (line, skip) = (tile_rows - tile, tile);
+                let size = line * 2;
+                let target = 0x14000usize;
+                for (i, byte) in memory.0[target..target + 2 * tile_rows as usize].iter_mut().enumerate() {
+                    *byte = (i * 11) as u8;
+                }
+                let mut expected = memory.0[target..target + 2 * tile_rows as usize].to_vec();
+                for i in 0..2usize {
+                    let from = (source + tile_rows) as usize + i * tile_rows as usize;
+                    let to = i * tile_rows as usize;
+                    expected[to..to + line as usize].copy_from_slice(&memory.0[from..from + line as usize]);
+                }
+                assert!(gles.texture_copy(&mut memory, source + tile_rows, target as u32, size, (line, skip), (line, skip)).unwrap(), "{format:?} strided");
+                gles.flush(&mut memory).unwrap();
+                assert_eq!(&memory.0[target..target + 2 * tile_rows as usize], &expected[..], "{format:?} strided");
+            }
+            // not starting on a tile is the CPU's
+            assert!(!gles.texture_copy(&mut memory, source + 16, target, tile_rows, (0, 0), (0, 0)).unwrap());
+        }
+    }
 
     #[test]
     fn stored_rows_match_encoding_each_pixel() {

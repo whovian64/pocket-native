@@ -396,7 +396,15 @@ fn convert(system: &mut System) {
         at += rows * width * bytes;
     }
     let end = output.address.wrapping_add((pixels * bytes) as u32 / output.transfer.max(1) as u32 * (output.transfer as u32 + output.gap as u32));
-    system.sync_gpu(output.address, end.wrapping_sub(output.address));
+    let len = end.wrapping_sub(output.address);
+    if output.gap == 0 {
+        // the conversion writes every byte of the range, so what the GPU
+        // drew there is dropped rather than read back first: reading it back
+        // stalls the GPU, every video frame
+        system.overwrite_gpu(output.address, len, "y2r");
+    } else {
+        system.sync_gpu_from(output.address, len, "y2r");
+    }
     scatter(system, output, &out);
 }
 
