@@ -147,6 +147,11 @@ pub struct System {
     /// the last few instruction addresses, so a fault can say how it got there.
     history: [u32; HISTORY_LENGTH],
     history_index: usize,
+    /// where and why the library last handed back, and in which thread, for
+    /// telling why a place it has no code for was reached.
+    library_left: (u32, &'static str, Option<ThreadId>),
+    /// the new hints logged so far, a few hundred tell enough.
+    hints_logged: u32,
     /// frames completed since boot.
     pub frames: u64,
     /// the console's clock at boot, in milliseconds since 1900.
@@ -229,6 +234,8 @@ impl System {
             prefetch_aborts: BTreeMap::new(),
             history: [0; HISTORY_LENGTH],
             history_index: 0,
+            library_left: (0, "", None),
+            hints_logged: 0,
             frames: 0,
             boot_clock,
             next_frame_boundary: CYCLES_PER_FRAME,
@@ -419,8 +426,15 @@ impl System {
                 interpreted_at(pc | self.cpu.cpsr.thumb as u32);
                 let thumb = self.cpu.cpsr.thumb;
                 if let (Some(hints), Some(library)) = (&mut self.hints, &self.recompiled) {
-                    if !library.has_code(pc | thumb as u32) {
-                        hints.interpreted(pc, thumb);
+                    if !library.has_code(pc | thumb as u32) && hints.interpreted(pc, thumb) && self.hints_logged < 300 {
+                        self.hints_logged += 1;
+                        let before = self.history[(self.history_index + HISTORY_LENGTH - 2) % HISTORY_LENGTH];
+                        let (left, why, thread) = self.library_left;
+                        log::info!(
+                            "new hint {:08X}: the step before was at {before:08X}, the library last stopped at {left:08X} ({why}) in thread {thread:?}, now thread {:?}",
+                            pc | thumb as u32,
+                            self.kernel.current_thread
+                        );
                     }
                 }
                 self.cpu.step(&mut self.memory)
@@ -501,6 +515,13 @@ impl System {
             (ran, stop) = library.run(&mut self.cpu, &mut self.memory, budget.max(OVERRUN_BUDGET));
         }
         self.recompiled_instructions += ran;
+        let why = match stop {
+            recompiled::Stop::Svc(_) => "an svc",
+            recompiled::Stop::Exit(_) => "an instruction it interpreted stopped",
+            recompiled::Stop::Left if ran == 0 => "no budget for a block",
+            recompiled::Stop::Left => "out of budget or out of its code",
+        };
+        self.library_left = (self.cpu.regs[15] | self.cpu.cpsr.thumb as u32, why, self.kernel.current_thread);
         if ran == 0 && matches!(stop, recompiled::Stop::Left) {
             return None;
         }
@@ -857,22 +878,37 @@ impl System {
     /// makes guest memory hold what the host GPU drew over a range, before
     /// something other than a draw reads or writes it.
     pub fn sync_gpu(&mut self, addr: u32, len: u32) {
+        self.sync_gpu_from(addr, len, "other");
+    }
+
+    /// sync_gpu, counted by what asked for it, for the log: a sync that has
+    /// to read a drawing back stalls the GPU.
+    pub fn sync_gpu_from(&mut self, addr: u32, len: u32, from: &'static str) {
+        count_sync(from);
         self.wait_gpu();
         let linear_base = self.kernel.linear_base;
         let mut guest = GuestMemory {
             linear_base,
             memory: &mut self.memory,
         };
-        self.gpu.sync_memory(&mut guest, addr, len);
+        self.gpu.sync_memory_for(&mut guest, addr, len, from);
+    }
+
+    /// lets the GPU know a range is about to be written whole: what it drew
+    /// there is dropped rather than read back.
+    pub fn overwrite_gpu(&mut self, addr: u32, len: u32, from: &'static str) {
+        count_sync(from);
+        self.wait_gpu();
+        let linear_base = self.kernel.linear_base;
+        let mut guest = GuestMemory { linear_base, memory: &mut self.memory };
+        self.gpu.before_overwrite(&mut guest, addr, len);
     }
 
     /// copies guest memory once the GPU finished what it was given, raising
     /// the DMA interrupt.
     pub fn dma(&mut self, source: u32, dest: u32, size: u32) {
-        self.sync_gpu(source, size);
-        let linear_base = self.kernel.linear_base;
-        let mut guest = GuestMemory { linear_base, memory: &mut self.memory };
-        self.gpu.before_overwrite(&mut guest, dest, size);
+        self.sync_gpu_from(source, size, "dma");
+        self.overwrite_gpu(dest, size, "dma into");
         let mut data = vec![0u8; size as usize];
         self.memory.read_bytes(source, &mut data);
         self.memory.write_bytes(dest, &data);
@@ -1221,7 +1257,7 @@ fn screen_pixels(gpu: &mut Gpu, guest: &mut GuestMemory, screen: zakuro_common::
 
     let base = guest.translate(address);
     let source_len = (stride * width) as usize;
-    gpu.sync_memory(guest, base, source_len as u32);
+    gpu.sync_memory_for(guest, base, source_len as u32, "sync to show a screen");
     let mut source = vec![0u8; source_len];
     guest.read(base, &mut source);
 
@@ -1255,6 +1291,26 @@ type GpuJob = Box<dyn FnOnce() + Send>;
 
 /// microseconds the CPU's thread spent waiting on the GPU thread.
 pub static GPU_WAITED: AtomicU64 = AtomicU64::new(0);
+
+/// how many times each thing asked for the GPU's drawings to be in memory,
+/// logged every few hundred, for telling what stalls the GPU in a game.
+fn count_sync(from: &'static str) {
+    static COUNTS: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
+    let mut counts = COUNTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let total = match counts.iter_mut().find(|(name, _)| *name == from) {
+        Some((_, count)) => {
+            *count += 1;
+            *count
+        }
+        None => {
+            counts.push((from, 1));
+            1
+        }
+    };
+    if total == 1 || total.is_multiple_of(500) {
+        log::info!("gpu syncs so far: {counts:?}");
+    }
+}
 
 /// the GPU thread's queue, what it has not finished and the interrupts of
 /// what it did.

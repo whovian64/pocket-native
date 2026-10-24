@@ -18,7 +18,7 @@
 //! ```
 
 pub use recomp_abi as abi;
-mod arm;
+pub mod arm;
 pub mod build;
 pub mod codegen;
 pub mod compile;
@@ -28,7 +28,7 @@ pub mod image;
 pub mod overrides;
 pub mod port;
 pub mod rom;
-mod thumb;
+pub mod thumb;
 #[cfg(feature = "verify")]
 pub mod verify;
 

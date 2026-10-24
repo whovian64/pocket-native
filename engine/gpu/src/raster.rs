@@ -2070,7 +2070,8 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
                 continue;
             }
             if let Some((addr, len)) = texture_range(registers, memory, unit) {
-                if let Err(error) = hardware.prepare_read(memory, addr, len) {
+                let texture = drawn_texture(registers, memory, unit);
+                if let Err(error) = hardware.prepare_read(memory, addr, len, texture.as_ref()) {
                     log::error!("the GPU could not write back a buffer, {error}");
                 }
             }

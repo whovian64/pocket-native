@@ -17,6 +17,26 @@ pub enum Layout {
     BigBeside,
 }
 
+/// the screens stretched over the display they are on rather than kept in
+/// shape, with a screen on each display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Stretch {
+    #[default]
+    Off,
+    Top,
+    Bottom,
+    Both,
+}
+
+impl Stretch {
+    pub const ALL: [Stretch; 4] = [Stretch::Off, Stretch::Top, Stretch::Bottom, Stretch::Both];
+
+    /// whether the top screen, or else the bottom one, is stretched.
+    pub fn stretches(self, top: bool) -> bool {
+        matches!((self, top), (Stretch::Both, _) | (Stretch::Top, true) | (Stretch::Bottom, false))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Power {
     Saver,
@@ -65,6 +85,9 @@ pub struct Settings {
     /// the bottom screen in the top one's place.
     pub swapped: bool,
     pub smooth: bool,
+    /// with a screen on each display, which of them fill their displays
+    /// rather than keep their shape with bars.
+    pub stretched: Stretch,
     /// pictures a second the panel is filled up to with ones halfway
     /// between each two of the top screen's, 30 or 60, 0 for none.
     pub interpolate_to: u32,
@@ -94,6 +117,7 @@ impl Default for Settings {
             layout: Layout::BigTop,
             swapped: false,
             smooth: true,
+            stretched: Stretch::Off,
             interpolate_to: 0,
             show_fps: false,
             show_clock: true,

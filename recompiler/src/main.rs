@@ -242,6 +242,7 @@ fn analyze(path: &str) {
     let module_count = programs.len() - 1;
     let start = std::time::Instant::now();
     let mut analyses: Vec<Analysis> = programs.iter().map(|(_, program)| discover::analyze(program)).collect();
+    let missed = sort_hints(&build::hints(title.program_id()), &programs[0].1, &analyses[0]);
     let (labels, functions) = build::apply_hints(&title, &mut programs, &mut analyses);
     let elapsed = start.elapsed();
 
@@ -278,6 +279,14 @@ fn analyze(path: &str) {
     println!("analysis    {elapsed:.2?}");
     println!();
 
+    if !missed.is_empty() {
+        println!("what the analysis missed of where Zakuro interpreted, and an example of each");
+        for (kind, (count, example)) in &missed {
+            println!("  {count:>7}  {kind:<58} 0x{example:08X}");
+        }
+        println!();
+    }
+
     println!("largest unreached runs");
     let mut gaps: Vec<_> = programs
         .iter()
@@ -290,6 +299,92 @@ fn analyze(path: &str) {
     for (name, start, length) in gaps.into_iter().take(10) {
         println!("  {name:<28} 0x{start:08X}  {length} bytes");
     }
+}
+
+/// sorts the places Zakuro interpreted in the executable by what the
+/// analysis, without them, made of each and of what comes before it, for
+/// telling what discovery misses in a title. each kind with its count and
+/// one place, odd for Thumb.
+fn sort_hints(hints: &[u32], program: &Program, analysis: &Analysis) -> std::collections::BTreeMap<String, (usize, u32)> {
+    use recomp3ds::arm::{self, Flow};
+    let text = &program.text;
+    let mut owner = std::collections::HashMap::new();
+    for function in analysis.functions.values() {
+        for &address in &function.instructions {
+            owner.entry(address).or_insert(function);
+        }
+    }
+    let pointed: std::collections::HashSet<u32> =
+        program.seeds.iter().filter(|(_, source)| *source == Source::Pointer).map(|&(value, _)| value).collect();
+    let flow_name = |flow: Flow| match flow {
+        Flow::Branch { link: true, .. } | Flow::CallOtherMode { .. } => "a call",
+        Flow::Branch { link: false, .. } => "a branch",
+        Flow::BranchRegister { link: true, .. } => "a call through a register",
+        Flow::BranchRegister { link: false, .. } => "bx to a register",
+        Flow::Return => "a return",
+        Flow::JumpTable | Flow::AddressTable { .. } => "a switch",
+        Flow::IndirectJump => "another jump to a register",
+        Flow::LoadPcLiteral { .. } => "ldr pc from a literal",
+        Flow::LiteralLoad { .. } | Flow::Other => "an ordinary instruction",
+        Flow::Svc => "an svc",
+        Flow::Undefined => "something that is not code",
+    };
+    let before = |address: u32, thumb: bool| -> &'static str {
+        if thumb {
+            let Some(half) = address.checked_sub(2).and_then(|at| text.read16(at)) else { return "nothing" };
+            // the second half of a bl pair, the call starts two before
+            if half >> 11 == 0b11111 || half >> 11 == 0b11101 {
+                return "a call";
+            }
+            flow_name(recomp3ds::thumb::decode(half, text.read16(address), address - 2).0.flow)
+        } else {
+            let Some(word) = address.checked_sub(4).and_then(|at| text.read32(at)) else { return "nothing" };
+            // mov lr, pc before the instruction before, the old way of
+            // calling through a register
+            let linked = address.checked_sub(8).and_then(|at| text.read32(at)).is_some_and(|w| w & 0x0FFF_FFFF == 0x01A0_E00F);
+            if linked {
+                return "mov lr, pc and a jump, a call";
+            }
+            flow_name(arm::decode(word, address - 4).flow)
+        }
+    };
+    let mut kinds = std::collections::BTreeMap::new();
+    for &hint in hints {
+        let (address, thumb) = (hint & !1, hint & 1 != 0);
+        if !text.contains(address) {
+            continue;
+        }
+        let mode = if thumb { Mode::Thumb } else { Mode::Arm };
+        let kind = match owner.get(&address) {
+            Some(function) if function.mode == mode => {
+                if function.labels.contains(&address) {
+                    "already a way in, run anyway (another reason)".to_owned()
+                } else {
+                    format!("inside a function, after {}", before(address, thumb))
+                }
+            }
+            Some(_) => format!("decoded as {} code, run as the other", if thumb { "ARM" } else { "Thumb" }),
+            None => {
+                let byte = analysis.map[(address - text.base) as usize];
+                let what = match byte {
+                    Byte::Literal => "taken for data",
+                    _ => "unreached",
+                };
+                let starts = if thumb {
+                    // push {..., lr}
+                    if text.read16(address).is_some_and(|half| half & 0xFF00 == 0xB500) { ", push lr" } else { "" }
+                } else if text.read32(address).is_some_and(|word| word & 0xFFFF_4000 == 0xE92D_4000) {
+                    ", push lr"
+                } else {
+                    ""
+                };
+                let pointer = if pointed.contains(&hint) { ", a pointer in data" } else { "" };
+                format!("{} {what}{starts}{pointer}, after {}", if thumb { "Thumb" } else { "ARM" }, before(address, thumb))
+            }
+        };
+        kinds.entry(kind).or_insert((0, hint)).0 += 1;
+    }
+    kinds
 }
 
 /// the numbers the report shows for a program, or for several added up.

@@ -5,7 +5,8 @@ version: there is no app to install and no game included, a PC rebuilds
 each game first (drop it on `Build a game`).
 
 Nintendo 3DS games, recompiled, running natively on cheap
-Linux handhelds. Made for the R36S and its Mali-G31 GPU under ArkOS.
+Linux handhelds. Made for the R36S and its Mali-G31 GPU under ArkOS, and for
+the Anbernic RG DS under Android, see [below](#android-the-anbernic-rg-ds).
 
 Pocket Native is a fork of [Zakuro](https://github.com/fearkov/zakuro) and
 [3dsrecomp](https://github.com/fearkov/3dsrecomp) by fearkov. Zakuro is a
@@ -24,8 +25,40 @@ JIT, and it does the heavy lifting here. This fork adds:
 - an updater that brings the kit up to the latest release and builds
   your games again with it
 
-The Android app and the Vulkan renderer of upstream Zakuro are not part of
-this fork.
+The Vulkan renderer of upstream Zakuro is not part of this fork.
+
+## Android: the Anbernic RG DS
+
+This branch also runs on the Anbernic RG DS under GammaOS Next (Android 14),
+built from the same engine as the ArkOS build. Each game becomes an app of
+its own, named and iconed from the game:
+
+- both screens: the top on the top panel, the bottom on the second display
+  with touch going straight to the 3DS, or both on one when GammaOS's
+  DualStack joins the panels
+- each screen can fill its panel or keep the 3DS's shape
+- sound through AAudio that stays in sync with the picture
+- the game on the SD card, and the app movable to an SD card adopted as
+  internal storage
+- shaders kept between runs, so effects stutter only the first time
+
+A PC builds the apps in a container and puts them on the handheld over adb,
+with USB debugging on:
+
+```bash
+scripts/android/build.sh path/to/game.3ds --install
+scripts/android/install.sh "fire emblem" --log    # its log, and hints for the next build
+```
+
+Games are named by any part of their name, no title ids. See
+[docs/android.md](docs/android.md) for the setup, the switches a game takes
+from `data/env.txt`, and the tools for finding what holds a game back
+(`profile.sh`, `analyze.sh`).
+
+Tested on the RG DS: Pokémon Alpha Sapphire and X, Fire Emblem Awakening
+(30 fps in battle, cutscenes still below full speed) and Monster Hunter 4
+Ultimate (27 fps in the village with Exact event timing on, alongside its
+profile's Real-time GPU).
 
 ## Games
 

@@ -1,0 +1,42 @@
+# the Android build environment: Ubuntu with the host's compiler for the
+# recompiler, the Android NDK for the handheld's side, and Rust with the
+# aarch64-linux-android target. Separate from the ArkOS one, so that a build
+# for a Linux handheld never downloads the NDK.
+FROM docker.io/library/ubuntu:22.04
+ARG NDK_VERSION=r27c
+# Android 11, the oldest whose libc has memfd_create, which fastmem needs;
+# GammaOS Next on the RG DS is Android 14
+ARG ANDROID_API=30
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        gcc g++ libc6-dev make pkg-config ca-certificates curl unzip zip python3 python3-pip openjdk-17-jdk-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --no-cache-dir pycryptodomex
+RUN curl -sSfL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o /tmp/ndk.zip \
+    && unzip -q /tmp/ndk.zip -d /opt \
+    && mv "/opt/android-ndk-${NDK_VERSION}" /opt/ndk \
+    && rm /tmp/ndk.zip
+# the SDK's build tools and the platform an APK is linked against, for
+# packaging the app without Gradle
+ARG CMDLINE_TOOLS=11076708
+ARG SDK_PLATFORM=34
+ARG BUILD_TOOLS=34.0.0
+RUN curl -sSfL "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS}_latest.zip" -o /tmp/tools.zip \
+    && mkdir -p /opt/sdk/cmdline-tools \
+    && unzip -q /tmp/tools.zip -d /opt/sdk/cmdline-tools \
+    && mv /opt/sdk/cmdline-tools/cmdline-tools /opt/sdk/cmdline-tools/latest \
+    && rm /tmp/tools.zip \
+    && yes | /opt/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/sdk --licenses >/dev/null \
+    && /opt/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/sdk "build-tools;${BUILD_TOOLS}" "platforms;android-${SDK_PLATFORM}" >/dev/null \
+    && chmod -R a+rX /opt/sdk
+ENV ANDROID_HOME=/opt/sdk \
+    BUILD_TOOLS_BIN=/opt/sdk/build-tools/${BUILD_TOOLS} \
+    ANDROID_JAR=/opt/sdk/platforms/android-${SDK_PLATFORM}/android.jar
+ENV RUSTUP_HOME=/opt/rustup PATH=/opt/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | CARGO_HOME=/opt/cargo sh -s -- -y --profile minimal --component rustfmt,clippy --no-modify-path --target aarch64-linux-android \
+    && chmod -R a+rX /opt/rustup /opt/cargo
+ENV ANDROID_NDK_HOME=/opt/ndk \
+    ANDROID_API=${ANDROID_API} \
+    NDK_BIN=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
+ENV CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_BIN}/aarch64-linux-android${ANDROID_API}-clang \
+    CC_aarch64_linux_android=${NDK_BIN}/aarch64-linux-android${ANDROID_API}-clang \
+    AR_aarch64_linux_android=${NDK_BIN}/llvm-ar

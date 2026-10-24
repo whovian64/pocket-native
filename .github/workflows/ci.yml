@@ -14,3 +14,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       - run: cargo test --release --locked --workspace --features zakuro-gpu/gles
+
+  # cross-builds the handheld program for Android (the RG DS under GammaOS
+  # Next) with the runner's NDK, so the Android port keeps building
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add aarch64-linux-android
+      - name: build pocket-native for aarch64-linux-android
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android30-clang"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android30-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          cargo build --release --locked --target aarch64-linux-android -p pocket-native

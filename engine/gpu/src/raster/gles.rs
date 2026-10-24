@@ -72,6 +72,8 @@ uniform int flip;
 uniform int input_format;
 uniform int output_format;
 uniform int source_row;
+uniform int source_column;
+uniform int target_row;
 uniform int source_height;
 
 uint expand(uint value, uint bits) {
@@ -107,13 +109,13 @@ void main() {
                 y = input_height - 1 - y;
             }
             int row = source_height - 1 - (source_row + y);
-            vec4 texel = imageLoad(source, ivec2(x, row));
+            vec4 texel = imageLoad(source, ivec2(source_column + x, row));
             sum += quantize(uvec4(round(texel * 255.0)), input_format);
         }
     }
     uint count = uint(scale.x * scale.y);
     uvec4 pixel = quantize((sum + count / 2u) / count, output_format);
-    imageStore(target, ivec2(at.x, output_height - 1 - at.y), vec4(pixel) / 255.0);
+    imageStore(target, ivec2(at.x, output_height - 1 - (target_row + at.y)), vec4(pixel) / 255.0);
 }
 "#;
 
@@ -478,6 +480,36 @@ fn pooled<T: Send + 'static>(worker: &Worker, gl: GlRef, (pool, coming): (&mut V
         pool.extend(names);
     }
     Ok(pool.pop().expect("a name was made"))
+}
+
+thread_local! {
+    /// what the next sync is for, so that its wait says so in the log.
+    static SYNC_WHY: std::cell::Cell<&'static str> = const { std::cell::Cell::new("sync") };
+}
+
+/// names what the next sync on this thread is for.
+pub(crate) fn sync_why(why: &'static str) {
+    SYNC_WHY.with(|cell| cell.set(why));
+}
+
+/// a copy or transfer of a drawing left to the CPU, which reads it back,
+/// in the log the first few times, with the drawing it reads, for telling
+/// which a game needs done on the GPU.
+fn left_to_cpu(what: &str, input: u32, len: u32, details: String, surfaces: &[Surface]) {
+    static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let Some(s) = surfaces.iter().find(|s| s.dirty_overlaps(input, len)) else { return };
+    if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 200 {
+        return;
+    }
+    log::info!(
+        "{what} left to the CPU, {len} bytes from {input:08X}, {details}; the drawing there is {:08X} {}x{} {:?} {} rows {:?}",
+        s.addr,
+        s.width,
+        s.height,
+        s.kind,
+        if s.tiled { "tiled" } else { "linear" },
+        s.dirty
+    );
 }
 
 fn wait_from(name: &'static str) {
@@ -996,6 +1028,75 @@ extern "C" fn flipped(_fd: i32, sequence: u32, seconds: u32, microseconds: u32, 
     FLIPPED_TIME.store(seconds as u64 * 1_000_000 + microseconds as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// a native window made by the program around the engine, an Android
+/// activity's, that the screens go to in place of the panel, null for none.
+static WINDOW: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// whether the window is both of a dual-screen handheld's panels stacked,
+/// as GammaOS's DualStack gives an app them, its top half on the top panel
+/// and its bottom half on the bottom one.
+static STACKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// says the window set_window gives is two panels stacked, before the
+/// renderer starts: it is never turned as a portrait panel would be, and the
+/// menu goes on the top half.
+pub fn set_stacked(stacked: bool) {
+    STACKED.store(stacked, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// whether the window is two panels stacked.
+pub fn stacked() -> bool {
+    STACKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// a second native window, on a second display, that one of the screens
+/// goes to by itself, null for none, and the one the GL thread has a
+/// surface on, which set_second_window waits to see go before its window
+/// may go away.
+static SECOND_WINDOW: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static SECOND_IN_USE: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// whether the second window shows the top screen rather than the bottom.
+static SECOND_SHOWS_TOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// whether the second window's screen is stretched over all of it.
+static SECOND_STRETCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// whether the second window's screen fills all of it, out of shape, rather
+/// than keeping its shape with bars.
+pub fn set_second_stretched(stretched: bool) {
+    SECOND_STRETCHED.store(stretched, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// hands the renderer a second window, on a second display, for one of the
+/// screens by itself, or takes it back with null. Taking it back waits, a
+/// half second at most, for the GL thread to stop drawing into it, after
+/// which the caller may let the window go.
+pub fn set_second_window(window: *mut c_void) {
+    SECOND_WINDOW.store(window, std::sync::atomic::Ordering::Release);
+    if window.is_null() {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !SECOND_IN_USE.load(std::sync::atomic::Ordering::Acquire).is_null() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+/// whether there is a second window for a screen to go to.
+pub fn second_window() -> bool {
+    !SECOND_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
+}
+
+/// which screen the second window shows, the top one or the bottom one.
+pub fn set_second_shows_top(top: bool) {
+    SECOND_SHOWS_TOP.store(top, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// hands the renderer a native window to show the screens in, an
+/// ANativeWindow on Android, before the title is loaded. The window has to
+/// stay valid as long as the renderer runs.
+pub fn set_window(window: *mut c_void) {
+    WINDOW.store(window, std::sync::atomic::Ordering::Release);
+}
+
 /// the panel's refresh period, and how long before its refresh the last
 /// picture was handed over, in nanoseconds, 0 when not known.
 static PANEL_PERIOD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1252,10 +1353,11 @@ fn panel_shape(output: &Output) -> ((i32, i32), Option<i32>) {
     let size = match output {
         Output::Kms(kms) => kms.size(),
         Output::Fbdev(window) => (window[0] as i32, window[1] as i32),
+        Output::Window(size) => *size,
         Output::Offscreen(_) => (640, 480),
     };
     let turn = match output {
-        Output::Kms(_) | Output::Fbdev(_) => panel_turn(size.0, size.1),
+        Output::Kms(_) | Output::Fbdev(_) | Output::Window(_) => panel_turn(size.0, size.1),
         Output::Offscreen(_) => None,
     };
     (size, turn)
@@ -1479,6 +1581,10 @@ struct Canvas {
 /// nothing, 90 turns clockwise, 270 counter clockwise, and unset turns
 /// clockwise on a portrait panel.
 fn panel_turn(width: i32, height: i32) -> Option<i32> {
+    // two landscape panels stacked are taller than wide, and are not turned
+    if stacked() {
+        return None;
+    }
     static CHOICE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let choice = CHOICE.get_or_init(|| std::env::var("ZAKURO_PANEL_ROTATE").ok());
     match choice.as_deref() {
@@ -1487,6 +1593,200 @@ fn panel_turn(width: i32, height: i32) -> Option<i32> {
         Some("270") => Some(1),
         _ => (height > width).then_some(0),
     }
+}
+
+/// the surface on the second window set_second_window gave, made, remade
+/// or let go as the window came, changed or went, and its size.
+fn second_surface(panel: &mut Panel) -> Option<(egl::types::EGLSurface, (i32, i32))> {
+    let wanted = SECOND_WINDOW.load(std::sync::atomic::Ordering::Acquire);
+    let egl = panel.egl;
+    if panel.second.is_some_and(|(_, window, _)| window != wanted) {
+        let (surface, ..) = panel.second.take().unwrap();
+        // SAFETY: a surface this made on the display, not current
+        unsafe { egl.egl.DestroySurface(egl.display, surface) };
+        SECOND_IN_USE.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
+        log::info!("the second window went");
+    }
+    if panel.second.is_none() && !wanted.is_null() {
+        // SAFETY: a window set_second_window keeps valid until it takes it
+        // back, on the display and config the panel's context has
+        unsafe {
+            let surface = egl.egl.CreateWindowSurface(egl.display, egl.config, wanted as glutin_egl_sys::EGLNativeWindowType, std::ptr::null());
+            if surface.is_null() {
+                log::warn!("could not make a surface on the second window, 0x{:X}", egl.egl.GetError());
+                return None;
+            }
+            let (mut width, mut height) = (0, 0);
+            egl.egl.QuerySurface(egl.display, surface, egl::WIDTH as i32, &mut width);
+            egl.egl.QuerySurface(egl.display, surface, egl::HEIGHT as i32, &mut height);
+            // the panel's swap waits for its refresh already, this one need not
+            egl.egl.MakeCurrent(egl.display, surface, surface, egl.context);
+            egl.egl.SwapInterval(egl.display, 0);
+            egl.egl.MakeCurrent(egl.display, egl.surface, egl.surface, egl.context);
+            SECOND_IN_USE.store(wanted, std::sync::atomic::Ordering::Release);
+            log::info!("a screen goes to a {width}x{height} second window");
+            panel.second = Some((surface, wanted, (width, height)));
+        }
+    }
+    panel.second.map(|(surface, _, size)| (surface, size))
+}
+
+/// draws the second window's screen filling it, with the cursor over it,
+/// swaps it, and makes the panel's surface current again.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_second(
+    gl: &glow::Context,
+    panel: &mut Panel,
+    program: glow::Program,
+    linear: glow::Sampler,
+    empty: glow::VertexArray,
+    surface: egl::types::EGLSurface,
+    (width, height): (i32, i32),
+    parts: Vec<Part>,
+) -> Result<(), String> {
+    let egl = panel.egl;
+    if egl.egl.MakeCurrent(egl.display, surface, surface, egl.context) == 0 {
+        return Err(format!("could not make the second window current, 0x{:X}", egl.egl.GetError()));
+    }
+    // the screen's own size is the layout here, its area all of it
+    let mut layout = parts
+        .iter()
+        .find_map(|part| match part {
+            Part::Surface { area, .. } | Part::Pixels { area, .. } => Some((area[2].max(1), area[3].max(1))),
+            _ => None,
+        })
+        .unwrap_or((320, 240));
+    let mut parts = parts;
+    if SECOND_STRETCHED.load(std::sync::atomic::Ordering::Relaxed) {
+        // stretched, the window's own size is the layout, the screen all of
+        // it and the cursor moved along
+        let (across, down) = (width as f32 / layout.0 as f32, height as f32 / layout.1 as f32);
+        for part in &mut parts {
+            match part {
+                Part::Surface { area, .. } | Part::Pixels { area, .. } => *area = [0, 0, width, height],
+                Part::Cursor { x, y } => (*x, *y) = ((*x as f32 * across) as i32, (*y as f32 * down) as i32),
+                Part::Overlay(_) => {}
+            }
+        }
+        layout = (width, height);
+    }
+    let fit = Fit::new(layout, (width, height));
+    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+    gl.viewport(0, 0, width, height);
+    gl.disable(glow::SCISSOR_TEST);
+    gl.disable(glow::BLEND);
+    gl.color_mask(true, true, true, true);
+    gl.clear_color(0.0, 0.0, 0.0, 1.0);
+    gl.clear(glow::COLOR_BUFFER_BIT);
+    gl.use_program(Some(program));
+    gl.bind_vertex_array(Some(empty));
+    gl.active_texture(glow::TEXTURE0);
+    gl.bind_sampler(0, None);
+    gl.uniform_1_i32(gl.get_uniform_location(program, "source").as_ref(), 0);
+    let drawn = draw_parts(gl, panel, program, linear, None, height, fit, layout, parts);
+    let swapped = egl.egl.SwapBuffers(egl.display, surface) != 0;
+    egl.egl.MakeCurrent(egl.display, egl.surface, egl.surface, egl.context);
+    drawn?;
+    if !swapped {
+        log::warn!("could not swap the second window's buffers, 0x{:X}", egl.egl.GetError());
+    }
+    Ok(())
+}
+
+/// draws each part into the framebuffer bound, height pixels high, the
+/// layout fitted into it as fit says.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_parts(
+    gl: &glow::Context,
+    panel: &mut Panel,
+    program: glow::Program,
+    linear: glow::Sampler,
+    framebuffer: Option<glow::Framebuffer>,
+    height: i32,
+    fit: Fit,
+    layout: (i32, i32),
+    parts: Vec<Part>,
+) -> Result<(), String> {
+            for part in parts {
+                let (texture, screen, upright, area, smooth) = match part {
+                    Part::Cursor { x, y } => {
+                        let (x, y) = (fit.x(x), fit.y(y));
+                        gl.enable(glow::SCISSOR_TEST);
+                        for (size, shade) in [(7, 0.0), (5, 1.0)].map(|(size, shade)| ((size as f32 * fit.scale) as i32 | 1, shade)) {
+                            gl.scissor(x - size / 2, height - y - size / 2, size, size);
+                            gl.clear_color(shade, shade, shade, 1.0);
+                            gl.clear(glow::COLOR_BUFFER_BIT);
+                        }
+                        gl.disable(glow::SCISSOR_TEST);
+                        continue;
+                    }
+                    Part::Surface { texture, screen, area, smooth, top, picture } => {
+                        let area = fit.area(area);
+                        let step = match picture {
+                            Some(version) => panel.between.step((texture, version)),
+                            None => {
+                                if top {
+                                    panel.between.reset();
+                                }
+                                Step::Plain { keep: false }
+                            }
+                        };
+                        let keep = match step {
+                            Step::Plain { keep } => keep.then_some(0),
+                            Step::Halfway => Some(1),
+                        };
+                        if let Some(slot) = keep {
+                            panel.between.keep(gl, program, texture, screen, slot)?;
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
+                        }
+                        if let Step::Halfway = step {
+                            let gl_area = [area[0], height - area[1] - area[3], area[2], area[3]];
+                            panel.between.draw(gl, framebuffer, gl_area, smooth.then_some(linear))?;
+                            gl.use_program(Some(program));
+                            continue;
+                        }
+                        gl.use_program(Some(program));
+                        (texture, screen, 0, area, smooth)
+                    }
+                    Part::Overlay(overlay) => {
+                        // the menu in the middle, or on the top panel of two stacked
+                        let down = if stacked() { 0 } else { (layout.1 - 480) / 2 };
+                        draw_overlay(gl, panel, &overlay, height, fit.inset((layout.0 - 640) / 2, down))?;
+                        continue;
+                    }
+                    Part::Pixels { index, pixels, width, height, area, smooth } => {
+                        if index == 0 {
+                            panel.between.reset();
+                        }
+                        let texture = match panel.textures[index] {
+                            Some((texture, w, h)) if (w, h) == (width, height) => texture,
+                            made => {
+                                if let Some((old, ..)) = made {
+                                    gl.delete_texture(old);
+                                }
+                                let texture = gl.create_texture()?;
+                                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                                gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, width as i32, height as i32);
+                                panel.textures[index] = Some((texture, width, height));
+                                texture
+                            }
+                        };
+                        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&pixels)));
+                        (texture, [width as i32, height as i32, 0, 0], 1, fit.area(area), smooth)
+                    }
+                };
+                let y = height - area[1] - area[3];
+                gl.viewport(area[0], y, area[2], area[3]);
+                gl.uniform_4_i32(gl.get_uniform_location(program, "area").as_ref(), area[0], y, area[2], area[3]);
+                gl.uniform_4_i32(gl.get_uniform_location(program, "screen").as_ref(), screen[0], screen[1], screen[2], screen[3]);
+                gl.uniform_1_i32(gl.get_uniform_location(program, "upright").as_ref(), upright);
+                gl.uniform_1_i32(gl.get_uniform_location(program, "smooth_scale").as_ref(), smooth as i32);
+                gl.bind_sampler(0, smooth.then_some(linear));
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+    Ok(())
 }
 
 fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
@@ -1572,83 +1872,22 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_sampler(0, None);
             gl.uniform_1_i32(gl.get_uniform_location(program, "source").as_ref(), 0);
-            for part in parts {
-                let (texture, screen, upright, area, smooth) = match part {
-                    Part::Cursor { x, y } => {
-                        let (x, y) = (fit.x(x), fit.y(y));
-                        gl.enable(glow::SCISSOR_TEST);
-                        for (size, shade) in [(7, 0.0), (5, 1.0)].map(|(size, shade)| ((size as f32 * fit.scale) as i32 | 1, shade)) {
-                            gl.scissor(x - size / 2, height - y - size / 2, size, size);
-                            gl.clear_color(shade, shade, shade, 1.0);
-                            gl.clear(glow::COLOR_BUFFER_BIT);
-                        }
-                        gl.disable(glow::SCISSOR_TEST);
-                        continue;
-                    }
-                    Part::Surface { texture, screen, area, smooth, top, picture } => {
-                        let area = fit.area(area);
-                        let step = match picture {
-                            Some(version) => panel.between.step((texture, version)),
-                            None => {
-                                if top {
-                                    panel.between.reset();
-                                }
-                                Step::Plain { keep: false }
-                            }
-                        };
-                        let keep = match step {
-                            Step::Plain { keep } => keep.then_some(0),
-                            Step::Halfway => Some(1),
-                        };
-                        if let Some(slot) = keep {
-                            panel.between.keep(&gl, program, texture, screen, slot)?;
-                            gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
-                        }
-                        if let Step::Halfway = step {
-                            let gl_area = [area[0], height - area[1] - area[3], area[2], area[3]];
-                            panel.between.draw(&gl, framebuffer, gl_area, smooth.then_some(linear))?;
-                            gl.use_program(Some(program));
-                            continue;
-                        }
-                        gl.use_program(Some(program));
-                        (texture, screen, 0, area, smooth)
-                    }
-                    Part::Overlay(overlay) => {
-                        draw_overlay(&gl, panel, &overlay, height, fit.inset((layout.0 - 640) / 2, (layout.1 - 480) / 2))?;
-                        continue;
-                    }
-                    Part::Pixels { index, pixels, width, height, area, smooth } => {
-                        if index == 0 {
-                            panel.between.reset();
-                        }
-                        let texture = match panel.textures[index] {
-                            Some((texture, w, h)) if (w, h) == (width, height) => texture,
-                            made => {
-                                if let Some((old, ..)) = made {
-                                    gl.delete_texture(old);
-                                }
-                                let texture = gl.create_texture()?;
-                                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                                gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, width as i32, height as i32);
-                                panel.textures[index] = Some((texture, width, height));
-                                texture
-                            }
-                        };
-                        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&pixels)));
-                        (texture, [width as i32, height as i32, 0, 0], 1, fit.area(area), smooth)
-                    }
-                };
-                let y = height - area[1] - area[3];
-                gl.viewport(area[0], y, area[2], area[3]);
-                gl.uniform_4_i32(gl.get_uniform_location(program, "area").as_ref(), area[0], y, area[2], area[3]);
-                gl.uniform_4_i32(gl.get_uniform_location(program, "screen").as_ref(), screen[0], screen[1], screen[2], screen[3]);
-                gl.uniform_1_i32(gl.get_uniform_location(program, "upright").as_ref(), upright);
-                gl.uniform_1_i32(gl.get_uniform_location(program, "smooth_scale").as_ref(), smooth as i32);
-                gl.bind_sampler(0, smooth.then_some(linear));
-                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
-            }
+            // the screen the second window shows, and the cursor when that is
+            // the bottom one, go there; the rest to the panel
+            let second = second_surface(panel);
+            let (parts, second_parts): (Vec<Part>, Vec<Part>) = match second {
+                Some(_) => {
+                    let top = SECOND_SHOWS_TOP.load(std::sync::atomic::Ordering::Relaxed);
+                    parts.into_iter().partition(|part| match part {
+                        Part::Surface { top: is_top, .. } => *is_top != top,
+                        Part::Pixels { index, .. } => (*index == 0) != top,
+                        Part::Cursor { .. } => top,
+                        Part::Overlay(_) => true,
+                    })
+                }
+                None => (parts, Vec::new()),
+            };
+            draw_parts(&gl, panel, program, linear, framebuffer, height, fit, layout, parts)?;
             if let Output::Offscreen(_) = panel.output {
                 if let Some(path) = std::env::var_os("ZAKURO_PANEL_SHOT") {
                     let mut data = vec![0u8; (width * height * 4) as usize];
@@ -1690,10 +1929,13 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
             if panel.egl.egl.SwapBuffers(panel.egl.display, panel.egl.surface) == 0 {
                 return Err("could not swap the panel's buffers".into());
             }
+            if let Some((surface, size)) = second {
+                draw_second(&gl, panel, program, linear, empty, surface, size, second_parts)?;
+            }
         }
         match &mut panel.output {
             Output::Kms(kms) => kms.flip(),
-            Output::Fbdev(_) | Output::Offscreen(_) => Ok(()),
+            Output::Fbdev(_) | Output::Window(_) | Output::Offscreen(_) => Ok(()),
         }
     })
 }
@@ -1706,6 +1948,8 @@ enum Output {
     /// the framebuffer device's size, the window a Mali driver built for
     /// it takes, kept where EGL was given it.
     Fbdev(Box<[u16; 2]>),
+    /// a window set_window was given, its size.
+    Window((i32, i32)),
     Offscreen(glow::Framebuffer),
 }
 
@@ -1723,6 +1967,8 @@ struct Panel {
     between: Between,
     /// the landscape canvas a portrait panel's picture is drawn into first.
     canvas: Option<Canvas>,
+    /// the surface on the second window, the window and its size.
+    second: Option<(egl::types::EGLSurface, *mut c_void, (i32, i32))>,
 }
 
 thread_local! {
@@ -1991,6 +2237,64 @@ impl Egl {
         }
     }
 
+    /// a context drawing into a native window set_window was given, and the
+    /// window's size.
+    fn new_window(window: *mut c_void) -> Result<(Egl, glow::Context, (i32, i32)), String> {
+        // SAFETY: as in new, and the window stays valid as set_window asks
+        unsafe {
+            let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
+            let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
+            let loaded = egl::Egl::load_with(|name| symbol(&library, name));
+            let display = loaded.GetDisplay(egl::DEFAULT_DISPLAY);
+            let (mut major, mut minor) = (0, 0);
+            if display.is_null() || loaded.Initialize(display, &mut major, &mut minor) == 0 {
+                return Err(format!("could not initialize EGL for the window, 0x{:X}", loaded.GetError()));
+            }
+            loaded.BindAPI(egl::OPENGL_ES_API);
+            let attributes = [
+                egl::RENDERABLE_TYPE as i32,
+                egl::OPENGL_ES3_BIT as i32,
+                egl::SURFACE_TYPE as i32,
+                egl::WINDOW_BIT as i32,
+                egl::RED_SIZE as i32,
+                8,
+                egl::GREEN_SIZE as i32,
+                8,
+                egl::BLUE_SIZE as i32,
+                8,
+                egl::ALPHA_SIZE as i32,
+                0,
+                egl::DEPTH_SIZE as i32,
+                0,
+                egl::NONE as i32,
+            ];
+            let mut configs = [std::ptr::null(); 64];
+            let mut count = 0;
+            if loaded.ChooseConfig(display, attributes.as_ptr(), configs.as_mut_ptr(), 64, &mut count) == 0 || count <= 0 {
+                return Err("no EGL config for the window".into());
+            }
+            // the first config with exactly eight bits a channel and no alpha,
+            // which the window's buffers take without a conversion
+            let exact = configs[..count as usize].iter().copied().find(|&config| {
+                let size = |attribute: u32| {
+                    let mut value = 0;
+                    loaded.GetConfigAttrib(display, config, attribute as i32, &mut value);
+                    value
+                };
+                [size(egl::RED_SIZE), size(egl::GREEN_SIZE), size(egl::BLUE_SIZE), size(egl::ALPHA_SIZE)] == [8, 8, 8, 0]
+            });
+            let config = exact.unwrap_or(configs[0]);
+            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, window as glutin_egl_sys::EGLNativeWindowType, 1)?;
+            let (mut width, mut height) = (0, 0);
+            egl.egl.QuerySurface(egl.display, egl.surface, egl::WIDTH as i32, &mut width);
+            egl.egl.QuerySurface(egl.display, egl.surface, egl::HEIGHT as i32, &mut height);
+            if width <= 0 || height <= 0 {
+                return Err(format!("the window has no size, {width}x{height}"));
+            }
+            Ok((egl, gl, (width, height)))
+        }
+    }
+
     /// an OpenGL ES 3.1 context drawing to a window, swapping its buffers
     /// interval refreshes apart.
     unsafe fn on_window(
@@ -2061,6 +2365,12 @@ impl Egl {
     }
 
     fn new_with_panel() -> Result<(Egl, glow::Context, Option<Output>), String> {
+        let window = WINDOW.load(std::sync::atomic::Ordering::Acquire);
+        if !window.is_null() {
+            let (egl, gl, size) = Egl::new_window(window)?;
+            log::info!("the screens go to a {}x{} window", size.0, size.1);
+            return Ok((egl, gl, Some(Output::Window(size))));
+        }
         if std::env::var_os("ZAKURO_KMS").is_some() {
             return match Egl::new_kms() {
                 Ok((egl, gl, kms)) => Ok((egl, gl, Some(Output::Kms(kms)))),
@@ -2917,7 +3227,7 @@ impl Worker {
                         let layout = layout_for(if turn.is_some() { (height, width) } else { (width, height) });
                         let _ = LAYOUT.set(layout);
                         log::info!("screens laid out in {}x{}", layout.0, layout.1);
-                        PANEL.with(|screen| *screen.borrow_mut() = Some(Panel { egl, output, program: None, textures: [None, None], empty: None, linear: None, overlay: None, overlay_textures: HashMap::new(), between: Between::default(), canvas: None }));
+                        PANEL.with(|screen| *screen.borrow_mut() = Some(Panel { egl, output, program: None, textures: [None, None], empty: None, linear: None, overlay: None, overlay_textures: HashMap::new(), between: Between::default(), canvas: None, second: None }));
                     }
                     let gl: &'static glow::Context = Box::leak(Box::new(gl));
                     GL_CONTEXT.set(Some(gl));
@@ -3043,6 +3353,9 @@ pub struct Gles {
     copiers: Option<([glow::Program; 3], glow::VertexArray)>,
     copies: rustc_hash::FxHashMap<DrawnTexture, (glow::Texture, glow::Framebuffer)>,
     copied: rustc_hash::FxHashMap<DrawnTexture, (glow::Texture, u64, u32)>,
+    /// the memory rows a texture over a drawing last had, to upload them
+    /// again only when they change.
+    over_drawing: rustc_hash::FxHashMap<DrawnTexture, Vec<u8>>,
     flushes: u64,
     /// display transfers so far, the clock occlusion culling keeps time by.
     pictures: u64,
@@ -3131,6 +3444,7 @@ impl Gles {
                 copiers: None,
                 copies: Default::default(),
                 copied: Default::default(),
+                over_drawing: Default::default(),
                 flushes: 0,
                 pictures: 0,
                 warned_logic_op: false,
@@ -3255,6 +3569,29 @@ impl Gles {
             .map(|index| (index, (texture.addr - self.surfaces[index].addr) / tile_rows * 8))
     }
 
+    /// a texture that starts with rows nothing drew and goes on into a
+    /// drawing, as Fire Emblem Awakening samples its picture for an effect:
+    /// the drawing and how many rows of memory come before it, which the
+    /// copy takes from memory as they are.
+    fn texture_over_drawing(&self, texture: &DrawnTexture) -> Option<(usize, u32)> {
+        static FROM_MEMORY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *FROM_MEMORY.get_or_init(|| std::env::var_os("ZAKURO_NO_PAST_DRAWING").is_some()) {
+            return None;
+        }
+        let kind = Kind::Color(texture.format);
+        let tile_rows = 8 * texture.width * kind.bytes();
+        let (index, lead) = self.surfaces.iter().enumerate().find_map(|(index, s)| {
+            let offset = s.addr.checked_sub(texture.addr).filter(|&offset| offset > 0 && offset % tile_rows == 0)?;
+            let lead = offset / tile_rows * 8;
+            let fits = s.kind == kind && s.tiled && !s.stale && s.dirty.is_some() && s.width == texture.width && lead < texture.height && texture.height <= lead + s.height;
+            fits.then_some((index, lead))
+        })?;
+        // the rows before it as memory has them, which another drawing there
+        // would not be
+        let lead_bytes = lead / 8 * tile_rows;
+        (!self.surfaces.iter().any(|s| s.dirty_overlaps(texture.addr, lead_bytes))).then_some((index, lead))
+    }
+
     /// the surface a drawn texture is the whole of, as it is, which a draw
     /// into another surface samples in place, upside down, rather than a copy.
     fn whole_surface(&self, texture: &DrawnTexture) -> Option<usize> {
@@ -3272,7 +3609,7 @@ impl Gles {
         if *FROM_MEMORY.get_or_init(|| crate::switch("ZAKURO_NO_GPU_TEXTURES", "drawn textures read from memory")) {
             return false;
         }
-        self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some())
+        self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some()) || self.texture_over_drawing(texture).is_some()
     }
 
     fn copy_objects(&mut self, texture: &DrawnTexture) -> Result<(([glow::Program; 3], glow::VertexArray), (glow::Texture, glow::Framebuffer)), String> {
@@ -3316,7 +3653,12 @@ impl Gles {
         Ok((copiers, (copy, framebuffer)))
     }
 
-    fn copy_texture(&mut self, texture: &DrawnTexture) -> Result<glow::Texture, String> {
+    fn copy_texture<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture) -> Result<glow::Texture, String> {
+        if self.texture_source(texture).is_none() {
+            if let Some((source, lead)) = self.texture_over_drawing(texture) {
+                return self.copy_over_drawing(memory, texture, source, lead);
+            }
+        }
         let (source, row) = self.texture_source(texture).ok_or("the buffer a texture was drawn into is gone")?;
         let (([color, depth, stencil], empty), (copy, framebuffer)) = self.copy_objects(texture)?;
         let surface = &self.surfaces[source];
@@ -3388,7 +3730,198 @@ impl Gles {
         Ok(copy)
     }
 
+    /// the copy of a texture whose first rows are memory and the rest a
+    /// drawing: the drawing's rows drawn in on the GPU as copy_texture does,
+    /// the rows before them uploaded from memory.
+    fn copy_over_drawing<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture, source: usize, lead: u32) -> Result<glow::Texture, String> {
+        let (([color, _, _], empty), (copy, framebuffer)) = self.copy_objects(texture)?;
+        let (width, height) = (texture.width, texture.height);
+        let bpp = texture.format.bytes_per_pixel();
+        let length = (lead * width) as usize * bpp;
+        // the memory rows, compared with what they were rather than hashed,
+        // which a byte at a time took a fifth of the GPU thread's time
+        let unchanged = match (memory.slice(texture.addr, length), self.over_drawing.get(texture)) {
+            (Some(now), Some(before)) => now == &before[..],
+            (None, Some(before)) => {
+                let mut now = vec![0u8; length];
+                memory.read(texture.addr, &mut now);
+                now == *before
+            }
+            (_, None) => false,
+        };
+        let surface = &self.surfaces[source];
+        let stamp = (surface.texture, surface.version, u32::MAX - lead);
+        let drawn_again = self.copied.insert(*texture, stamp) != Some(stamp);
+        if unchanged && !drawn_again {
+            return Ok(copy);
+        }
+        let mut bytes = vec![0u8; length];
+        memory.read(texture.addr, &mut bytes);
+        let image = surface.texture;
+        // the copy's row y is the texture's row y, the drawing's first row
+        // the texture's row lead
+        let base = surface.height as i32 - 1 + lead as i32;
+        let opaque = matches!(texture.format, ColorFormat::Rgb8 | ColorFormat::Rgb565) as i32;
+        let levels = match texture.format {
+            ColorFormat::Rgba8 | ColorFormat::Rgb8 => [255.0; 4],
+            ColorFormat::Rgb565 => [31.0, 63.0, 31.0, 255.0],
+            ColorFormat::Rgb5A1 => [31.0, 31.0, 31.0, 1.0],
+            ColorFormat::Rgba4 => [15.0; 4],
+        };
+        let rows = (!unchanged).then(|| {
+            let mut rows = vec![0u8; (lead * width * 4) as usize];
+            for y in 0..lead {
+                for x in 0..width {
+                    let at = pixel_offset(true, x, y, width, bpp as u32);
+                    let out = ((y * width + x) * 4) as usize;
+                    rows[out..out + 4].copy_from_slice(&texture.format.decode(&bytes[at..at + bpp]));
+                }
+            }
+            rows
+        });
+        self.over_drawing.insert(*texture, bytes);
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            flush_clears(Some(image));
+            disturb();
+            // SAFETY: on the GL thread, the copy is the texture's size, the
+            // drawing's rows are read inside it and the upload covers the
+            // rows before them
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.viewport(0, 0, width as i32, height as i32);
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(0, lead as i32, width as i32, (height - lead) as i32);
+                gl.disable(glow::BLEND);
+                gl.disable(glow::DEPTH_TEST);
+                gl.disable(glow::STENCIL_TEST);
+                gl.disable(glow::CULL_FACE);
+                gl.bind_vertex_array(Some(empty));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_sampler(0, None);
+                gl.bind_texture(glow::TEXTURE_2D, Some(image));
+                gl.color_mask(true, true, true, true);
+                gl.use_program(Some(color));
+                gl.uniform_1_i32(gl.get_uniform_location(color, "source").as_ref(), 0);
+                gl.uniform_1_i32(gl.get_uniform_location(color, "base").as_ref(), base);
+                gl.uniform_1_i32(gl.get_uniform_location(color, "opaque").as_ref(), opaque);
+                gl.uniform_4_f32_slice(gl.get_uniform_location(color, "levels").as_ref(), &levels);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                gl.disable(glow::SCISSOR_TEST);
+                if let Some(rows) = &rows {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(copy));
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, lead as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rows)));
+                }
+            }
+        });
+        Ok(copy)
+    }
+
+    /// a texture copy of whole rows of tiles of a picture the GPU drew and
+    /// has not written to memory, done on the GPU as a display transfer that
+    /// keeps the layout and format: done on the CPU, the picture would have
+    /// to be read back first, which stalls the GPU every time. false leaves
+    /// it to the CPU. widths and skips are in bytes, as the copy gives them.
+    pub(crate) fn texture_copy<M: GpuMemory>(&mut self, memory: &mut M, input: u32, output: u32, size: u32, input_lines: (u32, u32), output_lines: (u32, u32)) -> Result<bool, String> {
+        let done = self.texture_copy_on_gpu(memory, input, output, size, input_lines, output_lines)?;
+        if !done {
+            let details = format!("to {output:08X}, lines of (bytes, skip) {input_lines:?} into {output_lines:?}");
+            left_to_cpu("a texture copy", input, size, details, &self.surfaces);
+        }
+        Ok(done)
+    }
+
+    fn texture_copy_on_gpu<M: GpuMemory>(&mut self, memory: &mut M, input: u32, output: u32, size: u32, input_lines: (u32, u32), output_lines: (u32, u32)) -> Result<bool, String> {
+        static CPU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // Drawn texture copies set to Memory in the menu leaves these to the
+        // CPU too, the way out if one goes wrong
+        let cpu = || std::env::var_os("ZAKURO_NO_GPU_TEXTURES").is_some() || crate::switch("ZAKURO_CPU_TEXTURE_COPIES", "texture copies on the CPU");
+        if *CPU.get_or_init(cpu) {
+            return Ok(false);
+        }
+        if size == 0 {
+            return Ok(false);
+        }
+        let Some((addr, width, column, copy, output_width, format)) = self.surfaces.iter().find_map(|s| {
+            let Kind::Color(format) = s.kind else { return None };
+            if !s.tiled || s.dirty.is_none() {
+                return None;
+            }
+            let bpp = s.kind.bytes();
+            let (tile, tile_row) = (64 * bpp, 8 * s.row_bytes());
+            let offset = input.checked_sub(s.addr)?;
+            if offset + size > s.size() || !offset.is_multiple_of(tile) {
+                return None;
+            }
+            // a line of the input is whole rows of tiles, or the same few
+            // tiles of each row of tiles, part of the picture's width
+            let line = match input_lines {
+                (0, _) | (_, 0) => tile_row,
+                (bytes, skip) if bytes + skip == tile_row => bytes,
+                _ => return None,
+            };
+            let start = offset % tile_row;
+            if !line.is_multiple_of(tile) || !size.is_multiple_of(line) || start + line > tile_row || (line == tile_row && start != 0) {
+                return None;
+            }
+            let (row, column) = (offset / tile_row * 8, start / tile * 8);
+            // the output one run of bytes, a texture just as wide, or lines
+            // as long as the input's with whole tiles between them, the
+            // left of a wider texture's rows of tiles
+            let output_width = match output_lines {
+                (0, _) | (_, 0) => line / bpp / 8,
+                (bytes, skip) if bytes == line && skip.is_multiple_of(tile) => (bytes + skip) / bpp / 8,
+                _ => return None,
+            };
+            Some((s.addr + row / 8 * tile_row, s.width, column, (line / bpp / 8, size / line * 8), output_width, format))
+        }) else {
+            return Ok(false);
+        };
+        let transfer = Transfer {
+            input: addr,
+            output,
+            input_width: width,
+            input_height: copy.1,
+            output_width,
+            output_height: copy.1,
+            copy,
+            scale: (1, 1),
+            flip: false,
+            input_linear: false,
+            output_tiled: true,
+            input_format: format,
+            output_format: format,
+            column,
+        };
+        self.display_transfer_on_gpu(memory, &transfer)
+    }
+
     pub(crate) fn display_transfer<M: GpuMemory>(&mut self, memory: &mut M, transfer: &Transfer) -> Result<bool, String> {
+        let done = self.display_transfer_on_gpu(memory, transfer)?;
+        if !done {
+            let t = transfer;
+            let len = t.input_width * t.input_height * Kind::Color(t.input_format).bytes();
+            let details = format!(
+                "{}x{} {:?} {} to {:08X} {}x{} {:?} {}, copying {:?} scaled {:?}{}",
+                t.input_width,
+                t.input_height,
+                t.input_format,
+                if t.input_linear { "linear" } else { "tiled" },
+                t.output,
+                t.output_width,
+                t.output_height,
+                t.output_format,
+                if t.output_tiled { "tiled" } else { "linear" },
+                t.copy,
+                t.scale,
+                if t.flip { " flipped" } else { "" }
+            );
+            left_to_cpu("a display transfer", t.input, len, details, &self.surfaces);
+        }
+        Ok(done)
+    }
+
+    fn display_transfer_on_gpu<M: GpuMemory>(&mut self, memory: &mut M, transfer: &Transfer) -> Result<bool, String> {
         let _timed = timed(0);
         self.pictures += 1;
         let t = transfer;
@@ -3413,7 +3946,7 @@ impl Gles {
             .max_by_key(|(s, _)| (s.dirty.is_some(), s.height))
             .map(|(s, row)| (s.addr, (s.width, s.height), row))
         else {
-            return Ok(false);
+            return self.transfer_below_memory(memory, t);
         };
         let input_end = addr as u64 + (input_size.0 * input_size.1 * input_kind.bytes()) as u64;
         let output_end = t.output as u64 + (t.output_width * t.output_height * output_kind.bytes()) as u64;
@@ -3455,11 +3988,107 @@ impl Gles {
             int("input_format", format_index(t.input_format));
             int("output_format", format_index(t.output_format));
             int("source_row", row as i32);
+            int("source_column", t.column as i32);
+            int("target_row", 0);
             int("source_height", input_size.1 as i32);
             gl.bind_image_texture(0, Some(source_texture), 0, false, 0, glow::READ_ONLY, glow::RGBA8);
             gl.bind_image_texture(1, Some(target_texture), 0, false, 0, glow::WRITE_ONLY, glow::RGBA8);
             gl.dispatch_compute(t.copy.0.div_ceil(8), t.copy.1.div_ceil(8), 1);
             gl.memory_barrier(glow::ALL_BARRIER_BITS);
+        });
+        let target = &mut self.surfaces[target];
+        target.drew((0, target.height));
+        target.screen_batch += 1;
+        self.end_batch();
+        Ok(true)
+    }
+
+    /// a display transfer whose input starts with rows nothing drew and
+    /// goes on into a drawing to its end, as Fire Emblem Awakening shrinks
+    /// its picture for an effect: the rows from memory and the drawing each
+    /// go through the transfer on the GPU, into their parts of the output,
+    /// rather than the drawing being read back for the CPU.
+    fn transfer_below_memory<M: GpuMemory>(&mut self, memory: &mut M, t: &Transfer) -> Result<bool, String> {
+        if t.flip || t.input_linear || t.column != 0 {
+            return Ok(false);
+        }
+        let (input_kind, output_kind) = (Kind::Color(t.input_format), Kind::Color(t.output_format));
+        let tile_rows = 8 * t.input_width * input_kind.bytes();
+        let rows = t.copy.1 * t.scale.1;
+        let Some((addr, size, lead)) = self.surfaces.iter().find_map(|s| {
+            let offset = s.addr.checked_sub(t.input).filter(|&offset| offset > 0 && offset % tile_rows == 0)?;
+            let lead = offset / tile_rows * 8;
+            let fits = s.kind == input_kind && s.tiled && s.width == t.input_width && s.dirty.is_some() && lead < rows && lead.is_multiple_of(t.scale.1) && rows <= lead + s.height;
+            fits.then_some((s.addr, (s.width, s.height), lead))
+        }) else {
+            return Ok(false);
+        };
+        // the rows before the drawing come from memory as they are, which
+        // another drawing there would make a read back again
+        let lead_bytes = lead / 8 * tile_rows;
+        if self.surfaces.iter().any(|s| s.dirty_overlaps(t.input, lead_bytes)) {
+            return Ok(false);
+        }
+        let input_end = addr as u64 + (size.0 * size.1 * input_kind.bytes()) as u64;
+        let output_end = t.output as u64 + (t.output_width * t.output_height * output_kind.bytes()) as u64;
+        if (t.input as u64) < output_end && (t.output as u64) < input_end {
+            return Ok(false);
+        }
+        self.current()?;
+        let (before, drawing, target) = loop {
+            let before = self.surface_rows(memory, t.input, (t.input_width, lead), input_kind, true, None)?;
+            let drawing = self.surface_rows(memory, addr, size, input_kind, true, None)?;
+            let target = self.surface_rows(memory, t.output, (t.output_width, t.output_height), output_kind, t.output_tiled, None)?;
+            if [before, drawing, target].iter().all(|&i| self.surfaces[i].checked) {
+                break (before, drawing, target);
+            }
+        };
+        let program = match self.transfer {
+            Some(program) => program,
+            None => {
+                let worker = self.worker.clone();
+                let program = worker.run(|| self.compute(TRANSFER_SOURCE))?;
+                self.transfer = Some(program);
+                program
+            }
+        };
+        let gl = self.gl;
+        let t = t.clone();
+        let split = lead / t.scale.1;
+        // each part: its source, the source's height, and the output rows
+        // it fills, from and how many
+        let parts = [
+            (self.surfaces[before].texture, lead, 0, split),
+            (self.surfaces[drawing].texture, size.1, split, t.copy.1 - split),
+        ];
+        let target_texture = self.surfaces[target].texture;
+        self.worker.post(move || unsafe {
+            disturb();
+            // SAFETY: on the GL thread, every texture has immutable rgba8
+            // storage and each dispatch stays inside them
+            gl.use_program(Some(program));
+            let int = |name: &str, value: i32| gl.uniform_1_i32(gl.get_uniform_location(program, name).as_ref(), value);
+            let pair = |name: &str, x: u32, y: u32| gl.uniform_2_i32(gl.get_uniform_location(program, name).as_ref(), x as i32, y as i32);
+            pair("scale", t.scale.0, t.scale.1);
+            int("input_height", t.input_height as i32);
+            int("output_height", t.output_height as i32);
+            int("flip", 0);
+            int("input_format", format_index(t.input_format));
+            int("output_format", format_index(t.output_format));
+            int("source_row", 0);
+            int("source_column", 0);
+            gl.bind_image_texture(1, Some(target_texture), 0, false, 0, glow::WRITE_ONLY, glow::RGBA8);
+            for (source, height, first, count) in parts {
+                if count == 0 {
+                    continue;
+                }
+                pair("size", t.copy.0, count);
+                int("source_height", height as i32);
+                int("target_row", first as i32);
+                gl.bind_image_texture(0, Some(source), 0, false, 0, glow::READ_ONLY, glow::RGBA8);
+                gl.dispatch_compute(t.copy.0.div_ceil(8), count.div_ceil(8), 1);
+                gl.memory_barrier(glow::ALL_BARRIER_BITS);
+            }
         });
         let target = &mut self.surfaces[target];
         target.drew((0, target.height));
@@ -4129,8 +4758,14 @@ impl Gles {
         Ok(true)
     }
 
-    pub(crate) fn prepare_read<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32) -> Result<(), String> {
+    pub(crate) fn prepare_read<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32, texture: Option<&crate::raster::DrawnTexture>) -> Result<(), String> {
         if self.surfaces.iter().any(|s| s.dirty_overlaps(addr, len)) {
+            let details = match texture {
+                Some(t) => format!("a {}x{} {:?} texture", t.width, t.height, t.format),
+                None => "a texture in a format no drawing has".to_owned(),
+            };
+            left_to_cpu("a texture read", addr, len, details, &self.surfaces);
+            sync_why("sync to read");
             self.sync(memory, addr, len)?;
         }
         Ok(())
@@ -4170,6 +4805,7 @@ impl Gles {
                 s.picture = None;
             }
         }
+        sync_why("sync before overwriting");
         self.sync(memory, addr, len)
     }
 
@@ -4224,7 +4860,7 @@ impl Gles {
         }
         if !self.worker.here() {
             let worker = self.worker.clone();
-            wait_from("sync");
+            wait_from(SYNC_WHY.with(|cell| cell.replace("sync")));
             return worker.run(|| self.sync(memory, addr, len));
         }
         let overlapping: Vec<usize> = (0..self.surfaces.len()).filter(|&i| self.surfaces[i].overlaps(addr, len)).collect();
@@ -4684,7 +5320,7 @@ impl Gles {
                             sources[unit] = Some(self.surfaces[index].texture);
                             self.surfaces[index].texture
                         }
-                        None => self.copy_texture(drawn)?,
+                        None => self.copy_texture(memory, drawn)?,
                     },
                     None => self.texture(texture)?,
                 };
@@ -4965,6 +5601,219 @@ impl Gles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// guest memory as one flat block from address zero.
+    struct Flat(Vec<u8>);
+
+    impl GpuMemory for Flat {
+        fn read(&mut self, addr: u32, out: &mut [u8]) {
+            out.copy_from_slice(&self.0[addr as usize..addr as usize + out.len()]);
+        }
+
+        fn write(&mut self, addr: u32, data: &[u8]) {
+            self.0[addr as usize..addr as usize + data.len()].copy_from_slice(data);
+        }
+    }
+
+    /// the copy of a drawn texture as the GPU holds it, RGBA rows from the
+    /// texture's first.
+    fn read_copy(gles: &mut Gles, texture: &DrawnTexture) -> Vec<u8> {
+        let (_, framebuffer) = gles.copies[texture];
+        let (gl, width, height) = (gles.gl, texture.width, texture.height);
+        let worker = gles.worker.clone();
+        worker.run(move || unsafe {
+            let mut data = vec![0u8; (width * height * 4) as usize];
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+            gl.read_pixels(0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut data)));
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            data
+        })
+    }
+
+    #[test]
+    fn a_drawn_texture_that_starts_in_memory_is_copied_on_the_gpu() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let format = ColorFormat::Rgba8;
+        let (base, width, lead, drawn) = (0x1000u32, 32u32, 16u32, 32u32);
+        let mut memory = Flat(vec![0; 0x20000]);
+        let bytes = width * (lead + drawn) * 4;
+        for (i, byte) in memory.0[base as usize..(base + bytes) as usize].iter_mut().enumerate() {
+            *byte = (i * 29 + i / 3) as u8;
+        }
+        let decoded = |memory: &Flat, addr: u32, rows: u32| {
+            let mut out = vec![0u8; (width * rows * 4) as usize];
+            for y in 0..rows {
+                for x in 0..width {
+                    let at = (addr + pixel_offset(true, x, y, width, 4) as u32) as usize;
+                    let o = ((y * width + x) * 4) as usize;
+                    out[o..o + 4].copy_from_slice(&format.decode(&memory.0[at..at + 4]));
+                }
+            }
+            out
+        };
+        let drawing = base + lead / 8 * 8 * width * 4;
+        let index = gles.surface_rows(&mut memory, drawing, (width, drawn), Kind::Color(format), true, None).unwrap();
+        gles.surfaces[index].drew((0, drawn));
+        // the case that already worked, a texture the drawing is the whole of
+        // but for its copy, to check which way up the copy is
+        let inside = DrawnTexture { addr: drawing, width, height: drawn, format };
+        assert!(gles.holds(&inside));
+        gles.copy_texture(&mut memory, &inside).unwrap();
+        assert_eq!(read_copy(&mut gles, &inside), decoded(&memory, drawing, drawn));
+        // memory's rows first, then the drawing's
+        let over = DrawnTexture { addr: base, width, height: lead + drawn, format };
+        assert!(gles.holds(&over));
+        gles.copy_texture(&mut memory, &over).unwrap();
+        assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
+        // again unchanged, then with memory's rows changed, which the copy
+        // takes up
+        gles.copy_texture(&mut memory, &over).unwrap();
+        assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
+        for byte in &mut memory.0[base as usize..base as usize + 64] {
+            *byte ^= 0x5A;
+        }
+        gles.copy_texture(&mut memory, &over).unwrap();
+        assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
+        // the drawing stayed on the GPU
+        assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
+    }
+
+    #[test]
+    fn a_shrinking_transfer_from_memory_into_a_drawing_matches_the_console() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let format = ColorFormat::Rgba8;
+        let (input, output, width, lead, drawn) = (0x1000u32, 0x10000u32, 32u32, 16u32, 32u32);
+        let mut memory = Flat(vec![0; 0x20000]);
+        let bytes = width * (lead + drawn) * 4;
+        for (i, byte) in memory.0[input as usize..(input + bytes) as usize].iter_mut().enumerate() {
+            *byte = (i * 37 + i / 5) as u8;
+        }
+        // the drawing starts two rows of tiles in, as Fire Emblem Awakening's
+        let drawing = input + lead / 8 * 8 * width * 4;
+        let index = gles.surface_rows(&mut memory, drawing, (width, drawn), Kind::Color(format), true, None).unwrap();
+        gles.surfaces[index].drew((0, drawn));
+        let (out_width, out_height) = (width / 2, (lead + drawn) / 2);
+        let transfer = Transfer {
+            input,
+            output,
+            input_width: width,
+            input_height: lead + drawn,
+            output_width: out_width,
+            output_height: out_height,
+            copy: (out_width, out_height),
+            scale: (2, 2),
+            flip: false,
+            input_linear: false,
+            output_tiled: true,
+            input_format: format,
+            output_format: format,
+            column: 0,
+        };
+        let mut expected = vec![0u8; (out_width * out_height * 4) as usize];
+        for y in 0..out_height {
+            for x in 0..out_width {
+                let mut sum = [0u32; 4];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let at = (input + pixel_offset(true, x * 2 + dx, y * 2 + dy, width, 4) as u32) as usize;
+                    let pixel = format.decode(&memory.0[at..at + 4]);
+                    for c in 0..4 {
+                        sum[c] += pixel[c] as u32;
+                    }
+                }
+                let at = pixel_offset(true, x, y, out_width, 4);
+                format.encode(sum.map(|c| ((c + 2) / 4) as u8), &mut expected[at..at + 4]);
+            }
+        }
+        assert!(gles.display_transfer(&mut memory, &transfer).unwrap());
+        // the drawing stayed on the GPU, nothing read it back
+        assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
+        gles.flush(&mut memory).unwrap();
+        assert_eq!(&memory.0[output as usize..output as usize + expected.len()], &expected[..]);
+    }
+
+    #[test]
+    fn a_texture_copy_of_a_drawing_stays_on_the_gpu_and_copies_it_exactly() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let (source, target, width, height) = (0x1000u32, 0x8000u32, 32u32, 32u32);
+        for format in [ColorFormat::Rgba8, ColorFormat::Rgb565] {
+            let size = width * height * format.bytes_per_pixel() as u32;
+            let mut memory = Flat(vec![0; 0x20000]);
+            for (i, byte) in memory.0[source as usize..(source + size) as usize].iter_mut().enumerate() {
+                *byte = (i * 37 + i / 5) as u8;
+            }
+            let index = gles.surface_rows(&mut memory, source, (width, height), Kind::Color(format), true, None).unwrap();
+            gles.surfaces[index].drew((0, height));
+            // the second and third rows of tiles, as a game copies part of one
+            let tile_rows = 8 * width * format.bytes_per_pixel() as u32;
+            assert!(gles.texture_copy(&mut memory, source + tile_rows, target, 2 * tile_rows, (0, 0), (0, 0)).unwrap());
+            gles.flush(&mut memory).unwrap();
+            let copied = &memory.0[target as usize..(target + 2 * tile_rows) as usize];
+            let original = &memory.0[(source + tile_rows) as usize..(source + 3 * tile_rows) as usize];
+            assert_eq!(copied, original, "{format:?}");
+            // part of the width, the way Fire Emblem Awakening copies a
+            // strip of its picture for an effect: lines of a few tiles, the
+            // rest of each row of tiles skipped, as the CPU would copy it
+            let tile = 64 * format.bytes_per_pixel() as u32;
+            for (first_tile, tiles, rows_of_tiles) in [(0u32, 2u32, 3u32), (1, 1, 2), (2, 2, 1)] {
+                let start = source + tile_rows + first_tile * tile;
+                let (line, skip) = (tiles * tile, tile_rows - tiles * tile);
+                let size = line * rows_of_tiles;
+                let mut expected = Vec::new();
+                for i in 0..rows_of_tiles {
+                    let at = (start + i * (line + skip)) as usize;
+                    expected.extend_from_slice(&memory.0[at..at + line as usize]);
+                }
+                let target = 0xC000;
+                // drawn again, the last check wrote it back
+                let index = gles.surfaces.iter().position(|s| s.addr == source && s.kind == Kind::Color(format)).unwrap();
+                gles.surfaces[index].drew((0, height));
+                assert!(gles.texture_copy(&mut memory, start, target, size, (line, skip), (line, 0)).unwrap(), "{format:?} {first_tile} {tiles}");
+                gles.flush(&mut memory).unwrap();
+                assert_eq!(&memory.0[target as usize..(target + size) as usize], &expected[..], "{format:?} {first_tile} {tiles}");
+            }
+            // into the same layout, gaps and all, as its battles save the
+            // picture: the columns between the lines keep what was there
+            {
+                let index = gles.surfaces.iter().position(|s| s.addr == source && s.kind == Kind::Color(format)).unwrap();
+                gles.surfaces[index].drew((0, height));
+                let (line, skip) = (tile_rows - tile, tile);
+                let size = line * 2;
+                let target = 0x14000usize;
+                for (i, byte) in memory.0[target..target + 2 * tile_rows as usize].iter_mut().enumerate() {
+                    *byte = (i * 11) as u8;
+                }
+                let mut expected = memory.0[target..target + 2 * tile_rows as usize].to_vec();
+                for i in 0..2usize {
+                    let from = (source + tile_rows) as usize + i * tile_rows as usize;
+                    let to = i * tile_rows as usize;
+                    expected[to..to + line as usize].copy_from_slice(&memory.0[from..from + line as usize]);
+                }
+                assert!(gles.texture_copy(&mut memory, source + tile_rows, target as u32, size, (line, skip), (line, skip)).unwrap(), "{format:?} strided");
+                gles.flush(&mut memory).unwrap();
+                assert_eq!(&memory.0[target..target + 2 * tile_rows as usize], &expected[..], "{format:?} strided");
+            }
+            // not starting on a tile is the CPU's
+            assert!(!gles.texture_copy(&mut memory, source + 16, target, tile_rows, (0, 0), (0, 0)).unwrap());
+        }
+    }
 
     #[test]
     fn stored_rows_match_encoding_each_pixel() {

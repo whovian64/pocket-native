@@ -44,12 +44,12 @@ impl Hints {
     /// the interpreter ran an instruction at pc that the library has no
     /// code for. where that follows the library's code, missing code starts,
     /// what it goes on to call the next build finds from there.
-    pub fn interpreted(&mut self, pc: u32, thumb: bool) {
+    /// true when the place is new.
+    pub fn interpreted(&mut self, pc: u32, thumb: bool) -> bool {
         let at = pc & !1;
-        if !self.interpreting && self.text.contains(&at) {
-            self.seen.insert(at | thumb as u32);
-        }
+        let new = !self.interpreting && self.text.contains(&at) && self.seen.insert(at | thumb as u32);
         self.interpreting = true;
+        new
     }
 
     /// writes the file when there is anything new.

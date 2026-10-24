@@ -48,6 +48,30 @@ const STICK: f32 = 1800.0;
 pub struct Pad {
     pub keys: HashSet<u16>,
     pub axes: [i32; 8],
+    /// a finger on the screen, where it is in the layout's size, from a
+    /// handheld's touch screen.
+    pub touch: Option<(f32, f32)>,
+    /// a finger on a second window's screen, across and down it from 0 to 1.
+    pub second_touch: Option<(f32, f32)>,
+}
+
+/// the pad a program around the frontend fills, in place of evdev's.
+static SHARED: std::sync::OnceLock<Arc<Mutex<Pad>>> = std::sync::OnceLock::new();
+
+/// set when the program around the frontend wants the game to stop, which
+/// saves the settings and ends it, as quitting from the menu does.
+pub static QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// the pad for the program around the frontend to fill, the same one each
+/// call, which the frontend then reads in place of evdev.
+#[allow(dead_code)]
+pub fn share() -> Arc<Mutex<Pad>> {
+    SHARED.get_or_init(Default::default).clone()
+}
+
+/// the pad shared, when there is one.
+pub fn shared() -> Option<Arc<Mutex<Pad>>> {
+    SHARED.get().cloned()
 }
 
 /// the handheld's gamepad device and its name.

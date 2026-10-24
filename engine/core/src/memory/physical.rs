@@ -51,7 +51,7 @@ struct Shared {
 }
 
 impl Shared {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn new(len: usize) -> Option<Shared> {
         // SAFETY: plain system calls, every result checked
         unsafe {
@@ -72,7 +72,7 @@ impl Shared {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     fn new(_len: usize) -> Option<Shared> {
         None
     }
@@ -80,7 +80,7 @@ impl Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         // SAFETY: the mapping and descriptor Shared::new made
         unsafe {
             libc::munmap(self.base as *mut libc::c_void, self.len);

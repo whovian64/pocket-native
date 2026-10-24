@@ -6,6 +6,53 @@ use crate::settings::Layout;
 const TOP: [f32; 2] = [400.0, 240.0];
 const BOTTOM: [f32; 2] = [320.0, 240.0];
 
+/// the areas for the screens as the settings have them, or with a second
+/// window to show one by itself, the other filling the panel and the one
+/// there the whole of its own size, which the second window fills.
+pub fn shown(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
+    let size = zakuro_gpu::layout_size();
+    if zakuro_gpu::stacked() {
+        return stacked(settings, size);
+    }
+    if !zakuro_gpu::second_window() {
+        return areas(settings.layout, settings.swapped, size);
+    }
+    zakuro_gpu::set_second_shows_top(settings.swapped);
+    let (width, height) = (size.0 as f32, size.1 as f32);
+    let (here, there) = if settings.swapped { (BOTTOM, TOP) } else { (TOP, BOTTOM) };
+    let scale = (width / here[0]).min(height / here[1]);
+    let (a, b) = ((here[0] * scale).round() as i32, (here[1] * scale).round() as i32);
+    // the screen on the panel is the top one unless they are swapped, and
+    // the second window stretches the other as the settings say
+    let filled = if settings.stretched.stretches(!settings.swapped) {
+        Some([0, 0, size.0 as i32, size.1 as i32])
+    } else {
+        Some([(size.0 as i32 - a) / 2, (size.1 as i32 - b) / 2, a, b])
+    };
+    zakuro_gpu::set_second_stretched(settings.stretched.stretches(settings.swapped));
+    let alone = Some([0, 0, there[0] as i32, there[1] as i32]);
+    if settings.swapped { [alone, filled] } else { [filled, alone] }
+}
+
+/// both panels of a dual-screen handheld as one window, stacked: a screen
+/// on each half, the top one above unless swapped, each kept in shape or
+/// stretched over its half as the settings say.
+fn stacked(settings: &crate::settings::Settings, (width, height): (u32, u32)) -> [Option<[i32; 4]>; 2] {
+    let (width, half) = (width as i32, height as i32 / 2);
+    let place = |screen: [f32; 2], top: bool, stretched: bool| {
+        let y = if top { 0 } else { half };
+        if stretched {
+            return Some([0, y, width, half]);
+        }
+        let scale = (width as f32 / screen[0]).min(half as f32 / screen[1]);
+        let (a, b) = ((screen[0] * scale).round() as i32, (screen[1] * scale).round() as i32);
+        Some([(width - a) / 2, y + (half - b) / 2, a, b])
+    };
+    // the 3DS's top screen, then its bottom one
+    let top_above = !settings.swapped;
+    [place(TOP, top_above, settings.stretched.stretches(true)), place(BOTTOM, !top_above, settings.stretched.stretches(false))]
+}
+
 pub fn areas(layout: Layout, swapped: bool, (width, height): (u32, u32)) -> [Option<[i32; 4]>; 2] {
     let (width, height) = (width as i32, height as i32);
     let (first, second) = if swapped { (BOTTOM, TOP) } else { (TOP, BOTTOM) };
@@ -67,5 +114,21 @@ mod tests {
         for (layout, swapped, expected) in cases {
             assert_eq!(areas(layout, swapped, r36s), expected, "{layout:?} swapped {swapped}");
         }
+    }
+
+    /// DualStack's 640x960 window, both RG DS panels: the top screen as big
+    /// as it fits on the top panel, the bottom one exactly twice its size on
+    /// the bottom panel, which the swap and stretching move and fill.
+    #[test]
+    fn stacked_panels_get_a_screen_each() {
+        use crate::settings::{Settings, Stretch};
+        let rg_ds = (640, 960);
+        let mut settings = Settings::default();
+        assert_eq!(stacked(&settings, rg_ds), [Some([0, 48, 640, 384]), Some([0, 480, 640, 480])]);
+        settings.swapped = true;
+        assert_eq!(stacked(&settings, rg_ds), [Some([0, 528, 640, 384]), Some([0, 0, 640, 480])]);
+        settings.swapped = false;
+        settings.stretched = Stretch::Top;
+        assert_eq!(stacked(&settings, rg_ds), [Some([0, 0, 640, 480]), Some([0, 480, 640, 480])]);
     }
 }

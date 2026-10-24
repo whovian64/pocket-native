@@ -98,4 +98,7 @@ pub(crate) struct Transfer {
     pub(crate) output_tiled: bool,
     pub(crate) input_format: ColorFormat,
     pub(crate) output_format: ColorFormat,
+    /// the input pixels skipped at the left of each row, a texture copy of
+    /// part of a picture's width.
+    pub(crate) column: u32,
 }

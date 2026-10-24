@@ -66,7 +66,12 @@ pub(crate) fn translate(program: &Program, entry_point: u32, semantics: &[u32; S
     if length > LONGEST {
         return Err(format!("{length} reachable instructions, more than {LONGEST}"));
     }
-    Ok(translator.shader(semantics))
+    let flows = translator.flows();
+    let (source, form) = translator.shader(semantics);
+    // which form each program took, for telling what costs the GPU its time:
+    // a dispatch loop runs far slower than structured code on a phone GPU
+    log::info!("vertex program from {entry_point}: {length} instructions, {form}{}", if flows { "" } else { " (no flow)" });
+    Ok(source)
 }
 
 /// a vertex shader in GLSL to SPIR-V, or why not, which tells the tests the
@@ -162,9 +167,10 @@ impl<'a> Translator<'a> {
         self.runs.values().any(|run| matches!(run.exit, Exit::Flow(_)))
     }
 
-    fn shader(mut self, semantics: &[u32; SEMANTICS]) -> String {
+    fn shader(mut self, semantics: &[u32; SEMANTICS]) -> (String, &'static str) {
         let mut run = String::new();
         let flows = self.flows() && !self.structured(&mut run);
+        let form = if flows { "dispatch loop" } else { "structured" };
         if flows {
             self.dispatch(&mut run);
         } else if run.is_empty() {
@@ -214,7 +220,7 @@ impl<'a> Translator<'a> {
         let _ = writeln!(out, "    out_quaternion = vec4({});", vector(14..18, "0.0"));
         let _ = writeln!(out, "    out_view = vec3({});", vector(18..21, "0.0"));
         out.push_str("}\n");
-        out
+        (out, form)
     }
 
     /// a program without flow, its runs one after another from the entry.

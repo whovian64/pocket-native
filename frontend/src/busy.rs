@@ -8,7 +8,8 @@ use std::time::Instant;
 pub struct Busy {
     ticks: HashMap<String, (String, u64)>,
     since: Instant,
-    gpu: Option<Arc<(AtomicU64, AtomicU64)>>,
+    /// the GPU's load summed, how many reads, and its clock summed in MHz.
+    gpu: Option<Arc<(AtomicU64, AtomicU64, AtomicU64)>>,
 }
 
 impl Busy {
@@ -18,12 +19,18 @@ impl Busy {
             dirs.flatten().map(|dir| dir.path()).find(|path| path.to_string_lossy().contains("gpu") && path.join("load").exists())
         });
         let gpu = load.map(|dir| {
-            let samples = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
+            let samples = Arc::new((AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)));
             let taken = samples.clone();
             let _ = std::thread::Builder::new().name("gpu-load".into()).spawn(move || loop {
-                if let Some(load) = std::fs::read_to_string(dir.join("load")).ok().and_then(|text| text.split('@').next()?.trim().parse::<u64>().ok()) {
+                // the load is of the clock the GPU runs at then, which the
+                // part after the @ says: a GPU held at a low clock reads busy
+                if let Some((load, hz)) = std::fs::read_to_string(dir.join("load")).ok().and_then(|text| {
+                    let (load, hz) = text.trim().split_once('@').unwrap_or((text.trim(), ""));
+                    Some((load.trim().parse::<u64>().ok()?, hz.trim_end_matches("Hz").trim().parse::<u64>().unwrap_or(0)))
+                }) {
                     taken.0.fetch_add(load, Ordering::Relaxed);
                     taken.1.fetch_add(1, Ordering::Relaxed);
+                    taken.2.fetch_add(hz / 1_000_000, Ordering::Relaxed);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             });
@@ -54,9 +61,9 @@ impl Busy {
         let waited = zakuro_core::GPU_WAITED.swap(0, Ordering::Relaxed) as f64 / 1e6;
         out.push(format!("waiting on gpu {:.0}%", waited / seconds * 100.0));
         if let Some(gpu) = &self.gpu {
-            let (sum, count) = (gpu.0.swap(0, Ordering::Relaxed), gpu.1.swap(0, Ordering::Relaxed));
+            let (sum, count, mhz) = (gpu.0.swap(0, Ordering::Relaxed), gpu.1.swap(0, Ordering::Relaxed), gpu.2.swap(0, Ordering::Relaxed));
             if count > 0 {
-                out.push(format!("GPU {}%", sum / count));
+                out.push(if mhz > 0 { format!("GPU {}% at {} MHz", sum / count, mhz / count) } else { format!("GPU {}%", sum / count) });
             }
         }
         out.join(", ")

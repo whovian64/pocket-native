@@ -1,22 +1,36 @@
 //! a sampling profiler: a CPU time timer interrupts whichever thread runs,
 //! which notes its thread and program counter.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const SAMPLES: usize = 1 << 18;
 static PCS: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES];
 static LRS: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES];
 static TIDS: [AtomicU32; SAMPLES] = [const { AtomicU32::new(0) }; SAMPLES];
 static NEXT: AtomicUsize = AtomicUsize::new(0);
+/// the kernel's profiling timer, which the libc crate leaves out on Android.
+const ITIMER_PROF: libc::c_int = 2;
+/// whether the timer is going, so that a run ending before its last
+/// profiled frame still stops it and writes what it has.
+static RUNNING: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn sampled(_: i32, _: *mut libc::siginfo_t, context: *mut libc::c_void) {
     // SAFETY: the kernel hands the handler the interrupted context
     let (pc, lr) = unsafe {
-        let context = &(*(context as *const libc::ucontext_t)).uc_mcontext;
+        // on aarch64 the registers are read where the kernel puts them:
+        // the libc crate's Android ucontext_t leaves out the padding that
+        // makes bionic's signal mask 128 bytes, as glibc's is, so its
+        // uc_mcontext is 128 bytes early and read garbage. the context
+        // starts at 176, after flags, link, stack and that mask, rounded to
+        // 16, then the fault address, x0 to x30, sp and pc
         #[cfg(target_arch = "aarch64")]
-        let pair = (context.pc, context.regs[30]);
+        let pair = {
+            const MCONTEXT: usize = 176;
+            let word = |at: usize| std::ptr::read_unaligned((context as *const u8).add(at) as *const u64);
+            (word(MCONTEXT + 8 + 32 * 8), word(MCONTEXT + 8 + 30 * 8))
+        };
         #[cfg(target_arch = "x86_64")]
-        let pair = (context.gregs[libc::REG_RIP as usize] as u64, 0);
+        let pair = ((*(context as *const libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize] as u64, 0);
         pair
     };
     // SAFETY: gettid is async-signal-safe
@@ -38,17 +52,23 @@ pub fn start() {
         libc::sigaction(libc::SIGPROF, &action, std::ptr::null_mut());
         let interval = libc::timeval { tv_sec: 0, tv_usec: 1000 };
         let timer = libc::itimerval { it_interval: interval, it_value: interval };
-        libc::setitimer(libc::ITIMER_PROF, &timer, std::ptr::null_mut());
+        libc::setitimer(ITIMER_PROF, &timer, std::ptr::null_mut());
     }
+    RUNNING.store(true, Ordering::Relaxed);
     log::info!("profiling the host");
+}
+
+pub fn running() -> bool {
+    RUNNING.load(Ordering::Relaxed)
 }
 
 /// stops and writes thread, mapping and offset for each sample.
 pub fn dump(path: &std::path::Path) {
+    RUNNING.store(false, Ordering::Relaxed);
     // SAFETY: a zero timer stops it
     unsafe {
         let zero: libc::itimerval = std::mem::zeroed();
-        libc::setitimer(libc::ITIMER_PROF, &zero, std::ptr::null_mut());
+        libc::setitimer(ITIMER_PROF, &zero, std::ptr::null_mut());
     }
     let maps: Vec<(u64, u64, u64, String)> = std::fs::read_to_string("/proc/self/maps")
         .unwrap_or_default()
