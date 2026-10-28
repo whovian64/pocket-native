@@ -182,6 +182,19 @@ impl SystemMode {
     }
 }
 
+/// the APPLICATION region's size and the APPMEMTYPE the configuration memory
+/// reports for a New3DS system mode, None for legacy, which leaves the Old3DS
+/// mode in charge.
+pub fn n3ds_application_memory(mode: u8) -> Option<(u32, u32)> {
+    match mode {
+        0 => None,
+        2 => Some((178 * 1024 * 1024, 7)),
+        3 => Some((124 * 1024 * 1024, 8)),
+        // 1, and the undefined ones, which the kernel treats as Prod
+        _ => Some((124 * 1024 * 1024, 6)),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExHeader {
     pub title: String,
@@ -206,7 +219,7 @@ pub struct ExHeader {
     pub ideal_processor: u8,
     pub affinity_mask: u8,
     pub system_mode: SystemMode,
-    /// New3DS system mode, 0 legacy, 1 = 124 MiB, 2 = 178 MiB.
+    /// New3DS system mode, 0 legacy, 1 = 124 MiB, 2 = 178 MiB, 3 = 124 MiB.
     pub n3ds_system_mode: u8,
     /// New3DS CPU clock, 0 = 268 MHz, 1 = 804 MHz.
     pub n3ds_cpu_speed: u8,
@@ -304,9 +317,9 @@ impl ExHeader {
             ideal_processor: flag0 & 0x3,
             affinity_mask: (flag0 >> 2) & 0x3,
             system_mode: SystemMode::from_raw((flag0 >> 4) & 0xF),
-            n3ds_system_mode: (flag1 >> 4) & 0xF,
-            n3ds_cpu_speed: (flag2 >> 1) & 0x1,
-            enable_l2_cache: flag2 & 0x1 != 0,
+            n3ds_system_mode: flag2 & 0xF,
+            n3ds_cpu_speed: (flag1 >> 1) & 0x1,
+            enable_l2_cache: flag1 & 0x1 != 0,
             resource_limit_category: aci.u8(0x16F)?,
             service_access,
             memory_type,
@@ -340,5 +353,20 @@ mod tests {
         // call 1 from the first table, 168 and 170 from the last
         assert_eq!(header.allowed_svcs, [1 << 1, 0, 0, 0, 0, 1 << 8 | 1 << 10]);
         assert_eq!(header.handle_table_size, 0x123);
+    }
+
+    /// Ultra Moon's flags: L2 cache and 804 MHz in flag 1, the New3DS Prod
+    /// mode in flag 2, Old3DS Dev2 in flag 0.
+    #[test]
+    fn system_mode_flags_are_read_from_their_own_bytes() {
+        let mut data = vec![0u8; 0x800];
+        data[0x20C..0x20F].copy_from_slice(&[0x03, 0x01, 0x34]);
+        let header = ExHeader::parse(&data).unwrap();
+        assert!(header.enable_l2_cache);
+        assert_eq!(header.n3ds_cpu_speed, 1);
+        assert_eq!(header.n3ds_system_mode, 1);
+        assert_eq!(header.system_mode, SystemMode::Dev2);
+        assert_eq!(n3ds_application_memory(header.n3ds_system_mode), Some((124 * 1024 * 1024, 6)));
+        assert_eq!(n3ds_application_memory(0), None);
     }
 }

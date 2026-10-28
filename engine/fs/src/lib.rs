@@ -17,7 +17,7 @@ use memmap2::Mmap;
 
 pub use cia::Cia;
 pub use exefs::ExeFs;
-pub use ncch::{CodeSetInfo, ExHeader, MemoryType, NcchHeader, SystemMode};
+pub use ncch::{n3ds_application_memory, CodeSetInfo, ExHeader, MemoryType, NcchHeader, SystemMode};
 pub use ncsd::Ncsd;
 pub use romfs::RomFs;
 
