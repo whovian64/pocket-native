@@ -94,7 +94,7 @@ pub fn gamepad() -> Option<(String, String)> {
     blocks.into_iter().find_map(|block| {
         // the name comes in quotes
         let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?.trim_matches('"');
-        if !name.contains("Gamepad") && !name.contains("Controller") && !name.contains("Joypad") && !name.contains("joypad") && !h700_pad(name) && !rk3562_pad(name) && name != "muOS-Keys" {
+        if !name.contains("Gamepad") && !name.contains("Controller") && !name.contains("Joypad") && !name.contains("joypad") && !h700_pad(name) && !rk3562_pad(name) && !miyoo_pad(name) && name != "muOS-Keys" {
             return None;
         }
         let handlers = block.lines().find_map(|line| line.strip_prefix("H: Handlers="))?;
@@ -116,6 +116,12 @@ fn rk3562_pad(name: &str) -> bool {
     name.trim_matches('"') == "rk3562-joystick"
 }
 
+/// the Miyoo Flip's pad under spruceOS: the usual gamepad codes (304 to 318,
+/// no 312/313), the d-pad as a hat, the triggers only as ABS_Z and ABS_RZ.
+fn miyoo_pad(name: &str) -> bool {
+    name.trim_matches('"').starts_with("MIYOO Player")
+}
+
 pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
     // muOS calls its pad muOS-Keys: on its release the kernel's, numbered as
     // on the H700 handhelds, and from the next one a pad muOS makes itself,
@@ -131,6 +137,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
     // the RK3562 handhelds give them the usual numbers too, with the
     // sticks on the usual axes
     let rk3562 = rk3562_pad(&name);
+    let miyoo = miyoo_pad(&name);
     log::info!(
         "buttons from {name}{}",
         if h700 {
@@ -141,6 +148,8 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
             ", numbered as on the RK3562 handhelds"
         } else if muos {
             ", numbered as on muOS"
+        } else if miyoo {
+            ", numbered as on the Miyoo Flip"
         } else {
             ""
         }
@@ -151,7 +160,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
         Some([None, None, Some(0), Some(1), Some(3), Some(4)])
     } else if rk3566 {
         Some([Some(0), Some(1), Some(3), None, None, Some(4)])
-    } else if rk3562 || muos {
+    } else if rk3562 || muos || miyoo {
         // left stick on ABS_X and ABS_Y, right on ABS_RX and ABS_RY, the
         // triggers on ABS_Z and ABS_RZ, which are buttons here
         Some([Some(0), Some(1), None, Some(3), Some(4), None])
@@ -190,6 +199,8 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                         rk3562_button(code)
                     } else if muos {
                         muos_button(code)
+                    } else if miyoo {
+                        rk3566_button(code)
                     } else {
                         code
                     };
@@ -199,7 +210,19 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                         pad.keys.insert(code);
                     }
                 }
-                (3, _) if (h700 || muos) && matches!(code, 16 | 17) => {
+                (3, _) if miyoo && matches!(code, 2 | 5) => {
+                    let key = if code == 2 { L2 } else { R2 };
+                    let half = match ranges[code as usize] {
+                        Some((least, most)) => least + (most - least) / 2,
+                        None => 127,
+                    };
+                    if value > half {
+                        pad.keys.insert(key);
+                    } else {
+                        pad.keys.remove(&key);
+                    }
+                }
+                (3, _) if (h700 || muos || miyoo) && matches!(code, 16 | 17) => {
                     let (less, more) = if code == 16 { (LEFT, RIGHT) } else { (UP, DOWN) };
                     pad.keys.remove(&less);
                     pad.keys.remove(&more);
@@ -343,6 +366,49 @@ pub fn stick(value: i32) -> f32 {
     if value.abs() < 200 { 0.0 } else { (value as f32 / STICK).clamp(-1.0, 1.0) }
 }
 
+/// how far along its travel a stick counts as pushed all the way: the
+/// Miyoo Flip's reaches 93 % of its declared range on an easy spin and
+/// games like A Link Between Worlds drop out of a run below full push.
+/// Measured on a Flip (1757 samples): the gate reaches 1.0–1.2
+/// to the east and north but only 0.89–0.95 to the west and south-west,
+/// and a stick held there jitters down to 0.6–0.7 now and then.
+const REACH: f32 = 0.78;
+
+/// frames a full push is held for once the stick dips below the reach
+/// while still clearly pushed, so a jitter on the gate does not drop a run.
+const HOLD_FRAMES: u8 = 8;
+
+/// how far a dipping stick must still be pushed for the hold to apply.
+const HOLD_FLOOR: f32 = 0.6;
+
+static HELD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// the left stick as a circle pad position, the dead zone and the reach
+/// taken on the whole vector rather than each axis, so that a diagonal held
+/// against the gate counts as far as a cardinal, and the position never
+/// leaves the unit circle the console's pad is confined to.
+pub fn circle(x: i32, y: i32) -> (f32, f32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (x, y) = (x as f32 / STICK, y as f32 / STICK);
+    let length = (x * x + y * y).sqrt();
+    if length < 200.0 / STICK {
+        HELD.store(0, Relaxed);
+        return (0.0, 0.0);
+    }
+    let mut reached = length / REACH;
+    if reached >= 1.0 {
+        HELD.store(HOLD_FRAMES, Relaxed);
+    } else if length >= HOLD_FLOOR && HELD.load(Relaxed) > 0 {
+        // a dip on the gate: still the full push, for a few frames
+        HELD.fetch_sub(1, Relaxed);
+        reached = 1.0;
+    } else {
+        HELD.store(0, Relaxed);
+    }
+    let scale = reached.min(1.0) / length;
+    (x * scale, y * scale)
+}
+
 /// the title's buttons and circle pad for the keys held and the sticks.
 pub fn controls(keys: &HashSet<u16>, axes: &[i32; 8], settings: &Settings) -> (PadState, f32, f32) {
     let mut buttons = PadState::empty();
@@ -360,7 +426,10 @@ pub fn controls(keys: &HashSet<u16>, axes: &[i32; 8], settings: &Settings) -> (P
     }
     let (x, y) = match dpad(keys) {
         (across, down) if settings.dpad == Dpad::CirclePad && (across, down) != (0.0, 0.0) => (across, -down),
-        _ => (stick(axes[0]), -stick(axes[1])),
+        _ => {
+            let (x, y) = circle(axes[0], axes[1]);
+            (x, -y)
+        }
     };
     match settings.left_stick {
         Stick::CirclePad => (buttons, x, y),

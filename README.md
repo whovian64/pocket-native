@@ -70,6 +70,7 @@ working or not.
 | R36S and its clones | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones | The main target, developed and tested on an R36S with ArkOS |
 | Powkiddy RX6H | dArkOS for clones | Played by testers. No FN button: L3 does its job |
 | Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | Knulli, muOS | Played by testers |
+| Miyoo Flip | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
 | Anbernic RG353 and RG503 | ArkOS | Buttons mapped, no tester report yet |
 | Anbernic RG52 Mini | dArkOS | Played by testers |
 | Anbernic RG351P | ArkOS | Buttons not found yet |
