@@ -816,6 +816,8 @@ struct BoundTexture {
     texels: Arc<[[u8; 4]]>,
     /// the texture in a format of its own size, for a GPU that samples it.
     packed: Option<Packed>,
+    /// the texture pack's picture drawn in its place, by a GPU.
+    replacement: Option<Arc<crate::pack::Material>>,
     drawn: Option<DrawnTexture>,
     /// bilinear rather than point sampling when magnifying.
     linear: bool,
@@ -965,6 +967,10 @@ pub struct TextureCache {
     /// leave memory as it was, but the software path writes what it drew
     /// there when the list ends.
     written: Vec<(u32, u32)>,
+    /// the texture pack whose pictures replace textures, and where a
+    /// texture is laid out to hash it as Citra did.
+    pack: Option<Arc<crate::pack::Pack>>,
+    rows: Vec<u8>,
 }
 
 /// address, format, size, and whether it is packed for a GPU.
@@ -974,11 +980,16 @@ type TextureKey = (u32, TextureFormat, u32, u32, bool, u32);
 /// a texture as a GPU stores it, and how.
 pub(crate) type Packed = (crate::texture::Packing, Arc<[u8]>);
 
+/// a texture's texels, packed or not, and the texture pack's picture
+/// replacing it.
+type Found = (Arc<[[u8; 4]]>, Option<Packed>, Option<Arc<crate::pack::Material>>);
+
 struct Decoded {
     /// the hash of the bytes it was decoded from.
     hash: u64,
     texels: Arc<[[u8; 4]]>,
     packed: Option<Packed>,
+    replacement: Option<Arc<crate::pack::Material>>,
     /// the list it was last read in, how many writes that list had made by
     /// then, the journal's stamp when it was last checked, and whether a
     /// flush of everything went over it since it was read.
@@ -999,6 +1010,13 @@ const TEXTURE_TRUSTED_LISTS: u64 = 600;
 const TEXTURE_FLUSHED_LISTS: u64 = 64;
 
 impl TextureCache {
+    /// replaces textures with the pack's pictures from now on, or with none.
+    pub fn set_pack(&mut self, pack: Option<Arc<crate::pack::Pack>>) {
+        self.pack = pack;
+        self.entries.clear();
+        self.texels = 0;
+    }
+
     /// a new command list starts.
     pub fn begin_list(&mut self) {
         self.list += 1;
@@ -1017,7 +1035,7 @@ impl TextureCache {
     /// the memory a title's CPU, its services and the GPU write, and the
     /// texture is read again now and then all the same in case a write went
     /// past it.
-    fn checked(&mut self, key: TextureKey, size: u32) -> Option<(Arc<[[u8; 4]]>, Option<Packed>)> {
+    fn checked(&mut self, key: TextureKey, size: u32) -> Option<Found> {
         let (list, written) = (self.list, &self.written);
         let decoded = self.entries.get_mut(&key)?;
         let (checked, writes, stamp, flushed) = decoded.checked;
@@ -1037,11 +1055,11 @@ impl TextureCache {
             true => list - checked < lists,
             false => checked == list,
         };
-        trusted.then(|| (decoded.texels.clone(), decoded.packed.clone()))
+        trusted.then(|| (decoded.texels.clone(), decoded.packed.clone(), decoded.replacement.clone()))
     }
 
     /// the texture decoded from data, which was read after stamp.
-    fn decoded(&mut self, key: TextureKey, data: &[u8], stamp: u64) -> (Arc<[[u8; 4]]>, Option<Packed>) {
+    fn decoded(&mut self, key: TextureKey, data: &[u8], stamp: u64) -> Found {
         let (_, format, width, height, packs, levels) = key;
         let hash = fingerprint(data);
         let checked = (self.list, self.written.len(), stamp, false);
@@ -1049,7 +1067,7 @@ impl TextureCache {
         texture_stats(key, data.len(), hit);
         if let Some(decoded) = self.entries.get_mut(&key).filter(|decoded| decoded.hash == hash) {
             decoded.checked = checked;
-            return (decoded.texels.clone(), decoded.packed.clone());
+            return (decoded.texels.clone(), decoded.packed.clone(), decoded.replacement.clone());
         }
         let count = texture_levels(format, width, height, levels).map(|(w, h, _)| (w * h) as usize).sum::<usize>();
         // a handheld in fast mode has little memory to spare, a quarter
@@ -1083,11 +1101,21 @@ impl TextureCache {
             Some(_) => Arc::from([]),
             None => texture_levels(format, width, height, levels).flat_map(|(w, h, offset)| crate::texture::decode_texels(&data[offset..], format, w, h)).collect(),
         };
-        if let Some(old) = self.entries.insert(key, Decoded { hash, texels: texels.clone(), packed: packed.clone(), checked }) {
+        // packs hash and replace the largest size alone, the smaller ones follow it
+        let base = &data[..(width as usize * height as usize * format.bits_per_pixel() as usize).div_ceil(8).min(data.len())];
+        if crate::pack::recording() {
+            // a packed texture has no texels here, decoded for the record alone
+            let decoded = crate::texture::decode_texels(base, format, width, height);
+            crate::pack::record(base, &decoded, format, width, height);
+        }
+        // the pack's picture for these bytes, hashed only when there is a pack
+        let replacement = self.pack.as_deref().and_then(|pack| pack.find(base, format, width, height, &mut self.rows));
+        let decoded = Decoded { hash, texels: texels.clone(), packed: packed.clone(), replacement: replacement.clone(), checked };
+        if let Some(old) = self.entries.insert(key, decoded) {
             self.texels -= old.texels.len() + old.packed.map_or(0, |(_, bytes)| bytes.len() / 4);
         }
         self.texels += texels.len() + packed.as_ref().map_or(0, |(_, bytes)| bytes.len() / 4);
-        (texels, packed)
+        (texels, packed, replacement)
     }
 }
 
@@ -1248,6 +1276,7 @@ fn empty_texture() -> BoundTexture {
     BoundTexture {
         texels: TEXELS.get_or_init(|| Arc::from([[0u8; 4]].as_slice())).clone(),
         packed: None,
+        replacement: None,
         drawn: None,
         linear: false,
         wrap_s: Wrap::Repeat,
@@ -1297,8 +1326,8 @@ fn bind_texture<M: GpuMemory>(
     let size = texture_levels(format, width, height, levels + 1).last().map_or(0, |(_, _, end)| end);
 
     let key = (addr, format, width, height, packs, levels);
-    let (texels, packed) = match (drawn, cache.checked(key, size as u32)) {
-        (Some(_), _) => (Arc::from([]), None),
+    let (texels, packed, replacement) = match (drawn, cache.checked(key, size as u32)) {
+        (Some(_), _) => (Arc::from([]), None, None),
         (None, Some(decoded)) => decoded,
         (None, None) => {
             let stamp = crate::journal::now();
@@ -1321,6 +1350,7 @@ fn bind_texture<M: GpuMemory>(
     Some(BoundTexture {
         texels,
         packed,
+        replacement,
         drawn,
         levels,
         lod: Lod {
@@ -2903,6 +2933,7 @@ mod tests {
         let texture = |wrap: Wrap| BoundTexture {
             drawn: None,
             packed: None,
+            replacement: None,
             texels: vec![[0xFF; 4]; 8 * 8].into(),
             linear: false,
             wrap_s: wrap,
