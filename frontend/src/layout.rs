@@ -11,6 +11,8 @@ const BOTTOM: [f32; 2] = [320.0, 240.0];
 /// there the whole of its own size, which the second window fills.
 pub fn shown(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
     let size = zakuro_gpu::layout_size();
+    // the second window's screens keep the 3DS's shapes
+    zakuro_gpu::set_top_crop(if zakuro_gpu::second_window() && !zakuro_gpu::stacked() { 0.0 } else { settings.aspect.crop() });
     if zakuro_gpu::stacked() {
         return stacked(settings, size);
     }
@@ -44,22 +46,29 @@ pub fn shown(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
 }
 
 /// both panels of a dual-screen handheld as one window, stacked: a screen
-/// on each half, the top one above unless swapped, each kept in shape or
-/// stretched over its half as the settings say.
+/// on each half, the top one above unless swapped, each in the shape the
+/// aspect ratio gives it, or stretched over its half as the settings say.
 fn stacked(settings: &crate::settings::Settings, (width, height): (u32, u32)) -> [Option<[i32; 4]>; 2] {
     let (width, half) = (width as i32, height as i32 / 2);
+    let aspect = settings.aspect;
+    // a whole number of the panel's pixels to each of the screen's
+    let pixels = zakuro_gpu::layout_scale();
     let place = |screen: [f32; 2], top: bool, stretched: bool| {
         let y = if top { 0 } else { half };
-        if stretched {
+        if stretched || aspect == Aspect::Stretch {
             return Some([0, y, width, half]);
         }
-        let scale = (width as f32 / screen[0]).min(half as f32 / screen[1]);
+        let scale = match ((width as f32 / screen[0]).min(half as f32 / screen[1]) * pixels).floor() {
+            whole if aspect == Aspect::Integer && whole >= 1.0 => whole / pixels,
+            _ => (width as f32 / screen[0]).min(half as f32 / screen[1]),
+        };
         let (a, b) = ((screen[0] * scale).round() as i32, (screen[1] * scale).round() as i32);
         Some([(width - a) / 2, y + (half - b) / 2, a, b])
     };
     // the 3DS's top screen, then its bottom one
     let top_above = !settings.swapped;
-    [place(TOP, top_above, settings.stretched.stretches(true)), place(BOTTOM, !top_above, settings.stretched.stretches(false))]
+    let top = [TOP[1] * aspect.ratio(), TOP[1]];
+    [place(top, top_above, settings.stretched.stretches(true)), place(BOTTOM, !top_above, settings.stretched.stretches(false))]
 }
 
 pub fn areas(layout: Layout, swapped: bool, aspect: Aspect, (width, height): (u32, u32)) -> [Option<[i32; 4]>; 2] {
@@ -167,5 +176,23 @@ mod tests {
         settings.swapped = false;
         settings.stretched = Stretch::Top;
         assert_eq!(stacked(&settings, rg_ds), [Some([0, 0, 640, 480]), Some([0, 480, 640, 480])]);
+    }
+
+    /// the aspect ratios on the RG DS's stacked panels: the top screen's
+    /// shape as on one panel, its 4:3 middle cropped filling the top panel.
+    #[test]
+    fn stacked_panels_take_the_aspect_ratio() {
+        let rg_ds = (640, 960);
+        let mut settings = crate::settings::Settings::default();
+        let with = |settings: &mut crate::settings::Settings, aspect| {
+            settings.aspect = aspect;
+            stacked(settings, rg_ds)
+        };
+        assert_eq!(with(&mut settings, Aspect::Crop), [Some([0, 0, 640, 480]), Some([0, 480, 640, 480])]);
+        assert_eq!(with(&mut settings, Aspect::FourThree), [Some([0, 0, 640, 480]), Some([0, 480, 640, 480])]);
+        assert_eq!(with(&mut settings, Aspect::SixteenNine), [Some([0, 60, 640, 360]), Some([0, 480, 640, 480])]);
+        assert_eq!(with(&mut settings, Aspect::Integer), [Some([120, 120, 400, 240]), Some([0, 480, 640, 480])]);
+        assert_eq!(with(&mut settings, Aspect::Stretch), [Some([0, 0, 640, 480]), Some([0, 480, 640, 480])]);
+        assert_eq!(Aspect::Crop.crop(), 0.1);
     }
 }

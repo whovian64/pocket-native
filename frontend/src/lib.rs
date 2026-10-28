@@ -42,7 +42,7 @@ use crate::font::{Canvas, Font};
 use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, SELECT, START};
 use crate::menu::{Action, Menu, Status};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings};
+use crate::settings::{Advanced, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings};
 
 /// the exit code that asks the launcher to start the game again.
 const RESET: i32 = 3;
@@ -181,6 +181,11 @@ pub fn run(mut args: Vec<String>) {
                 Some((device, name)) => input::read_pad(device, name, pad.clone()),
                 None => log::warn!("no gamepad found"),
             }
+            if std::env::var_os("ZAKURO_INPUT").is_none() && probe.is_none() {
+                for (device, bottom) in input::touchscreens() {
+                    input::read_touch(device, bottom, pad.clone());
+                }
+            }
             pad
         }
     };
@@ -206,6 +211,8 @@ pub fn run(mut args: Vec<String>) {
     let fixed_cap: Option<f64> = std::env::var("ZAKURO_FPS_CAP").ok().and_then(|v| v.parse().ok()).filter(|&n: &f64| n > 0.0);
     let mut presented = 0u64;
     let mut cursor = (160.0f32, 120.0f32);
+    // when the stick or the d-pad last moved the cursor
+    let mut cursor_moved: Option<Instant> = None;
     let mut held = HashSet::new();
     // when L2 went down, and whether the stick tilted the console since
     let mut tilt_from = (Instant::now(), false);
@@ -447,8 +454,12 @@ pub fn run(mut args: Vec<String>) {
         if c_stick || !keys.contains(&L2) {
             let (across, down) = if settings.dpad == Dpad::Touch { input::dpad(&keys) } else { (0.0, 0.0) };
             let (x, y) = if c_stick { (0.0, 0.0) } else { (input::stick(axes[3]), input::stick(axes[4])) };
+            let was = cursor;
             cursor.0 = (cursor.0 + (x + across).clamp(-1.0, 1.0) * step).clamp(0.0, 319.0);
             cursor.1 = (cursor.1 + (y + down).clamp(-1.0, 1.0) * step).clamp(0.0, 239.0);
+            if cursor != was {
+                cursor_moved = Some(Instant::now());
+            }
         }
         let mut touching = !c_stick && keys.contains(&R2);
         // a finger on the bottom screen where it is shown touches there, and
@@ -563,7 +574,15 @@ pub fn run(mut args: Vec<String>) {
                 }
             }
             let areas = layout::shown(&settings);
-            let pointer = areas[1].map(|[x, y, width, height]| (x + (cursor.0 * width as f32 / 320.0) as i32, y + (cursor.1 * height as f32 / 240.0) as i32));
+            // on two screens a finger touches the bottom one, and the
+            // cursor shows only for a moment after the stick moved it
+            let two_screens = zakuro_gpu::stacked() || zakuro_gpu::second_window();
+            let cursor_shown = match settings.cursor {
+                Cursor::Shown => true,
+                Cursor::Hidden => false,
+                Cursor::Auto => !two_screens || cursor_moved.is_some_and(|moved| moved.elapsed() < Duration::from_secs(2)),
+            };
+            let pointer = areas[1].filter(|_| cursor_shown).map(|[x, y, width, height]| (x + (cursor.0 * width as f32 / 320.0) as i32, y + (cursor.1 * height as f32 / 240.0) as i32));
             system.present_panel(areas, pointer, overlays(&overlay, &controls_overlay), settings.smooth, interpolating);
         }
 

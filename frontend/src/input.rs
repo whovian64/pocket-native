@@ -164,6 +164,14 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
             return;
         };
         let ranges: [Option<(i32, i32)>; 6] = std::array::from_fn(|axis| sticks.and_then(|_| axis_range(&device, axis)));
+        // ROCKNIX's driver for them (the RG DS's too) gives the right stick
+        // ABS_RX and ABS_RY, where ArkOS's gives it ABS_Z and ABS_RZ
+        let sticks = if rk3566 && ranges[2].is_none() && ranges[5].is_none() && ranges[3].is_some() && ranges[4].is_some() {
+            log::info!("the right stick on ABS_RX and ABS_RY");
+            Some([Some(0), Some(1), None, Some(3), Some(4), None])
+        } else {
+            sticks
+        };
         // an H700 pad short of one of ABS_Z to ABS_RZ, as the RG40XXV's
         // seems to be, has its sticks on the axes it has, in their order, as
         // RetroArch takes them
@@ -199,7 +207,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                         pad.keys.insert(code);
                     }
                 }
-                (3, _) if (h700 || muos) && matches!(code, 16 | 17) => {
+                (3, _) if (h700 || muos || rk3566) && matches!(code, 16 | 17) => {
                     let (less, more) = if code == 16 { (LEFT, RIGHT) } else { (UP, DOWN) };
                     pad.keys.remove(&less);
                     pad.keys.remove(&more);
@@ -216,6 +224,103 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                     }
                 }
                 (3, None) if (code as usize) < pad.axes.len() => pad.axes[code as usize] = value,
+                _ => {}
+            }
+        }
+    });
+}
+
+/// the handheld's touch screens, those giving ABS_MT_POSITION_X, and
+/// whether each is the bottom panel's: on the RG DS under ROCKNIX the one on
+/// fe5e0000.i2c, or where ZAKURO_TOUCH_BOTTOM says.
+pub fn touchscreens() -> Vec<(String, bool)> {
+    let devices = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
+    let bottom = std::env::var("ZAKURO_TOUCH_BOTTOM").unwrap_or_else(|_| "fe5e0000.i2c".into());
+    devices
+        .split("\n\n")
+        .filter_map(|block| {
+            let axes = block.lines().find_map(|line| line.strip_prefix("B: ABS="))?;
+            if !has_bit(axes, MT_X) {
+                return None;
+            }
+            let handlers = block.lines().find_map(|line| line.strip_prefix("H: Handlers="))?;
+            let event = handlers.split_whitespace().find(|handler| handler.starts_with("event"))?;
+            let place = std::fs::canonicalize(format!("/sys/class/input/{event}/device")).unwrap_or_default();
+            Some((format!("/dev/input/{event}"), place.to_string_lossy().contains(&bottom)))
+        })
+        .collect()
+}
+
+const MT_SLOT: u16 = 0x2f;
+const MT_X: u16 = 0x35;
+const MT_Y: u16 = 0x36;
+const MT_TRACKING_ID: u16 = 0x39;
+
+/// whether a bitmask as /proc/bus/input/devices gives it, words of a long
+/// in hex with the highest first, has the bit.
+fn has_bit(mask: &str, bit: u16) -> bool {
+    let bits = 8 * std::mem::size_of::<libc::c_long>();
+    let words: Vec<&str> = mask.split_whitespace().rev().collect();
+    words.get(bit as usize / bits).and_then(|word| u64::from_str_radix(word, 16).ok()).is_some_and(|word| word >> (bit as usize % bits) & 1 == 1)
+}
+
+/// reads a touch screen's fingers into the pad, where they are in the
+/// layout: over all of it, or over its half when the two panels of a
+/// dual-screen handheld are stacked. ZAKURO_TOUCH_FLIP=x, y or xy mirrors
+/// them, for a touch screen mounted the other way round.
+pub fn read_touch(path: String, bottom: bool, pad: Arc<Mutex<Pad>>) {
+    log::info!("touch from {path}{}", if bottom { ", the bottom panel's" } else { "" });
+    let flip = std::env::var("ZAKURO_TOUCH_FLIP").unwrap_or_default();
+    let (flip_x, flip_y) = (flip.contains('x'), flip.contains('y'));
+    std::thread::spawn(move || {
+        let Ok(mut device) = std::fs::File::open(&path) else {
+            log::error!("could not open {path}");
+            return;
+        };
+        let ranges = [axis_range(&device, MT_X as usize), axis_range(&device, MT_Y as usize)];
+        // each slot's finger, whether it is down and where on the device
+        let mut down = [false; 10];
+        let mut at = [(0i32, 0i32); 10];
+        let mut was = [false; 10];
+        let mut slot = 0;
+        // the fingers' ids, apart from the other panel's
+        let base = if bottom { 100 } else { 0 };
+        let mut event = [0u8; 24];
+        while device.read_exact(&mut event).is_ok() {
+            let kind = u16::from_ne_bytes([event[16], event[17]]);
+            let code = u16::from_ne_bytes([event[18], event[19]]);
+            let value = i32::from_ne_bytes([event[20], event[21], event[22], event[23]]);
+            match (kind, code) {
+                (3, MT_SLOT) => slot = (value.max(0) as usize).min(down.len() - 1),
+                (3, MT_TRACKING_ID) => down[slot] = value >= 0,
+                (3, MT_X) => at[slot].0 = value,
+                (3, MT_Y) => at[slot].1 = value,
+                (0, 0) => {
+                    let (width, height) = zakuro_gpu::layout_size();
+                    let (top, tall) = match (zakuro_gpu::stacked(), bottom) {
+                        (true, true) => (height / 2, height / 2),
+                        (true, false) => (0, height / 2),
+                        (false, _) => (0, height),
+                    };
+                    let along = |value: i32, range: Option<(i32, i32)>, size: u32, flip: bool| {
+                        let (least, most) = range.unwrap_or((0, size as i32 - 1));
+                        let part = ((value - least) as f32 / (most - least + 1) as f32).clamp(0.0, 1.0);
+                        (if flip { 1.0 - part } else { part }) * size as f32
+                    };
+                    let place = |(x, y): (i32, i32)| (along(x, ranges[0], width, flip_x), top as f32 + along(y, ranges[1], tall, flip_y));
+                    let mut pad = pad.lock().unwrap();
+                    pad.fingers.retain(|&(id, ..)| !(base..base + 100).contains(&id));
+                    for finger in 0..down.len() {
+                        let (x, y) = place(at[finger]);
+                        let id = base + finger as i32;
+                        if down[finger] {
+                            pad.fingers.push((id, x, y));
+                        } else if was[finger] {
+                            pad.lifted.push((id, x, y));
+                        }
+                    }
+                    was = down;
+                }
                 _ => {}
             }
         }
@@ -402,5 +507,13 @@ mod tests {
         assert_eq!(sticks_in_order([false, true, true, false, true, true]), [None, Some(0), Some(1), None, Some(3), Some(4)]);
         // one stick only
         assert_eq!(sticks_in_order([false, false, false, true, true, false]), [None, None, None, Some(0), Some(1), None]);
+    }
+
+    #[test]
+    fn touch_screens_are_told_by_their_axes() {
+        // the RG DS's Goodix touch screen, ABS_MT_POSITION_X among its axes
+        assert!(super::has_bit("260800000000003", super::MT_X));
+        // a gamepad's sticks only
+        assert!(!super::has_bit("3003b", super::MT_X));
     }
 }

@@ -84,6 +84,7 @@ ports in:
 | ArkOS, dArkOS, dArkOSRE | `roms/ports`, or `roms2/ports` with two cards |
 | Knulli | `roms/ports` on the SHARE partition |
 | muOS | `ROMS/Ports` |
+| ROCKNIX | `roms/ports` on the GAMES partition (`/storage/roms/ports`) |
 
 On ArkOS it ends up like this:
 

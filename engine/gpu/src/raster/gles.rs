@@ -1200,9 +1200,36 @@ struct DrmEventContext {
 static FLIPPED_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static FLIPPED_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-extern "C" fn flipped(_fd: i32, sequence: u32, seconds: u32, microseconds: u32, _data: *mut c_void) {
+/// the flips that happened since the last were asked for, 1 for the panel's
+/// and 2 for the bottom panel's on a handheld with two.
+static FLIPS_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn flipped(_fd: i32, sequence: u32, seconds: u32, microseconds: u32, data: *mut c_void) {
+    // the bottom panel refreshes a little apart from the top one, whose
+    // refreshes the pacing goes by
+    if data as usize == 2 {
+        FLIPS_SEEN.fetch_or(2, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
     FLIPPED_AT.store(sequence, std::sync::atomic::Ordering::Relaxed);
     FLIPPED_TIME.store(seconds as u64 * 1_000_000 + microseconds as u64, std::sync::atomic::Ordering::Relaxed);
+    FLIPS_SEEN.fetch_or(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// a connector's name as the kernel gives it in /sys/class/drm, DSI-1.
+fn connector_name(kind: u32, number: u32) -> String {
+    let kind = match kind {
+        1 => "VGA",
+        7 => "LVDS",
+        10 => "DP",
+        11 => "HDMI-A",
+        14 => "eDP",
+        15 => "Virtual",
+        16 => "DSI",
+        17 => "DPI",
+        _ => "Unknown",
+    };
+    format!("{kind}-{number}")
 }
 
 /// a native window made by the program around the engine, an Android
@@ -1236,6 +1263,27 @@ static SECOND_IN_USE: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::
 static SECOND_SHOWS_TOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// whether the second window's screen is stretched over all of it.
 static SECOND_STRETCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// how much of the top screen's width is cut off each side, f32 bits, 0
+/// for none.
+static TOP_CROP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// cuts that much of the top screen's width off each side, 0.1 for the 4:3
+/// middle of its 5:3, the area it is shown in the part that is left.
+pub fn set_top_crop(each_side: f32) {
+    TOP_CROP.store(each_side.clamp(0.0, 0.45).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// a screen's area in the framebuffer widened for the crop, and the part of
+/// it that shows, the area as given, from the bottom left as GL counts it.
+fn cropped(area: [i32; 4], top: bool, height: i32) -> ([i32; 4], Option<[i32; 4]>) {
+    let each_side = f32::from_bits(TOP_CROP.load(std::sync::atomic::Ordering::Relaxed));
+    if !top || each_side <= 0.0 {
+        return (area, None);
+    }
+    let width = (area[2] as f32 / (1.0 - 2.0 * each_side)).round() as i32;
+    ([area[0] - (width - area[2]) / 2, area[1], width, area[3]], Some([area[0], height - area[1] - area[3], area[2], area[3]]))
+}
 
 /// whether the second window's screen fills all of it, out of shape, rather
 /// than keeping its shape with bars.
@@ -1350,6 +1398,10 @@ struct Kms {
     crtc: u32,
     connector: u32,
     mode: DrmModeInfo,
+    /// the CRTC and connector of a dual-screen handheld's bottom panel, the
+    /// same size as the top one, which shows the bottom half of a surface
+    /// twice the panel's height, the top panel its top half.
+    second: Option<(u32, u32)>,
     shown: Option<(*mut c_void, u32)>,
     pending: Option<(*mut c_void, u32)>,
     set: bool,
@@ -1397,7 +1449,7 @@ impl Kms {
             return Err("no KMS resources".into());
         }
         let res = &*resources;
-        let mut found = None;
+        let mut panels = Vec::new();
         for i in 0..res.count_connectors as usize {
             let connector = call!(drm, "drmModeGetConnector", fn(i32, u32) -> *mut DrmModeConnector, fd, *res.connectors.add(i));
             if connector.is_null() {
@@ -1407,24 +1459,64 @@ impl Kms {
             if c.connection == 1 && c.count_modes > 0 {
                 let modes = std::slice::from_raw_parts(c.modes, c.count_modes as usize);
                 let mode = *modes.iter().find(|mode| mode.kind & (1 << 3) != 0).unwrap_or(&modes[0]);
-                let mut crtc = 0;
-                let encoder = call!(drm, "drmModeGetEncoder", fn(i32, u32) -> *mut DrmModeEncoder, fd, c.encoder_id);
+                // the CRTC it is on, and those it may be on, from its
+                // encoder, or its first when it has none yet
+                let (mut crtc, mut possible) = (0, 0);
+                let encoder_id = if c.encoder_id == 0 && c.count_encoders > 0 { *c.encoders } else { c.encoder_id };
+                let encoder = call!(drm, "drmModeGetEncoder", fn(i32, u32) -> *mut DrmModeEncoder, fd, encoder_id);
                 if !encoder.is_null() {
                     crtc = (*encoder).crtc_id;
+                    possible = (*encoder).possible_crtcs;
                     call!(drm, "drmModeFreeEncoder", fn(*mut DrmModeEncoder) -> (), encoder);
                 }
-                if crtc == 0 && res.count_crtcs > 0 {
-                    crtc = *res.crtcs;
-                }
-                found = Some((c.connector_id, mode, crtc));
+                panels.push((c.connector_id, connector_name(c.connector_type, c.connector_type_id), mode, crtc, possible));
             }
             call!(drm, "drmModeFreeConnector", fn(*mut DrmModeConnector) -> (), connector);
-            if found.is_some() {
-                break;
+        }
+        let crtcs = std::slice::from_raw_parts(res.crtcs, res.count_crtcs.max(0) as usize).to_vec();
+        call!(drm, "drmModeFreeResources", fn(*mut DrmModeRes) -> (), resources);
+        if panels.is_empty() {
+            return Err("no connected display".into());
+        }
+        // the panel the top screen goes on: ZAKURO_KMS_TOP=DSI-1 names it,
+        // DSI-2 on the RG DS under ROCKNIX, else the first connected
+        let top = std::env::var("ZAKURO_KMS_TOP").unwrap_or_else(|_| "DSI-2".into());
+        let (connector, name, mode, crtc, possible) = panels.remove(panels.iter().position(|panel| panel.1 == top).unwrap_or(0));
+        // another panel the same size is the bottom one, both shown as one
+        // picture stacked, unless ZAKURO_KMS_SINGLE=1 keeps to one
+        let bottom = panels
+            .into_iter()
+            .find(|panel| (panel.2.hdisplay, panel.2.vdisplay) == (mode.hdisplay, mode.vdisplay))
+            .filter(|_| std::env::var_os("ZAKURO_KMS_SINGLE").is_none());
+        // a CRTC each, the one it is on unless the other panel has it
+        let mut used = Vec::new();
+        let mut pick = |crtc: u32, possible: u32| {
+            let free = |crtc: &u32| !used.contains(crtc);
+            let picked = Some(crtc)
+                .filter(|crtc| *crtc != 0 && free(crtc))
+                .or_else(|| crtcs.iter().enumerate().find(|(i, crtc)| possible & (1 << i) != 0 && free(crtc)).map(|(_, crtc)| *crtc))
+                .or_else(|| crtcs.iter().copied().find(free))
+                .unwrap_or(0);
+            used.push(picked);
+            picked
+        };
+        let crtc = pick(crtc, possible);
+        let second = bottom.map(|(connector, bottom_name, _, crtc, possible)| {
+            log::info!("two panels, {name} on top and {bottom_name} under it");
+            (pick(crtc, possible), connector)
+        });
+        let second = second.filter(|&(bottom, _)| bottom != 0 && bottom != crtc);
+        set_stacked(second.is_some());
+        // sway lets go of the panels a moment after it stopped, as under
+        // ROCKNIX, and a modeset before then fails
+        let master = symbol(&drm, "drmSetMaster");
+        if !master.is_null() {
+            let master: extern "C" fn(i32) -> i32 = std::mem::transmute(master);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while master(fd) != 0 && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        call!(drm, "drmModeFreeResources", fn(*mut DrmModeRes) -> (), resources);
-        let (connector, mode, crtc) = found.ok_or("no connected display")?;
         let refresh = mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
         log::info!("panel {}x{} at {refresh:.3} Hz", mode.hdisplay, mode.vdisplay);
         if (50.0..70.0).contains(&refresh) {
@@ -1436,18 +1528,19 @@ impl Kms {
             fn(*mut c_void, u32, u32, u32, u32) -> *mut c_void,
             device,
             mode.hdisplay as u32,
-            mode.vdisplay as u32,
+            mode.vdisplay as u32 * (1 + second.is_some() as u32),
             GBM_FORMAT_XRGB8888,
             1 | 4
         );
         if surface.is_null() {
             return Err("no GBM surface".into());
         }
-        Ok(Kms { drm, gbm, fd, device, surface, crtc, connector, mode, shown: None, pending: None, set: false, held: [0; 4], held_since: std::time::Instant::now(), last_flip: 0, asked: 0, slack: (0, 0) })
+        Ok(Kms { drm, gbm, fd, device, surface, crtc, connector, mode, second, shown: None, pending: None, set: false, held: [0; 4], held_since: std::time::Instant::now(), last_flip: 0, asked: 0, slack: (0, 0) })
     }
 
+    /// the size of the picture, both panels' when there are two.
     fn size(&self) -> (i32, i32) {
-        (self.mode.hdisplay as i32, self.mode.vdisplay as i32)
+        (self.mode.hdisplay as i32, self.mode.vdisplay as i32 * (1 + self.second.is_some() as i32))
     }
 
     /// waits for the flip queued last to happen, then lets go of the
@@ -1458,8 +1551,17 @@ impl Kms {
         unsafe {
             let mut context = DrmEventContext { version: 2, vblank_handler: None, page_flip_handler: Some(flipped) };
             let mut poll = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
-            if libc::poll(&mut poll, 1, 100) > 0 {
+            // both panels' flips, when there are two
+            let wanted = if self.second.is_some() { 3 } else { 1 };
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            while FLIPS_SEEN.load(std::sync::atomic::Ordering::Relaxed) & wanted != wanted {
+                let left = until.saturating_duration_since(std::time::Instant::now()).as_millis() as i32;
+                if left <= 0 || libc::poll(&mut poll, 1, left) <= 0 {
+                    break;
+                }
                 call!(self.drm, "drmHandleEvent", fn(i32, *mut DrmEventContext) -> i32, self.fd, &mut context);
+            }
+            if FLIPS_SEEN.load(std::sync::atomic::Ordering::Relaxed) & 1 != 0 {
                 let at = FLIPPED_AT.load(std::sync::atomic::Ordering::Relaxed);
                 let slack = FLIPPED_TIME.load(std::sync::atomic::Ordering::Relaxed).wrapping_sub(self.asked);
                 if slack < 100_000 {
@@ -1530,6 +1632,7 @@ impl Kms {
                 call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
                 return Err("could not make a framebuffer".into());
             }
+            FLIPS_SEEN.store(0, std::sync::atomic::Ordering::Relaxed);
             if !self.set {
                 let mut connector = self.connector;
                 let mut mode = self.mode;
@@ -1549,12 +1652,52 @@ impl Kms {
                 if result != 0 {
                     return Err(format!("could not set the display mode, {result}"));
                 }
+                // the bottom panel shows the picture's bottom half
+                if let Some((crtc, mut connector)) = self.second {
+                    let result = call!(
+                        self.drm,
+                        "drmModeSetCrtc",
+                        fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
+                        self.fd,
+                        crtc,
+                        fb,
+                        0,
+                        self.mode.vdisplay as u32,
+                        &mut connector,
+                        1,
+                        &mut mode
+                    );
+                    if result != 0 {
+                        return Err(format!("could not set the bottom panel's display mode, {result}"));
+                    }
+                }
                 self.set = true;
                 self.shown = Some((bo, fb));
-            } else if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, self.crtc, fb, 1, std::ptr::null_mut()) == 0 {
+            } else if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, self.crtc, fb, 1, std::ptr::without_provenance_mut(1)) == 0 {
                 // a held picture says nothing of how early pictures come
                 self.asked = if paced { 0 } else { monotonic_micros() };
                 self.pending = Some((bo, fb));
+                // the bottom panel flips to the same picture; were it still
+                // busy, it is set there now, as the buffer it shows goes
+                if let Some((crtc, mut connector)) = self.second {
+                    if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, crtc, fb, 1, std::ptr::without_provenance_mut(2)) != 0 {
+                        let mut mode = self.mode;
+                        call!(
+                            self.drm,
+                            "drmModeSetCrtc",
+                            fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
+                            self.fd,
+                            crtc,
+                            fb,
+                            0,
+                            self.mode.vdisplay as u32,
+                            &mut connector,
+                            1,
+                            &mut mode
+                        );
+                        FLIPS_SEEN.fetch_or(2, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
             } else {
                 call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
                 call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
@@ -1976,8 +2119,9 @@ unsafe fn draw_parts(
     layout: (i32, i32),
     parts: Vec<Part>,
 ) -> Result<(), String> {
+            let framebuffer_height = height;
             for part in parts {
-                let (texture, screen, upright, area, smooth) = match part {
+                let (texture, screen, upright, area, smooth, clip) = match part {
                     Part::Cursor { x, y } => {
                         let (x, y) = (fit.x(x), fit.y(y));
                         gl.enable(glow::SCISSOR_TEST);
@@ -1990,7 +2134,7 @@ unsafe fn draw_parts(
                         continue;
                     }
                     Part::Surface { texture, screen, area, smooth, top, picture } => {
-                        let area = fit.area(area);
+                        let (area, clip) = cropped(fit.area(area), top, height);
                         let step = match picture {
                             Some(version) => panel.between.step((texture, version)),
                             None => {
@@ -2010,12 +2154,12 @@ unsafe fn draw_parts(
                         }
                         if let Step::Halfway = step {
                             let gl_area = [area[0], height - area[1] - area[3], area[2], area[3]];
-                            panel.between.draw(gl, framebuffer, gl_area, smooth.then_some(linear))?;
+                            panel.between.draw(gl, framebuffer, gl_area, clip, smooth.then_some(linear))?;
                             gl.use_program(Some(program));
                             continue;
                         }
                         gl.use_program(Some(program));
-                        (texture, screen, 0, area, smooth)
+                        (texture, screen, 0, area, smooth, clip)
                     }
                     Part::Overlay(overlay) if overlay.whole => {
                         draw_overlay(gl, panel, &overlay, height, fit, layout)?;
@@ -2048,7 +2192,8 @@ unsafe fn draw_parts(
                         };
                         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                         gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&pixels)));
-                        (texture, [width as i32, height as i32, 0, 0], 1, fit.area(area), smooth)
+                        let (area, clip) = cropped(fit.area(area), index == 0, framebuffer_height);
+                        (texture, [width as i32, height as i32, 0, 0], 1, area, smooth, clip)
                     }
                 };
                 let y = height - area[1] - area[3];
@@ -2059,7 +2204,12 @@ unsafe fn draw_parts(
                 gl.uniform_1_i32(gl.get_uniform_location(program, "smooth_scale").as_ref(), smooth as i32);
                 gl.bind_sampler(0, smooth.then_some(linear));
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                if let Some([x, y, width, height]) = clip {
+                    gl.enable(glow::SCISSOR_TEST);
+                    gl.scissor(x, y, width, height);
+                }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                gl.disable(glow::SCISSOR_TEST);
             }
     Ok(())
 }

@@ -38,7 +38,8 @@ impl Stretch {
 }
 
 /// the screens' shape: the top one's as on the console, scaled by whole
-/// pixels, made narrower or wider, or both stretched over the room they have.
+/// pixels, made narrower or wider, both stretched over the room they have, or
+/// the top one cut to its 4:3 middle, its sides left out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Aspect {
     #[default]
@@ -48,19 +49,26 @@ pub enum Aspect {
     SixteenTen,
     SixteenNine,
     Stretch,
+    Crop,
 }
 
 impl Aspect {
-    pub const ALL: [Aspect; 6] = [Aspect::Original, Aspect::Integer, Aspect::FourThree, Aspect::SixteenTen, Aspect::SixteenNine, Aspect::Stretch];
+    pub const ALL: [Aspect; 7] = [Aspect::Original, Aspect::Integer, Aspect::FourThree, Aspect::SixteenTen, Aspect::SixteenNine, Aspect::Stretch, Aspect::Crop];
 
     /// the top screen's width over its height.
     pub fn ratio(self) -> f32 {
         match self {
-            Aspect::FourThree => 4.0 / 3.0,
+            Aspect::FourThree | Aspect::Crop => 4.0 / 3.0,
             Aspect::SixteenTen => 16.0 / 10.0,
             Aspect::SixteenNine => 16.0 / 9.0,
             Aspect::Original | Aspect::Integer | Aspect::Stretch => 5.0 / 3.0,
         }
+    }
+
+    /// how much of the top screen's width is left out each side: a tenth of
+    /// its 400 pixels, for the 320 in the middle, cropped.
+    pub fn crop(self) -> f32 {
+        if self == Aspect::Crop { 0.1 } else { 0.0 }
     }
 }
 
@@ -95,6 +103,17 @@ pub enum Dpad {
     Dpad,
     CirclePad,
     Touch,
+}
+
+/// whether the touch cursor is drawn over the bottom screen: always, never,
+/// or on a handheld with two screens, whose bottom one takes a finger, only
+/// for a moment after the stick or the d-pad moved it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Cursor {
+    #[default]
+    Auto,
+    Shown,
+    Hidden,
 }
 
 /// the right stick as the touch cursor, or as the New 3DS's C-stick with L2
@@ -139,6 +158,7 @@ pub struct Settings {
     pub frame_cap: u32,
     pub power: Power,
     pub touch_speed: Speed,
+    pub cursor: Cursor,
     pub buttons: Buttons,
     pub left_stick: Stick,
     /// the d-pad as the circle pad or the touch cursor, for handhelds short
@@ -171,6 +191,7 @@ impl Default for Settings {
             frame_cap: 30,
             power: Power::Performance,
             touch_speed: Speed::Normal,
+            cursor: Cursor::Auto,
             buttons: Buttons::Nintendo,
             left_stick: Stick::CirclePad,
             dpad: Dpad::Dpad,

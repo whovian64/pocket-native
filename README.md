@@ -76,12 +76,39 @@ working or not.
 | AYN Thor | Android | Works, both screens |
 | Anbernic RG DS | Android | Works, both screens |
 | Anbernic RG DS | Anbernic's Linux | Not yet: one screen only, buttons not found |
+| Anbernic RG DS | ROCKNIX | Both screens and both touch screens, no tester report yet |
 | Android phones | Android 11 or newer, 64-bit | Works, with touch controls or a gamepad |
-| AmberELEC, Rocknix | | Not yet |
+| Other ROCKNIX handhelds | ROCKNIX | Should start as on the RG DS, untested |
+| AmberELEC | | Not yet |
 
 Screens other than the R36S's 640x480 work: the layouts follow the
 panel's shape (16:9, square, 1024x768), and **Display > Rotation** turns
 the picture for a panel mounted sideways.
+
+### The RG DS under ROCKNIX
+
+The 3DS's top screen goes on the top panel and its bottom screen on the
+bottom one, which you can touch. A tap of L2 or FN + L1 swaps them.
+**Display > Aspect ratio** shapes the top screen on its panel as it does
+on one screen, and **Crop** there fills the top panel with the top
+screen's 4:3 middle, its sides cut off. **Display > Stretch** fills a
+panel instead of keeping the screen's shape.
+Sway, ROCKNIX's desktop, keeps running while you play: the launcher
+switches the console away from it, which hands the panels to the game,
+and switches back when you quit.
+
+If something comes out wrong, these go in `run.sh` next to the other
+`export` lines:
+
+| Setting | Does |
+|---|---|
+| `ZAKURO_KMS_TOP=DSI-1` | Puts the top screen on the other panel (`DSI-2` by default) |
+| `ZAKURO_KMS_SINGLE=1` | Uses one panel only, as on a handheld with one screen |
+| `ZAKURO_TOUCH_BOTTOM=...` | Names the bottom panel's touch screen by its place in `/sys` (`fe5e0000.i2c` by default) |
+| `ZAKURO_TOUCH_FLIP=x`, `y` or `xy` | Mirrors the touch screens, for touches landing on the wrong side |
+
+The game's log is `log.txt` in its `data` folder: please add it to a
+report.
 
 ## Controls
 
@@ -94,6 +121,7 @@ the picture for a panel mounted sideways.
 | Right stick | Moves the touch cursor |
 | R2 | Touches the bottom screen under the cursor |
 | R3 | Switches the right stick to the C-stick, with L2 and R2 as ZL and ZR, and back |
+| Touch screen | Touches the bottom screen where it is shown (RG DS under ROCKNIX) |
 | L2 held + right stick | Tilts the console, for games that use motion |
 | Start / Select | Start / Select |
 
@@ -122,7 +150,9 @@ Every setting has a line of help at the bottom of the menu.
 - **Performance:** frame cap (20, 30 or 60) and power (saver, balanced,
   performance)
 - **This game:** options from the game's profile, where it has some
-- **Controls:** touch cursor speed, Nintendo or Xbox A/B, left stick as
+- **Controls:** touch cursor speed, the touch cursor shown or hidden
+  (on two screens Auto shows it only while the stick moves it), Nintendo
+  or Xbox A/B, left stick as
   circle pad or D-pad, the D-pad's job, tilt directions, and the touch
   controls on Android
 - **Game:** resume, advanced settings, reset, quit
@@ -133,6 +163,10 @@ run or look right, and set the language and region the game is told.
 **Most compatible** turns off every speed hack at once: if that fixes a
 game, turn them back on one at a time to find the one it trips over.
 Settings under a "requires restart" heading need **Restart game**.
+
+**Aspect ratio > Crop** shows the top screen's 4:3 middle, its sides cut
+off, a little bigger than the whole of it would be: on a 4:3 panel the
+top screen fills it.
 
 **Frame interpolation** draws an in-between picture for a game running
 below the target, up to 30 or 60 fps. It follows motion in 16 pixel
