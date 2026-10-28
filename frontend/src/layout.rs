@@ -1,10 +1,16 @@
 //! where the screens go, left, top, width and height, in the size the GPU
 //! lays them out in: 640x480 on the R36S, the panel's shape on others.
 
-use crate::settings::{Aspect, Layout};
+use crate::settings::{Aspect, Layout, Stretch};
 
 const TOP: [f32; 2] = [400.0, 240.0];
 const BOTTOM: [f32; 2] = [320.0, 240.0];
+
+/// which screens fill their own display when each has one, the aspect's
+/// Stretch counting as both, as it fills the one panel otherwise.
+fn stretch(settings: &crate::settings::Settings) -> Stretch {
+    if settings.aspect == Aspect::Stretch { Stretch::Both } else { settings.stretched }
+}
 
 /// the areas for the screens as the settings have them, or with a second
 /// window to show one by itself, the other filling the panel and the one
@@ -33,12 +39,12 @@ pub fn shown(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
     let (a, b) = ((here[0] * scale).round() as i32, (here[1] * scale).round() as i32);
     // the screen on the panel is the top one unless they are swapped, and
     // the second window stretches the other as the settings say
-    let filled = if settings.stretched.stretches(!settings.swapped) {
+    let filled = if stretch(settings).stretches(!settings.swapped) {
         Some([0, 0, size.0 as i32, size.1 as i32])
     } else {
         Some([(size.0 as i32 - a) / 2, (size.1 as i32 - b) / 2, a, b])
     };
-    zakuro_gpu::set_second_stretched(settings.stretched.stretches(settings.swapped));
+    zakuro_gpu::set_second_stretched(stretch(settings).stretches(settings.swapped));
     let alone = Some([0, 0, there[0] as i32, there[1] as i32]);
     if settings.swapped { [alone, filled] } else { [filled, alone] }
 }
@@ -59,7 +65,7 @@ fn stacked(settings: &crate::settings::Settings, (width, height): (u32, u32)) ->
     };
     // the 3DS's top screen, then its bottom one
     let top_above = !settings.swapped;
-    [place(TOP, top_above, settings.stretched.stretches(true)), place(BOTTOM, !top_above, settings.stretched.stretches(false))]
+    [place(TOP, top_above, stretch(settings).stretches(true)), place(BOTTOM, !top_above, stretch(settings).stretches(false))]
 }
 
 pub fn areas(layout: Layout, swapped: bool, aspect: Aspect, (width, height): (u32, u32)) -> [Option<[i32; 4]>; 2] {
@@ -166,6 +172,11 @@ mod tests {
         assert_eq!(stacked(&settings, rg_ds), [Some([0, 528, 640, 384]), Some([0, 0, 640, 480])]);
         settings.swapped = false;
         settings.stretched = Stretch::Top;
+        assert_eq!(stacked(&settings, rg_ds), [Some([0, 0, 640, 480]), Some([0, 480, 640, 480])]);
+        // the aspect's Stretch, the one the Android app's Device page sets,
+        // fills both panels too
+        settings.stretched = Stretch::Off;
+        settings.aspect = Aspect::Stretch;
         assert_eq!(stacked(&settings, rg_ds), [Some([0, 0, 640, 480]), Some([0, 480, 640, 480])]);
     }
 }
