@@ -267,13 +267,13 @@ pub fn run(mut args: Vec<String>) {
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
     loop {
         let began = Instant::now();
-        let (mut keys, mut axes, fingers, second_touch, pad_used) = {
+        let (mut keys, mut axes, fingers, second_touch, pad_used, motion) = {
             let mut pad = pad.lock().unwrap();
             let keys: HashSet<u16> = pad.keys.union(&pad.let_go).copied().collect();
             let fingers: Vec<(i32, f32, f32)> = pad.fingers.iter().chain(&pad.lifted).copied().collect();
             pad.let_go.clear();
             pad.lifted.clear();
-            (keys, pad.axes, fingers, pad.second_touch, pad.pad_used)
+            (keys, pad.axes, fingers, pad.second_touch, pad.pad_used, pad.motion)
         };
         if input::QUIT.load(std::sync::atomic::Ordering::Relaxed) {
             log::info!("asked to quit");
@@ -485,7 +485,7 @@ pub fn run(mut args: Vec<String>) {
         if probe.is_some() && script.is_empty() {
             system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
         } else if script.is_empty() {
-            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x, c_stick_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt });
+            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x, c_stick_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt, motion: motion.filter(|_| tilt == (0.0, 0.0)) });
         } else {
             system.set_input(scripted_input(&script, frame_number));
         }
