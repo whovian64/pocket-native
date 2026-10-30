@@ -3340,6 +3340,12 @@ struct Occlusion {
 struct Hidden {
     query: Option<(glow::Query, u64)>,
     until: u64,
+    /// the picture it was last drawn in, and whether it was drawn twice in
+    /// one: a mesh the game draws in more than one place, as Super Mario 3D
+    /// Land does its coins, blocks and enemies, is the same mesh to the key,
+    /// and one of them out of view would leave out all of them
+    seen: Option<u64>,
+    shared: bool,
 }
 
 /// heavy draws left out and heavy draws looked at, for ZAKURO_GLES_TIMES.
@@ -3354,10 +3360,17 @@ impl Occlusion {
     /// SAFETY: on the GL thread
     unsafe fn check(&mut self, gl: &glow::Context, key: u64, picture: u64) -> (bool, Option<glow::Query>) {
         if self.meshes.len() > 8192 {
-            self.meshes.retain(|_, mesh| mesh.query.is_some());
+            self.meshes.retain(|_, mesh| mesh.query.is_some() || mesh.shared);
         }
         let Occlusion { meshes, free } = self;
         let mesh = meshes.entry(key).or_default();
+        if mesh.seen == Some(picture) {
+            mesh.shared = true;
+        }
+        mesh.seen = Some(picture);
+        if mesh.shared {
+            return (true, None);
+        }
         unsafe {
             if let Some((query, tried)) = mesh.query {
                 if gl.get_query_parameter_u32(query, glow::QUERY_RESULT_AVAILABLE) != 0 {
