@@ -159,8 +159,10 @@ impl Default for BiquadFilter {
 
 #[derive(Debug, Clone, Default)]
 struct Filters {
-    simple: Option<SimpleFilter>,
-    biquad: Option<BiquadFilter>,
+    simple: SimpleFilter,
+    biquad: BiquadFilter,
+    /// Coefficient updates do not change which filters the title enabled.
+    enabled: u16,
 }
 
 impl Filters {
@@ -168,11 +170,13 @@ impl Filters {
         for sample in samples {
             for (channel, out) in sample.iter_mut().enumerate() {
                 let mut value = *out as i32;
-                if let Some(f) = &mut self.simple {
+                if self.enabled & 1 != 0 {
+                    let f = &mut self.simple;
                     value = ((f.b0 * value + f.a1 * f.y1[channel]) >> 15).clamp(-32768, 32767);
                     f.y1[channel] = value;
                 }
-                if let Some(f) = &mut self.biquad {
+                if self.enabled & 2 != 0 {
+                    let f = &mut self.biquad;
                     let x0 = value;
                     value = ((f.b[0] * x0 + f.b[1] * f.x[0][channel] + f.b[2] * f.x[1][channel]
                         + f.a[0] * f.y[0][channel]
@@ -653,27 +657,25 @@ fn parse_config(voice: &mut Voice, memory: &mut Memory, base: u32, coefficients:
         }
     }
     if flags & dirty::FILTERS_ENABLED != 0 {
-        let enabled = memory.read16(base + config::FILTERS_ENABLED);
-        // a filter switched off forgets its state and coefficients
-        if enabled & 1 == 0 {
-            voice.filters.simple = None;
-        } else if voice.filters.simple.is_none() {
-            voice.filters.simple = Some(SimpleFilter::default());
+        voice.filters.enabled = memory.read16(base + config::FILTERS_ENABLED);
+        // Disabling clears history, but coefficients can be configured while
+        // disabled and must survive until the title enables the filter.
+        if voice.filters.enabled & 1 == 0 {
+            voice.filters.simple.y1 = [0; 2];
         }
-        if enabled & 2 == 0 {
-            voice.filters.biquad = None;
-        } else if voice.filters.biquad.is_none() {
-            voice.filters.biquad = Some(BiquadFilter::default());
+        if voice.filters.enabled & 2 == 0 {
+            voice.filters.biquad.x = [[0; 2]; 2];
+            voice.filters.biquad.y = [[0; 2]; 2];
         }
     }
     let half = |memory: &mut Memory, offset: u32| memory.read16(base + offset) as i16 as i32;
     if flags & dirty::SIMPLE_FILTER != 0 {
-        let filter = voice.filters.simple.get_or_insert_with(SimpleFilter::default);
+        let filter = &mut voice.filters.simple;
         filter.b0 = half(memory, config::SIMPLE_FILTER);
         filter.a1 = half(memory, config::SIMPLE_FILTER + 2);
     }
     if flags & dirty::BIQUAD_FILTER != 0 {
-        let filter = voice.filters.biquad.get_or_insert_with(BiquadFilter::default);
+        let filter = &mut voice.filters.biquad;
         let field = |memory: &mut Memory, i: u32| memory.read16(base + config::BIQUAD_FILTER + i * 2) as i16 as i32;
         filter.a = [field(memory, 1), field(memory, 0)];
         filter.b = [field(memory, 4), field(memory, 3), field(memory, 2)];
@@ -967,6 +969,79 @@ mod tests {
         let mut voice = Voice::default();
         parse_config(&mut voice, memory, base, base + 0x1000);
         assert_eq!(voice.queue[0].length, 69_057);
+    }
+
+    fn with_filter_memory(test: impl FnOnce(&mut Memory, u32)) {
+        use crate::memory::{MemoryState, Permission};
+        use zakuro_common::memory_map::{DSP_RAM_PADDR, DSP_RAM_SIZE, DSP_RAM_VADDR};
+        let mut system = crate::System::new(crate::Config::default());
+        let memory = &mut system.memory;
+        memory.map(DSP_RAM_VADDR, DSP_RAM_PADDR, DSP_RAM_SIZE, Permission::RW, MemoryState::Static);
+        test(memory, DSP_RAM_VADDR + 0x4_0000);
+    }
+
+    #[test]
+    fn reset_with_all_dirty_flags_and_zero_filter_coefficients_preserves_pcm() {
+        with_filter_memory(|memory, base| {
+            // libctru resets with every parameter dirty, disabled filters,
+            // and zero-initialized coefficient arrays.
+            memory.write32(base + config::DIRTY, u32::MAX);
+            memory.write16(base + config::FILTERS_ENABLED, 0);
+            for offset in (config::SIMPLE_FILTER..config::BUFFERS_DIRTY).step_by(2) {
+                memory.write16(base + offset, 0);
+            }
+            let mut voice = Voice::default();
+            parse_config(&mut voice, memory, base, base + 0x1000);
+            assert_eq!(voice.filters.enabled, 0);
+
+            voice.enabled = true;
+            voice.queue.clear();
+            voice.queue.push(Buffer { stereo: true, ..buffer(1, 320) });
+            let mut samples = Samples([1000i16.to_le_bytes(), (-1000i16).to_le_bytes()].concat().repeat(320));
+            voice.play_frame(&mut samples);
+            voice.play_frame(&mut samples);
+            assert!(voice.frame.iter().all(|sample| *sample == [1000, -1000]));
+        });
+    }
+
+    #[test]
+    fn coefficient_updates_do_not_enable_filters_and_are_kept_for_later_enable() {
+        with_filter_memory(|memory, base| {
+            let mut voice = Voice::default();
+            // Even a stale enable field must not be applied without its dirty bit.
+            memory.write16(base + config::FILTERS_ENABLED, 3);
+            memory.write16(base + config::SIMPLE_FILTER, 1 << 14);
+            memory.write16(base + config::SIMPLE_FILTER + 2, 0);
+            for i in 0..5 {
+                memory.write16(base + config::BIQUAD_FILTER + i * 2, if i == 4 { 1 << 13 } else { 0 });
+            }
+            memory.write32(base + config::DIRTY, dirty::SIMPLE_FILTER | dirty::BIQUAD_FILTER);
+            parse_config(&mut voice, memory, base, base + 0x1000);
+            let mut pcm = [[1000, -1000]; 2];
+            voice.filters.process(&mut pcm);
+            assert_eq!(pcm, [[1000, -1000]; 2]);
+            assert_eq!(voice.filters.enabled, 0);
+
+            // Coefficients written while disabled take effect when enabled,
+            // independently for each filter and when both are selected.
+            for (enabled, expected) in [(1, 500), (2, 500), (3, 250)] {
+                memory.write16(base + config::FILTERS_ENABLED, enabled);
+                memory.write32(base + config::DIRTY, dirty::FILTERS_ENABLED);
+                parse_config(&mut voice, memory, base, base + 0x1000);
+                let mut pcm = [[1000, -1000]; 2];
+                voice.filters.process(&mut pcm);
+                assert_eq!(pcm, [[expected, -expected]; 2]);
+            }
+
+            // Updating an already enabled filter still changes its processing.
+            memory.write16(base + config::SIMPLE_FILTER, 0);
+            memory.write32(base + config::DIRTY, dirty::SIMPLE_FILTER);
+            parse_config(&mut voice, memory, base, base + 0x1000);
+            let mut pcm = [[1000, -1000]; 2];
+            voice.filters.process(&mut pcm);
+            assert_eq!(voice.filters.enabled, 3);
+            assert_eq!(pcm, [[0, 0]; 2]);
+        });
     }
 
     #[test]
