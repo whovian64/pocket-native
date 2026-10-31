@@ -1026,6 +1026,97 @@ fn plain_multiplies(source: &str) -> String {
         .replace("vec4(exp2(a.x));", &format!("vec4(clamp(exp2(a.x), {LARGEST}));"))
 }
 
+/// the six combiner stages of one combination as straight code, each
+/// reading only what it uses: Mali's compiler on the R36S builds a program
+/// in three quarters of the time it takes over the generic stages' switches.
+fn combiner_source(constants: &[u32; FRAGMENT_CONSTANTS]) -> String {
+    let input = |source: u32, stage: usize| match source {
+        0 => "primary".to_owned(),
+        1 => "fragment_primary".to_owned(),
+        2 => "fragment_secondary".to_owned(),
+        3..=6 => format!("textures[{}]", source - 3),
+        0xD => "held".to_owned(),
+        0xE => format!("colors[{stage}]"),
+        _ => "previous".to_owned(),
+    };
+    let color = |v: &str, operand: u32| match operand {
+        0x1 => format!("vec3(1.0) - {v}.rgb"),
+        0x2 => format!("vec3({v}.a)"),
+        0x3 => format!("vec3(1.0 - {v}.a)"),
+        0x4 => format!("vec3({v}.r)"),
+        0x5 => format!("vec3(1.0 - {v}.r)"),
+        0x8 => format!("vec3({v}.g)"),
+        0x9 => format!("vec3(1.0 - {v}.g)"),
+        0xC => format!("vec3({v}.b)"),
+        0xD => format!("vec3(1.0 - {v}.b)"),
+        _ => format!("{v}.rgb"),
+    };
+    let alpha = |v: &str, operand: u32| match operand {
+        0 => format!("{v}.a"),
+        1 => format!("1.0 - {v}.a"),
+        2 => format!("{v}.r"),
+        3 => format!("1.0 - {v}.r"),
+        4 => format!("{v}.g"),
+        5 => format!("1.0 - {v}.g"),
+        6 => format!("{v}.b"),
+        _ => format!("1.0 - {v}.b"),
+    };
+    // how many inputs an operation reads, and it on them
+    let inputs = |op: u32| match op {
+        0 => 1,
+        4 | 8 | 9 => 3,
+        _ => 2,
+    };
+    let combine = |op: u32, one: &str, zero: &str, p: &str| match op {
+        0 => format!("{p}0"),
+        1 => format!("{p}0 * {p}1"),
+        2 => format!("min({p}0 + {p}1, {one})"),
+        3 => format!("clamp({p}0 + {p}1 - 0.5, 0.0, 1.0)"),
+        4 => format!("{p}0 * {p}2 + {p}1 * ({one} - {p}2)"),
+        5 => format!("max({p}0 - {p}1, {zero})"),
+        6 | 7 if one == "1.0" => format!("{p}0"),
+        6 | 7 => format!("vec3(clamp(dot({p}0 * 2.0 - 1.0, {p}1 * 2.0 - 1.0), 0.0, 1.0))"),
+        8 => format!("min({p}0 * {p}1 + {p}2, {one})"),
+        _ => format!("min({p}0 + {p}1, {one}) * {p}2"),
+    };
+    let factor = |raw: u32| match raw & 3 {
+        1 => " * 2.0",
+        2 => " * 4.0",
+        _ => "",
+    };
+    let update = constants[24] & 0xFF00;
+    let mut out = String::new();
+    for stage in 0..6 {
+        let (source, operand, combiner, scale) = (constants[stage], constants[6 + stage], constants[12 + stage], constants[18 + stage]);
+        let passes = source & 0x000F_000F == 0x000F_000F && operand & 0x700F == 0 && combiner & 0x000F_000F == 0 && scale == 0;
+        if !passes {
+            let (color_op, alpha_op) = ((combiner & 0xF).min(9), ((combiner >> 16) & 0xF).min(9));
+            out += "    {\n";
+            for i in 0..inputs(color_op) {
+                out += &format!("        vec3 c{i} = {};\n", color(&input((source >> (i * 4)) & 0xF, stage), (operand >> (i * 4)) & 0xF));
+            }
+            out += &format!("        vec3 rgb = {};\n", combine(color_op, "vec3(1.0)", "vec3(0.0)", "c"));
+            if color_op == 7 {
+                out += "        float alpha = rgb.r;\n";
+            } else {
+                for i in 0..inputs(alpha_op) {
+                    out += &format!("        float a{i} = {};\n", alpha(&input((source >> (16 + i * 4)) & 0xF, stage), (operand >> (12 + i * 4)) & 0x7));
+                }
+                out += &format!("        float alpha = {};\n", combine(alpha_op, "1.0", "0.0", "a"));
+            }
+            out += &format!("        previous = clamp(vec4(rgb{}, alpha{}), 0.0, 1.0);\n    }}\n", factor(scale), factor(scale >> 16));
+        }
+        out += "    held = next_buffer;\n";
+        if stage < 4 && update & (0x100 << stage) != 0 {
+            out += "    next_buffer.rgb = previous.rgb;\n";
+        }
+        if stage < 4 && update & (0x1000 << stage) != 0 {
+            out += "    next_buffer.a = previous.a;\n";
+        }
+    }
+    out
+}
+
 fn fragment_source(constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, lighting: &[u32]) -> String {
     let mut out = String::from("#version 310 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n");
     if writes_depth {
@@ -1051,6 +1142,10 @@ fn fragment_source(constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, li
             out += &format!("const uint {name} = {}u;\n", constants[id.parse::<usize>().unwrap_or(0)]);
         } else if line.contains("noperspective in float in_depth") {
             out += "layout(location = 3) in float in_depth_w;\nlayout(location = 6) in float in_w;\n#define in_depth (in_depth_w / in_w)\n";
+        } else if line.starts_with("    combine_stage(") && constants[29] == 0 {
+            if line.starts_with("    combine_stage(0u") {
+                out += &combiner_source(constants);
+            }
         } else {
             out += &line.replace("set = 0, ", "").replace("precise ", "");
             out.push('\n');
