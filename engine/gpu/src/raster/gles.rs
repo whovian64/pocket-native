@@ -3553,6 +3553,57 @@ fn disturb() {
 
 type Job = Box<dyn FnOnce() + Send>;
 
+/// what building programs costs, in the log every 50 the driver compiled:
+/// the wait for the compiler lock, compiling each stage and linking, and how
+/// often a stage's source was one compiled before, which a cache of compiled
+/// shaders would save. Tells where a faster compile has to come from.
+fn count_build(vertex: &str, fragment: &str, waited: std::time::Duration, stages: [std::time::Duration; 3]) {
+    struct Counts {
+        built: u32,
+        waited: std::time::Duration,
+        stages: [std::time::Duration; 3],
+        slowest: std::time::Duration,
+        seen: [rustc_hash::FxHashSet<u64>; 2],
+        repeated: [u32; 2],
+    }
+    static COUNTS: std::sync::Mutex<Option<Counts>> = std::sync::Mutex::new(None);
+    let mut counts = COUNTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let counts = counts.get_or_insert_with(|| Counts {
+        built: 0,
+        waited: std::time::Duration::ZERO,
+        stages: [std::time::Duration::ZERO; 3],
+        slowest: std::time::Duration::ZERO,
+        seen: Default::default(),
+        repeated: [0; 2],
+    });
+    counts.built += 1;
+    counts.waited += waited;
+    for (total, stage) in counts.stages.iter_mut().zip(stages) {
+        *total += stage;
+    }
+    counts.slowest = counts.slowest.max(stages.iter().sum());
+    for (index, source) in [vertex, fragment].into_iter().enumerate() {
+        if !counts.seen[index].insert(fnv(&[source])) {
+            counts.repeated[index] += 1;
+        }
+    }
+    if counts.built % 50 == 0 {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / counts.built as f64;
+        log::info!(
+            "programs compiled: {}, on average {:.1} ms waiting for the lock, {:.1} ms compiling the vertex shader, {:.1} ms the fragment shader, {:.1} ms linking, slowest {:.0} ms; vertex shaders compiled before {} of {}, fragment shaders {}",
+            counts.built,
+            ms(counts.waited),
+            ms(counts.stages[0]),
+            ms(counts.stages[1]),
+            ms(counts.stages[2]),
+            counts.slowest.as_secs_f64() * 1000.0,
+            counts.repeated[0],
+            counts.built,
+            counts.repeated[1]
+        );
+    }
+}
+
 type ProgramKey = ([u32; FRAGMENT_CONSTANTS], bool, Vec<u32>, u64);
 
 /// compiles and links a program, or loads it from the program binary cache
@@ -3569,13 +3620,18 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
             gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format });
             gl.get_program_link_status(program)
         });
+        let waited = started.elapsed();
         if !loaded {
             let mut shaders = Vec::new();
-            for (stage, source) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
+            let mut stages = [std::time::Duration::ZERO; 3];
+            for (index, (stage, source)) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)].into_iter().enumerate() {
+                let began = std::time::Instant::now();
                 let shader = gl.create_shader(stage)?;
                 gl.shader_source(shader, source);
                 gl.compile_shader(shader);
-                if !gl.get_shader_compile_status(shader) {
+                let compiled = gl.get_shader_compile_status(shader);
+                stages[index] = began.elapsed();
+                if !compiled {
                     let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
                     shaders.into_iter().chain([shader]).for_each(|shader| gl.delete_shader(shader));
                     gl.delete_program(program);
@@ -3585,12 +3641,16 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
                 shaders.push(shader);
             }
             gl.program_binary_retrievable_hint(program, true);
+            let began = std::time::Instant::now();
             gl.link_program(program);
             for shader in shaders {
                 gl.detach_shader(program, shader);
                 gl.delete_shader(shader);
             }
-            if !gl.get_program_link_status(program) {
+            let linked = gl.get_program_link_status(program);
+            stages[2] = began.elapsed();
+            count_build(vertex, fragment, waited, stages);
+            if !linked {
                 let error = format!("could not link a program, {}", gl.get_program_info_log(program));
                 gl.delete_program(program);
                 return Err(error);
@@ -3954,6 +4014,12 @@ impl Gles {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::DITHER);
             log::info!("drawing with OpenGL ES on {name}");
+            let extensions = gl.supported_extensions();
+            log::info!(
+                "shader compiling: KHR_parallel_shader_compile {}, ARB_parallel_shader_compile {}",
+                if extensions.contains("GL_KHR_parallel_shader_compile") { "yes" } else { "no" },
+                if extensions.contains("GL_ARB_parallel_shader_compile") { "yes" } else { "no" }
+            );
             ADRENO.store(name.contains("Adreno"), std::sync::atomic::Ordering::Relaxed);
             if gl.supported_extensions().contains("GL_OES_compressed_ETC1_RGB8_texture") && !crate::switch("ZAKURO_NO_ETC1", "ETC1 textures decoded") {
                 crate::raster::SAMPLES_ETC1.store(true, std::sync::atomic::Ordering::Relaxed);
