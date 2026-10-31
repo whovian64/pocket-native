@@ -1509,6 +1509,39 @@ mod tests {
         assert_eq!(system.cpu.regs[0], 0, "the wait's result, not the handle");
     }
 
+    /// a request to a service has the thread wait for the reply, and a
+    /// thread below it runs meanwhile, as on the console. Star Fox 64 3D
+    /// marks a save job running once the more urgent thread doing it is
+    /// made, which has to be waiting on its first request by then.
+    #[test]
+    fn a_request_lets_the_threads_below_run_until_the_reply() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        let below = system.kernel.create_thread("below", 0x0010_0000, 0x0FF0_0000, 0, 0x31, 0);
+        system.map_tls_page(below);
+        let port = system.kernel.objects.insert(KObject::ClientPort("srv:".into()));
+        let handle = system.kernel.handles.create(&mut system.kernel.objects, port, "srv:");
+        // srv:RegisterClient
+        let buffer = system.kernel.thread(id).tls + 0x80;
+        system.memory.write32(buffer, 0x0001_0002);
+        system.memory.write32(buffer + 4, 0x20);
+        system.cpu.regs[0] = handle;
+        let asked = system.cpu.cycles;
+        kernel::svc::dispatch(&mut system, 0x32);
+        assert_eq!((system.cpu.regs[0], system.memory.read32(buffer + 4)), (0, 0), "answered");
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::Sleeping, "waiting for the reply");
+
+        assert!(runs_again(&mut system, below) < asked + 100, "the thread below runs at once");
+        let mut steps = 0;
+        while system.kernel.current_thread != Some(id) || system.kernel.thread(id).status != ThreadStatus::Running {
+            system.step(None);
+            steps += 1;
+            assert!(steps < 40_000, "the thread never got its reply");
+        }
+        let due = asked + kernel::svc::REQUEST_TICKS;
+        assert!((due..due + PREEMPT_INTERVAL).contains(&system.cpu.cycles), "replied at {}, due at {due}", system.cpu.cycles);
+    }
+
     /// a timer fires at its tick, not at the next frame, and the thread on
     /// it wakes then. a pulse timer is gone once it woke a waiter, and comes
     /// again a period after it was due.

@@ -232,8 +232,9 @@ impl Kernel {
         }
         let mut next = self.pick_next();
         self.all_blocked = next.is_none();
-        // the console runs strictly by priority, but its threads block on
-        // every service request while ours are answered at once, so a thread
+        // the console runs strictly by priority, but its threads wait on the
+        // hardware, and on services for as long as their work takes, where
+        // ours wait the same short while for any request, so a thread
         // spinning on work another does would hang. one that runs this long
         // without waiting shares the core with the others ready.
         if let Some(chosen) = next {
