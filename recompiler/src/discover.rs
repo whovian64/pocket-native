@@ -340,6 +340,9 @@ impl Discovery<'_> {
         } else {
             return;
         };
+        if source == Source::Pointer && mode == Mode::Thumb && self.arm_around(address) {
+            return;
+        }
         if self.text.contains(address) && !self.analysis.functions.contains_key(&address) {
             if source == Source::Pointer {
                 self.guesses.push_back((address, mode, source));
@@ -347,6 +350,15 @@ impl Discovery<'_> {
                 self.queue.push_back((address, mode, source));
             }
         }
+    }
+
+    /// whether the word at address and six of the eight from it read as ARM
+    /// run always: Thumb-1, all the 3DS runs, has only branches and the
+    /// second half of blx up there, a pointer to Thumb in ARM code is a
+    /// number. a bx pc veneer's own word is not
+    fn arm_around(&self, address: u32) -> bool {
+        let always = |at: u32| self.text.read32(at).is_some_and(|word| word >> 28 == 0xE);
+        always(address & !3) && (0..8).filter(|i| always((address & !3) + i * 4)).count() >= 6
     }
 
     fn call(&mut self, target: u32, mode: Mode) {
@@ -673,6 +685,22 @@ mod tests {
         assert_eq!(analysis.jump_tables, 1);
         assert_eq!(analysis.count(Byte::Literal), 8);
         assert_eq!(analysis.count(Byte::Code), 5 * 4);
+    }
+
+    #[test]
+    fn a_thumb_pointer_into_arm_code_is_a_number() {
+        let mut program = program(&[
+            0xE92D_4010, // push {r4, lr}
+            0xE3A0_4001, // mov r4, 1
+            0xE3A0_0002, // mov r0, 2
+            0xE080_0004, // add r0, r0, r4
+            0xE280_0001, // add r0, r0, 1
+            0xE240_0001, // sub r0, r0, 1
+            0xE1A0_1000, // mov r1, r0
+            0xE8BD_8010, // pop {r4, pc}
+        ]);
+        program.seeds.push((BASE + 7, Source::Pointer));
+        assert!(!analyze(&program).functions.contains_key(&(BASE + 6)));
     }
 
     #[test]
