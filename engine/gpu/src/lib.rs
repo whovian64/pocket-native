@@ -1528,7 +1528,12 @@ impl Gpu {
             self.bottom_skipped < 5
         } else {
             let behind = self.transfers.saturating_sub(self.skipped_at) < 90;
-            self.bottom_skipped < if self.bottom_full_rate { 0 } else if behind { 2 } else { 1 }
+            // on a panel of its own, as the RG DS's, every change shows
+            #[cfg(feature = "gles")]
+            let full_rate = self.bottom_full_rate || raster::gles::second_window();
+            #[cfg(not(feature = "gles"))]
+            let full_rate = self.bottom_full_rate;
+            self.bottom_skipped < if full_rate { 0 } else if behind { 2 } else { 1 }
         }
     }
 
