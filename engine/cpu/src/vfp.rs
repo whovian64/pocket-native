@@ -42,7 +42,7 @@ impl Vfp {
 
     #[inline(always)]
     pub fn set_f32(&mut self, index: usize, value: f32) {
-        self.regs[index & 31] = self.flush(value).to_bits();
+        self.regs[index & 31] = if value.is_nan() && self.fpscr & FPSCR_DN != 0 { 0x7FC0_0000 } else { self.flush(value).to_bits() };
     }
 
     #[inline(always)]
@@ -55,7 +55,7 @@ impl Vfp {
     #[inline(always)]
     pub fn set_f64(&mut self, index: usize, value: f64) {
         let value = self.flush_f64(value);
-        let bits = value.to_bits();
+        let bits = if value.is_nan() && self.fpscr & FPSCR_DN != 0 { 0x7FF8_0000_0000_0000 } else { value.to_bits() };
         self.regs[(index * 2) & 31] = bits as u32;
         self.regs[(index * 2 + 1) & 31] = (bits >> 32) as u32;
     }
@@ -636,6 +636,20 @@ fn move_pair(cpu: &mut Cpu, op: u32, double: bool) -> Option<Exit> {
     None
 }
 
-/// kept so the default-NaN bit is not silently dropped when we add strict
-/// NaN propagation.
-pub const _FPSCR_DN: u32 = FPSCR_DN;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// with default nans on a nan result is the one nan the console makes,
+    /// positive, whatever the host's arithmetic gave
+    #[test]
+    fn a_nan_result_is_the_default_nan() {
+        let mut vfp = Vfp::new();
+        vfp.set_f32(0, f32::from_bits(0xFFC0_0001));
+        assert_eq!(vfp.regs[0], 0xFFC0_0001);
+        vfp.fpscr = FPSCR_DN;
+        vfp.set_f32(0, f32::from_bits(0xFFC0_0001));
+        vfp.set_f64(1, f64::NAN.copysign(-1.0));
+        assert_eq!((vfp.regs[0], vfp.get_f64(1).to_bits()), (0x7FC0_0000, 0x7FF8_0000_0000_0000));
+    }
+}
