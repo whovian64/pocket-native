@@ -16,8 +16,8 @@ pub fn handle(
     match service {
         // -- Power and shell state ------------------------------------------
         "ptm:u" | "ptm:s" | "ptm:sysm" | "ptm:play" => match command {
-            // GetShellState, 1 = open.
-            0x0005 => {
+            // GetAdapterState, 1 = plugged in / GetShellState, 1 = open.
+            0x0005 | 0x0006 => {
                 buffer.reply(&mut system.memory, command, &[1]);
                 true
             }
