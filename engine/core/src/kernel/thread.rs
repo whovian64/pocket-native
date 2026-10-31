@@ -53,7 +53,9 @@ impl ThreadContext {
             regs,
             cpsr,
             vfp_regs: [0; 32],
-            fpscr: 0,
+            // the kernel starts a thread with default nans, flush to zero
+            // and rounding toward zero
+            fpscr: 0x03C0_0000,
             fpexc: 1 << 30,
             tls_pointer: tls,
         }
