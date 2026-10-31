@@ -103,7 +103,13 @@ fn shared_font(system: &mut System) -> Option<(u32, u32)> {
     // the font sits where the linear mapping puts its memory, among the
     // system's, a title's own linear heap can reach far and never there
     let address = system.kernel.linear_base + (block.addr - zakuro_common::memory_map::FCRAM_PADDR);
-    let data = if generated { crate::services::shared_font::build(address) } else { data };
+    let data = if generated {
+        crate::services::shared_font::build(address)
+    } else {
+        let mut data = data;
+        relocate_font(&mut data, address);
+        data
+    };
 
     let object = system
         .kernel
@@ -135,6 +141,44 @@ fn shared_font(system: &mut System) -> Option<(u32, u32)> {
     log::info!("mapped the shared font at 0x{address:08X} ({} KiB)", data.len() / 1024);
     system.services.apt.shared_font = Some((address, handle));
     Some((address, handle))
+}
+
+/// moves a dumped font's pointers to where it is mapped, the way the system
+/// relocates it before a title maps it. a dump's pointers count from its
+/// header, and a title reading it as it is drew glyph sheets from nowhere,
+/// Kid Icarus: Uprising's text white boxes. the base the pointers assume
+/// comes from FINF's pointer to TGLP, the magic stays CFNU.
+fn relocate_font(data: &mut [u8], address: u32) {
+    let read = |data: &[u8], at: usize| data.get(at..at + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let start = 0x80 + data.get(0x86..0x88).map_or(0, |b| u16::from_le_bytes([b[0], b[1]])) as usize;
+    let mut sections = Vec::new();
+    let mut at = start;
+    for _ in 0..read(data, 0x90) {
+        let (Some(magic), size) = (data.get(at..at + 4), read(data, at + 4) as usize) else { break };
+        sections.push((at, [magic[0], magic[1], magic[2], magic[3]]));
+        if size == 0 {
+            break;
+        }
+        at += size;
+    }
+    let find = |name: &[u8; 4]| sections.iter().find(|(_, magic)| magic == name).map(|&(at, _)| at);
+    let (Some(finf), Some(tglp)) = (find(b"FINF"), find(b"TGLP")) else { return };
+    let delta = address.wrapping_sub(read(data, finf + 0x10).wrapping_sub(tglp as u32 + 8));
+    for &(at, magic) in &sections {
+        let pointers: &[usize] = match &magic {
+            b"FINF" => &[0x10, 0x14, 0x18],
+            b"TGLP" => &[0x1C],
+            b"CWDH" => &[0x0C],
+            b"CMAP" => &[0x10],
+            _ => &[],
+        };
+        for &offset in pointers {
+            let value = read(data, at + offset);
+            if value != 0 {
+                data[at + offset..at + offset + 4].copy_from_slice(&value.wrapping_add(delta).to_le_bytes());
+            }
+        }
+    }
 }
 
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
