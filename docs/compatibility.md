@@ -36,9 +36,11 @@ isn't counted against any game here.
 
 | Game | Status | Tried on | Notes |
 |---|---|---|---|
-| Animal Crossing: New Leaf | Playable | R36S, PC | Tuned on the US version. One report of things no longer drawing after a long session on a Mali-G31 handheld is being looked into |
+| Animal Crossing: New Leaf | Playable | R36S, PC, reported: RG DS (Android), 0.4.6 | Tuned on the US version. A steady 30 fps on the RG DS, where its own bottom screen used to show the game's bottom screen at half the rate, fixed now. The first visit to town takes a few minutes building shaders. One report of things no longer drawing after a long session on a Mali-G31 handheld is being looked into |
 | Azure Striker Gunvolt: Striker Pack | Playable | Reported: RX6H, 0.2 | Frame skipping in the game select menu, fine in game |
+| Ben 10: Omniverse 2 | Slow | Reported: RG DS (Android), 0.4.6 | Doesn't run well, textures flicker all the time |
 | Bravely Default | Starts | Reported: RX6H, 0.2 | Sometimes crashed at the title on 0.2.0, got past the opening on a later version |
+| Donkey Kong Country Returns 3D | Starts | Reported: RX6H, 0.4.6, RG CubeXX, 0.4.7 | Keeps up full speed by skipping pictures, about 20 a second on the RG CubeXX. Crashed once in the Mali driver's shader compiler on the RX6H |
 | Fire Emblem: Awakening | Starts | PC | Reaches the avatar maker. If it stutters, try **Frame skip** off in the advanced settings |
 | Fire Emblem Fates | Slow | Reported: Logitech G Cloud (Android), 0.4.0 | US Special Edition. Plays without crashing, battles and cutscenes at 10 to 15 fps. From chapter 2 most character sprites on the map show as grey boxes. Didn't start with **Most compatible** on |
 | Hyrule Warriors Legends | Starts | PC | The opening plays, but it keeps the 3DS's CPU three quarters busy, so expect it to be slow on a handheld |
@@ -47,6 +49,7 @@ isn't counted against any game here.
 | Kirby Battle Royale | Playable | PC, R36S sim | Full speed at 30 fps in the R36S sim, not played on a handheld yet |
 | Kirby: Planet Robobot | Starts | PC | Gets into the first levels. Since 0.4.3 it no longer asks you to accept the Service User Agreement |
 | Kirby: Triple Deluxe | Starts | PC | Gets into the first stage. Since 0.4.3 it no longer asks you to accept the Service User Agreement |
+| Kirby's Extra Epic Yarn | Slow | Reported: R36S clone, 0.4.7 | Cutscenes up to 30 fps, levels around 12. Some backgrounds glitch or go black while the camera moves. Since 0.4.7 a transformation no longer drops it to 1 fps |
 | The Legend of Zelda: A Link Between Worlds | Playable | PC, reported: RX6H, 0.2, RG DS (Android), 0.4.3 | About 40 fps on the RG DS, with glitches during transitions. Some glitches in effects reported. Some R36S players find 0.4.3 slower than 0.4.0 here: if it is for you, try **Compressed alpha textures** off in the advanced settings |
 | The Legend of Zelda: Ocarina of Time 3D | Playable | PC, R36S sim | Full speed in Link's house in the R36S sim, about half in the Kokiri Forest fly-in. Stutter reported on 0.2 |
 | Luigi's Mansion | Starts | PC, R36S sim | The opening plays into the mansion. About 20 fps in the R36S sim, with dips. Both screens were black on 0.1 |
@@ -55,30 +58,31 @@ isn't counted against any game here.
 | Metroid Prime: Federation Force | Slow | PC, R36S sim | The opening plays into the training. About 6 fps in the R36S sim, its GPU flat out |
 | Metroid: Samus Returns | Starts | R36S, PC | The intro plays into the game. The black frames between its intro pictures are the game's own fades. About 60% of full speed on the R36S on 0.4.3, against about a third on 0.4.0 |
 | My Hero Academia: Battle for All | Starts | PC, R36S sim | Japanese version. The opening plays into the first tutorial. About 15 fps in the R36S sim |
-| Monster Hunter 4 Ultimate | Slow | PC, reported: RX6H, 0.2 | Starts into Character Creation without errors on the PC. 6 fps on the defaults on 0.2. Its profile now turns on **Real-time GPU**, which a tester found faster |
-| New Super Mario Bros. 2 | Playable | PC, reported: 0.2.5 | Close to fully playable on 0.2.5 (European version). The Special Edition crashed on 0.4.0 when turning SpotPass off, fixed in 0.4.3 |
+| Monster Hunter 4 Ultimate | Slow | PC, reported: RX6H, 0.2 | Starts into Character Creation without errors on the PC. 6 fps on the defaults on 0.2. Its profile now turns on **Real-time GPU**, which a tester found faster. 30 to 98% speed on an RX6H on 0.4.6, which crashed in the Mali driver's shader compiler |
+| New Super Mario Bros. 2 | Playable | PC, reported: 0.2.5, RX6H, 0.4.6 | Close to fully playable on 0.2.5 (European version). The Special Edition crashed on 0.4.0 when turning SpotPass off, fixed in 0.4.3. Close to full speed on an RX6H on 0.4.6, which crashed in the Mali driver's shader compiler after a few minutes |
 | Nintendogs + Cats | Starts | Reported: RG DS (Android), 0.4.3 | The intro runs at about 2 fps |
 | One Piece: Romance Dawn | Playable | Reported: RG DS (Android), 0.4.3 | Graphical glitches in some areas |
 | One Piece: Unlimited Cruise SP | Playable | Reported: RG DS (Android), 0.4.3 | Characters flicker now and then. 30 to 50 fps depending on the area, sometimes under 20 |
 | Paper Mario: Sticker Star | Starts | PC | The opening plays, but it keeps the 3DS's CPU all but fully busy, so expect it to be slow on a handheld |
-| Pokémon Omega Ruby and Alpha Sapphire | Plays well | R36S, PC, reported: RG40XXV, RX6H, RG DS (Android) | Close to 30 fps in towns, routes and battles on the R36S. Options for the outlines, battle shading and the battle menu under **This game** |
+| Pokémon Omega Ruby and Alpha Sapphire | Plays well | R36S, PC, reported: RG40XXV, RX6H, RG DS (Android) | Close to 30 fps in towns, routes and battles on the R36S. On the RG DS, 0.4.7 stutters less than 0.4.6 and runs cooler. Options for the outlines, battle shading and the battle menu under **This game** |
 | Pokémon Sun and Moon | Playable | R36S, R36S sim, PC | Moon: 25 to 29 fps on Route 1 and in Iki Town in the R36S sim. The first start takes a long time. Sun gets through its intro to the name entry on the PC and should match Moon, not played yet |
 | Pokémon Ultra Sun and Ultra Moon | Starts | PC | Gets through the intro to the name entry. The same engine as Sun and Moon, not played yet |
 | Pokémon X and Y | Playable | R36S, PC, reported: RG DS (Android) | 20 to 30 fps in towns on the R36S. The intro runs heavy, it settles once you're in the game |
-| Rayman Origins | Playable | Reported: R36S clone, 0.2 | The intro videos are slow and glitchy, the game plays well |
+| Rayman Origins | Playable | Reported: R36S clone, 0.2, RG DS (Android), 0.4.6 | Plays well. The intro stutters, and the picture holds for a second when changing characters or skins |
+| Resident Evil: Revelations | Starts | Reported: RX6H, 0.4.6 | The opening runs at full speed, then the Mali driver's shader compiler crashed within a minute, every time |
 | Shin Megami Tensei IV | Playable | Reported: RX6H, 0.2 | Slows down at times |
 | Shin Megami Tensei: Strange Journey Redux | Playable | Reported: RX6H, 0.2 | Slows down at times |
 | Sonic Generations | Slow | Reported: R36S clone, 0.2 | Very slow |
 | Sonic Lost World | Playable | Reported: R36S | A steady frame rate once its shaders are built, tried through Windy Hill's tutorial and first act |
 | Super Mario 3D Land | Playable | Reported: several, 0.2 | Some textures flicker. Sometimes crashed at the start before 0.2.5 |
-| Super Smash Bros. for Nintendo 3DS | Slow | R36S, PC, reported: RG DS (Android), 0.4.3 | Menus are fine. Matches run around half speed on the R36S on busy stages, frequent slowdowns on the RG DS |
+| Super Smash Bros. for Nintendo 3DS | Playable | R36S, PC, reported: RG DS (Android), 0.4.3, R36S clone, RX6H, 0.4.6 | Menus are fine. 25 to 30 fps in matches on an R36S clone on 0.4.6, about three quarters speed on our R36S on a busy stage. Frequent slowdowns on the RG DS on 0.4.3. Crashed once in the Mali driver's shader compiler on an RX6H |
 | Yoshi's New Island | Playable | Reported: 0.2 | Hold L2 and use the right stick for the parts you tilt the console in |
 
 ## Games with a profile but no report
 
 These have a profile in `titles/` with their name, and some with
 settings from other emulators' experience, but nobody has reported on
-them yet: Donkey Kong Country Returns 3D, Luigi's Mansion 2, Mario &
+them yet: Luigi's Mansion 2, Mario &
 Luigi: Paper Jam, Mario & Luigi: Superstar Saga + Bowser's Minions,
 Mario & Luigi: Bowser's Inside Story + Bowser Jr.'s Journey, Minecraft:
 New Nintendo 3DS Edition, Xenoblade Chronicles 3D.
