@@ -118,6 +118,7 @@ extern "C" fn on_signal(signal: libc::c_int, info: *mut libc::siginfo_t, context
         }
         line.text(b"\n");
         libc::write(LOG.load(Ordering::Relaxed), line.bytes.as_ptr() as *const libc::c_void, line.len);
+        zakuro_gpu::note_compiler_crash(LOG.load(Ordering::Relaxed));
         // the handler before takes it from here, the signal coming again
         // as the instruction runs again, or as abort raises it once more
         let slot = SIGNALS.iter().position(|&s| s == signal).unwrap_or(0);

@@ -19,7 +19,7 @@ use registers::*;
 pub use overlay::{Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
 pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
 #[cfg(feature = "gles")]
-pub use raster::gles::{compiling, layout_scale, layout_size, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_window, stacked};
+pub use raster::gles::{compiling, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_window, stacked};
 
 /// how the GPU reaches guest memory.
 pub trait GpuMemory {

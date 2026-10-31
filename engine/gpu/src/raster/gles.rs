@@ -1805,6 +1805,90 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
 /// on the RX6H crashed in the compiler thread with both at it.
 static COMPILER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// the sources the driver compiles or links and the thread at it, for a
+/// crash in its compiler to name them in the log and keep them out of the
+/// next runs: Mali's r13p0 crashes on the same source every time.
+struct AtCompiler {
+    thread: std::sync::atomic::AtomicI64,
+    fingerprint: std::sync::atomic::AtomicU64,
+    sources: [(std::sync::atomic::AtomicPtr<u8>, std::sync::atomic::AtomicUsize); 2],
+}
+
+static AT_COMPILER: AtCompiler = AtCompiler {
+    thread: std::sync::atomic::AtomicI64::new(0),
+    fingerprint: std::sync::atomic::AtomicU64::new(0),
+    sources: [
+        (std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), std::sync::atomic::AtomicUsize::new(0)),
+        (std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), std::sync::atomic::AtomicUsize::new(0)),
+    ],
+};
+
+/// where the fingerprints of what the compiler crashed on go, for the crash
+/// handler to open.
+static CRASHED_PATH: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+
+fn crashed_path() -> Option<std::path::PathBuf> {
+    manifest_path().map(|path| path.with_file_name("shaders-crashed.txt"))
+}
+
+/// the fingerprints a driver crashed on in an earlier run.
+fn crashed() -> rustc_hash::FxHashSet<u64> {
+    let Some(path) = crashed_path() else { return Default::default() };
+    if let Ok(path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
+        let _ = CRASHED_PATH.set(path);
+    }
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    text.lines().filter_map(|line| u64::from_str_radix(line.trim(), 16).ok()).collect()
+}
+
+/// marks what the driver is about to compile, nothing once it is done.
+fn at_compiler(sources: [&str; 2]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let present: Vec<&str> = sources.into_iter().filter(|source| !source.is_empty()).collect();
+    AT_COMPILER.fingerprint.store(fnv(&present), Relaxed);
+    for ((pointer, len), source) in AT_COMPILER.sources.iter().zip(sources) {
+        pointer.store(source.as_ptr().cast_mut(), Relaxed);
+        len.store(source.len(), Relaxed);
+    }
+    // SAFETY: gettid has no arguments and cannot fail
+    let thread = if present.is_empty() { 0 } else { unsafe { libc::syscall(libc::SYS_gettid) } };
+    AT_COMPILER.thread.store(thread, Relaxed);
+}
+
+/// from a fatal signal's handler: when the crashing thread was in the
+/// driver's compiler, writes what it compiled into the log and its
+/// fingerprint into the list the next runs leave out.
+/// SAFETY: on the crashing thread in its signal handler, log a file to write
+/// to; nothing here allocates
+pub unsafe fn note_compiler_crash(log: libc::c_int) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if AT_COMPILER.thread.load(Relaxed) != libc::syscall(libc::SYS_gettid) {
+        return;
+    }
+    let write = |file: libc::c_int, bytes: &[u8]| {
+        libc::write(file, bytes.as_ptr().cast(), bytes.len());
+    };
+    write(log, b"the driver's compiler crashed on this, the next runs draw what needs it in software:\n");
+    for (pointer, len) in &AT_COMPILER.sources {
+        let pointer = pointer.load(Relaxed);
+        if !pointer.is_null() {
+            write(log, std::slice::from_raw_parts(pointer, len.load(Relaxed)));
+            write(log, b"\n");
+        }
+    }
+    let Some(path) = CRASHED_PATH.get() else { return };
+    let file = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o644);
+    if file >= 0 {
+        let fingerprint = AT_COMPILER.fingerprint.load(Relaxed);
+        let mut line = [b'\n'; 17];
+        for (i, digit) in line[..16].iter_mut().enumerate() {
+            *digit = b"0123456789abcdef"[(fingerprint >> (60 - i * 4)) as usize & 15];
+        }
+        write(file, &line);
+        libc::close(file);
+    }
+}
+
 fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
     let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: on the GL thread, the shaders are deleted once linked
@@ -3587,7 +3671,9 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
             for (stage, source) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
                 let shader = gl.create_shader(stage)?;
                 gl.shader_source(shader, source);
+                at_compiler([source, ""]);
                 gl.compile_shader(shader);
+                at_compiler(["", ""]);
                 if !gl.get_shader_compile_status(shader) {
                     let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
                     shaders.into_iter().chain([shader]).for_each(|shader| gl.delete_shader(shader));
@@ -3598,7 +3684,9 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
                 shaders.push(shader);
             }
             gl.program_binary_retrievable_hint(program, true);
+            at_compiler([vertex, fragment]);
             gl.link_program(program);
+            at_compiler(["", ""]);
             for shader in shaders {
                 gl.detach_shader(program, shader);
                 gl.delete_shader(shader);
@@ -3911,6 +3999,8 @@ pub struct Gles {
     /// try after it.
     room_made: Option<u64>,
     retried: rustc_hash::FxHashSet<ProgramKey>,
+    /// fingerprints of the sources the driver crashed on before.
+    crashed: rustc_hash::FxHashSet<u64>,
     /// display transfers so far, the clock occlusion culling keeps time by.
     pictures: u64,
     warned_logic_op: bool,
@@ -4023,6 +4113,7 @@ impl Gles {
                 stamped: None,
                 room_made: None,
                 retried: Default::default(),
+                crashed: crashed(),
                 pictures: 0,
                 warned_logic_op: false,
                 preloading: false,
@@ -5236,6 +5327,9 @@ impl Gles {
             hash => self.vertex_sources.get(&hash).cloned().ok_or("a vertex program that was never translated")?,
         };
         let compiled = if crate::fast_with(crate::speedup::PLAIN_MATH) { plain_multiplies(&vertex_source) } else { vertex_source };
+        if [fnv(&[&compiled]), fnv(&[&fragment]), fnv(&[&compiled, &fragment])].iter().any(|fingerprint| self.crashed.contains(fingerprint)) {
+            return Err("the driver crashed on its program before".to_owned());
+        }
         let cached = program_cache_path(&self.name, &compiled, &fragment);
         if let Some(inputs) = inputs {
             self.inputs.insert(key.clone(), inputs());
