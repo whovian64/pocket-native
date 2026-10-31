@@ -336,6 +336,10 @@ impl Kernel {
     /// releases what waits on it then, and clears after. whether any fired.
     fn fire_timers(&mut self, tick: u64) -> bool {
         let mut fired = false;
+        // a timer closed for good leaves the list, its slot may hold another
+        // object since
+        let objects = &self.objects;
+        self.timers.retain(|&id| matches!(objects.get(id), Some(KObject::Timer(_))));
         for &id in &self.timers {
             if let Some(KObject::Timer(timer)) = self.objects.get_mut(id) {
                 let Some(at) = timer.fire_at.filter(|&at| at <= tick) else { continue };
@@ -359,10 +363,10 @@ impl Kernel {
             return;
         }
         self.reschedule_pending = true;
-        let threads = &self.threads;
+        let (threads, live) = (&self.threads, &self.live);
         let objects = &mut self.objects;
         self.pulsed.retain(|&id| {
-            let waited = threads.iter().any(|t| t.status == ThreadStatus::WaitSync && t.wait_objects.contains(&id));
+            let waited = live.iter().map(|&t| &threads[t as usize]).any(|t| t.status == ThreadStatus::WaitSync && t.wait_objects.contains(&id));
             if !waited {
                 if let Some(KObject::Timer(timer)) = objects.get_mut(id) {
                     timer.signaled = false;
@@ -620,7 +624,8 @@ impl Kernel {
     /// signals an event, waking anything waiting on it at the next scheduling
     /// point.
     pub fn signal_event(&mut self, object: ObjectId) {
-        let waited = self.threads.iter().any(|t| t.status == ThreadStatus::WaitSync && t.wait_objects.contains(&object));
+        // only a live thread waits, Pokémon Moon starts thousands that end
+        let waited = self.live.iter().map(|&id| &self.threads[id as usize]).any(|t| t.status == ThreadStatus::WaitSync && t.wait_objects.contains(&object));
         if let Some(KObject::Event(event)) = self.objects.get_mut(object) {
             // a pulse wakes what waits on it now, and is gone after, lost
             // when nothing does
