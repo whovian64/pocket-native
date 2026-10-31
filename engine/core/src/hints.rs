@@ -22,9 +22,11 @@ pub struct Hints {
 }
 
 impl Hints {
-    /// the hints for a library, with those an earlier run wrote down.
+    /// the hints for a library, with those an earlier run wrote down: next
+    /// to it, or where ZAKURO_HINTS says, for a library kept where nobody can
+    /// copy them from, as Android's app keeps its code.
     pub fn new(library: &Path, text: Range<u32>) -> Hints {
-        let path = library.with_extension("hints");
+        let path = std::env::var_os("ZAKURO_HINTS").filter(|value| !value.is_empty()).map(PathBuf::from).unwrap_or_else(|| library.with_extension("hints"));
         let seen: BTreeSet<u32> = std::fs::read_to_string(&path)
             .unwrap_or_default()
             .lines()
