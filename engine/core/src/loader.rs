@@ -35,7 +35,10 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
     // and the rest as on an Old 3DS, as their linear heap is where an Old
     // 3DS has it; a New 3DS is one all the way through
     let n3ds_memory = zakuro_fs::n3ds_application_memory(exheader.n3ds_system_mode);
-    config.new3ds = title.ncch.platform() == 2 || config.new3ds && n3ds_memory.is_some();
+    // the New 3DS's own games have their unique ids from 0xF7000, as
+    // Xenoblade Chronicles 3D, whose header still says Old 3DS
+    let n3ds_only = (0xF7000..0xF8000).contains(&(title.program_id() >> 8 & 0xF_FFFF));
+    config.new3ds = title.ncch.platform() == 2 || n3ds_only || config.new3ds && n3ds_memory.is_some();
     if config.new3ds {
         config.model = ConsoleModel::New3ds;
     }
