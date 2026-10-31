@@ -44,7 +44,7 @@ isn't counted against any game here.
 | Fire Emblem: Awakening | Starts | PC | Reaches the avatar maker. If it stutters, try **Frame skip** off in the advanced settings |
 | Fire Emblem Fates | Slow | Reported: Logitech G Cloud (Android), 0.4.0 | US Special Edition. Plays without crashing, battles and cutscenes at 10 to 15 fps. From chapter 2 most character sprites on the map show as grey boxes. Didn't start with **Most compatible** on |
 | Hyrule Warriors Legends | Starts | PC | The opening plays, but it keeps the 3DS's CPU three quarters busy, so expect it to be slow on a handheld |
-| Kid Icarus: Uprising | Starts | PC | Plays into the first chapter. Text in menus and dialogue shows as bars. Crashed a few seconds in on 0.4.5 |
+| Kid Icarus: Uprising | Starts | PC | Plays into the first chapter. Text in menus and dialogue shows as bars. The next version draws its effects made with the geometry shader's fixed primitive mode, which were left out. Crashed a few seconds in on 0.4.5 |
 | Kingdom Hearts 3D: Dream Drop Distance | Slow | PC, R36S sim | The opening plays into Destiny Islands. About 60% speed in the R36S sim |
 | Kirby Battle Royale | Playable | PC, R36S sim | Full speed at 30 fps in the R36S sim, not played on a handheld yet |
 | Kirby: Planet Robobot | Starts | PC | Gets into the first levels. Since 0.4.3 it no longer asks you to accept the Service User Agreement |
@@ -69,13 +69,15 @@ isn't counted against any game here.
 | Pokémon Ultra Sun and Ultra Moon | Starts | PC | Gets through the intro to the name entry. The same engine as Sun and Moon, not played yet |
 | Pokémon X and Y | Playable | R36S, PC, reported: RG DS (Android) | 20 to 30 fps in towns on the R36S. The intro runs heavy, it settles once you're in the game |
 | Rayman Origins | Playable | Reported: R36S clone, 0.2, RG DS (Android), 0.4.6 | Plays well. The intro stutters, and the picture holds for a second when changing characters or skins |
-| Resident Evil: Revelations | Starts | Reported: RX6H, 0.4.6 | The opening runs at full speed, then the Mali driver's shader compiler crashed within a minute, every time |
+| Resident Evil: Revelations | Starts | PC, reported: RX6H, 0.4.6 | The opening runs at full speed, then the Mali driver's shader compiler crashed within a minute, every time. On the PC it plays into the first episode |
 | Shin Megami Tensei IV | Playable | Reported: RX6H, 0.2 | Slows down at times |
 | Shin Megami Tensei: Strange Journey Redux | Playable | Reported: RX6H, 0.2 | Slows down at times |
 | Sonic Generations | Slow | Reported: R36S clone, 0.2 | Very slow |
 | Sonic Lost World | Playable | Reported: R36S | A steady frame rate once its shaders are built, tried through Windy Hill's tutorial and first act |
+| Star Fox 64 3D | Starts | PC, reported: 0.4.7 | Building it made 22 GB of C on 0.4.7, and it stopped at "Initializing game data". The next version builds it at a normal size and gets to the title and the training demo |
 | Super Mario 3D Land | Playable | Reported: several, 0.2 | Some textures flicker. Sometimes crashed at the start before 0.2.5 |
 | Super Smash Bros. for Nintendo 3DS | Playable | R36S, PC, reported: RG DS (Android), 0.4.3, R36S clone, RX6H, 0.4.6 | Menus are fine. 25 to 30 fps in matches on an R36S clone on 0.4.6, about three quarters speed on our R36S on a busy stage. Frequent slowdowns on the RG DS on 0.4.3. Crashed once in the Mali driver's shader compiler on an RX6H |
+| Xenoblade Chronicles 3D | Starts | PC | A New 3DS title. Gets into the opening battle. The top screen stays tinted red there in the PC probe, not checked against a console yet |
 | Yoshi's New Island | Playable | Reported: 0.2 | Hold L2 and use the right stick for the parts you tilt the console in |
 
 ## Games with a profile but no report
@@ -85,4 +87,4 @@ settings from other emulators' experience, but nobody has reported on
 them yet: Luigi's Mansion 2, Mario &
 Luigi: Paper Jam, Mario & Luigi: Superstar Saga + Bowser's Minions,
 Mario & Luigi: Bowser's Inside Story + Bowser Jr.'s Journey, Minecraft:
-New Nintendo 3DS Edition, Xenoblade Chronicles 3D.
+New Nintendo 3DS Edition.
