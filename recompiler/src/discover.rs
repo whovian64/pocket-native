@@ -124,8 +124,8 @@ struct Discovery<'a> {
     /// a way in all the same.
     pushes: BTreeMap<u32, u32>,
     /// literals only Thumb code loads, which ARM code running into them
-    /// goes on through: Thumb read out of ARM code by mistake loads them
-    /// from the middle of it.
+    /// goes on through when they read as its instructions: Thumb read out
+    /// of ARM code by mistake loads them from the middle of it.
     thumb_literals: BTreeSet<u32>,
 }
 
@@ -164,6 +164,45 @@ pub fn analyze(program: &Program) -> Analysis {
         discovery.queue.extend(starts.into_iter().map(|(address, mode)| (address, mode, Source::Scan)));
         discovery.run();
     }
+    // a function explored before another's start was known took that one in
+    // as its own code, and whatever it branched on to: explored again, a
+    // branch to it is a tail call, every game's code a tenth to a quarter
+    // smaller
+    let mut redone = BTreeSet::new();
+    loop {
+        let functions = &discovery.analysis.functions;
+        let absorbing: Vec<(u32, Mode)> = functions
+            .iter()
+            .filter(|&(entry, function)| {
+                !redone.contains(entry) && function.labels.iter().any(|label| label != entry && functions.get(label).is_some_and(|other| other.mode == function.mode))
+            })
+            .map(|(&entry, function)| (entry, function.mode))
+            .collect();
+        if absorbing.is_empty() {
+            break;
+        }
+        let counts = (discovery.analysis.indirect_sites, discovery.analysis.jump_tables, discovery.analysis.svc_sites, discovery.analysis.dead_ends);
+        for (entry, mode) in absorbing {
+            redone.insert(entry);
+            let (instructions, labels) = discovery.function_at(entry, mode);
+            let function = discovery.analysis.functions.get_mut(&entry).expect("still there");
+            (function.instructions, function.labels) = (instructions, labels);
+        }
+        let analysis = &mut discovery.analysis;
+        (analysis.indirect_sites, analysis.jump_tables, analysis.svc_sites, analysis.dead_ends) = counts;
+        discovery.run();
+    }
+    // Thumb read as ARM, from a pointer into it and the calls out of that,
+    // is conditional instructions of every kind where an ARM function's
+    // nearly all run always: a big one like that is left to the
+    // interpreter, should it ever run. Star Fox 64 3D had a hundred,
+    // each a whole program's worth of branches
+    let text = discovery.text;
+    discovery.analysis.functions.retain(|_, function| {
+        let guessed = matches!(function.source, Source::Call | Source::Pointer | Source::Scan);
+        let always = function.instructions.iter().filter(|&&address| text.read32(address).is_some_and(|word| word >> 28 == 0xE)).count();
+        !(guessed && function.mode == Mode::Arm && function.instructions.len() >= 4000 && always * 10 < function.instructions.len() * 6)
+    });
     discovery.analysis
 }
 
@@ -171,13 +210,30 @@ impl Discovery<'_> {
     fn run(&mut self) {
         while let Some((entry, mode, source)) = self.queue.pop_front().or_else(|| self.guesses.pop_front()) {
             if !self.analysis.functions.contains_key(&entry) {
-                let (instructions, mut labels) = self.explore(entry, mode);
-                if let Some(&push) = self.pushes.get(&entry).filter(|push| instructions.binary_search(push).is_ok()) {
-                    labels.insert(push);
-                }
+                let (instructions, labels) = self.function_at(entry, mode);
                 self.analysis.functions.insert(entry, Function { source, mode, instructions, labels });
             }
         }
+    }
+
+    /// a word only Thumb loads that reads as an ARM instruction run always,
+    /// as nearly all of an ARM function's are: Thumb read out of ARM code
+    /// by mistake loads those. what real Thumb code loads, addresses and
+    /// numbers, hardly ever does, and ARM going on through those ran into
+    /// the Thumb after them, Star Fox 64 3D's functions ten times their
+    /// size
+    fn thumb_literal_instruction(&self, address: u32) -> bool {
+        self.thumb_literals.contains(&(address & !3)) && self.text.read32(address & !3).is_some_and(|word| word >> 28 == 0xE)
+    }
+
+    /// the instructions and labels of the function at entry, the push a
+    /// scan started it before among them.
+    fn function_at(&mut self, entry: u32, mode: Mode) -> (Vec<u32>, BTreeSet<u32>) {
+        let (instructions, mut labels) = self.explore(entry, mode);
+        if let Some(&push) = self.pushes.get(&entry).filter(|push| instructions.binary_search(push).is_ok()) {
+            labels.insert(push);
+        }
+        (instructions, labels)
     }
 
     fn mark(&mut self, address: u32, size: u32, kind: Byte) {
@@ -321,7 +377,7 @@ impl Discovery<'_> {
             labels.insert(start);
             let mut address = start;
             while self.text.contains(address) && seen.insert(address) {
-                if self.byte(address) == Byte::Literal && !(mode == Mode::Arm && self.thumb_literals.contains(&(address & !3))) {
+                if self.byte(address) == Byte::Literal && !(mode == Mode::Arm && self.thumb_literal_instruction(address)) {
                     // ran into a literal pool, the path is wrong or it ended
                     break;
                 }
@@ -349,7 +405,9 @@ impl Discovery<'_> {
                     Flow::Branch { target, link: true } => self.call(target, mode),
                     Flow::CallOtherMode { target } => self.call(target, mode.other()),
                     Flow::Branch { target, link: false } => {
-                        if self.text.contains(target) {
+                        // to another function's start a tail call, not more of this one
+                        let tail = target != entry && self.analysis.functions.get(&target).is_some_and(|function| function.mode == mode);
+                        if self.text.contains(target) && !tail {
                             blocks.push(target);
                         }
                         if !conditional {
@@ -569,6 +627,20 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_to_a_function_found_later_is_a_tail_call() {
+        let analysis = analyze_words(&[
+            0xEB00_0001, // bl 0x10000c
+            0xEA00_0000, // b 0x10000c, the same function
+            0xDEAD_BEEF, // never reached
+            0xE3A0_0001, // mov r0, 1
+            0xE12F_FF1E, // bx lr
+        ]);
+        assert_eq!(analysis.functions[&BASE].instructions, [BASE, BASE + 4]);
+        assert_eq!(analysis.functions[&BASE].labels, BTreeSet::from([BASE, BASE + 4]));
+        assert_eq!(analysis.functions[&(BASE + 0xC)].instructions, [BASE + 0xC, BASE + 0x10]);
+    }
+
+    #[test]
     fn a_switch_table_leads_to_every_case() {
         let analysis = analyze_words(&[
             0xE350_0001, // cmp r0, 1
@@ -672,6 +744,21 @@ mod tests {
             0xE12F_FF1E, // bx lr
         ]);
         assert!(analysis.functions[&(BASE + 0x14)].instructions.contains(&(BASE + 0x1C)));
+    }
+
+    #[test]
+    fn arm_code_stops_at_what_only_thumb_loads_when_it_is_not_an_instruction() {
+        let analysis = analyze_words(&[
+            0xFA00_0001, // blx 0x10000c
+            0xEB00_0002, // bl 0x100014
+            0xE12F_FF1E, // bx lr
+            0x4770_4802, // ldr r0, [pc, 8] (0x100018) then bx lr, in Thumb
+            0x0000_0000,
+            0xE3A0_0001, // mov r0, 1
+            0x0010_2000, // an address, which the Thumb loads
+            0xE12F_FF1E, // bx lr
+        ]);
+        assert!(!analysis.functions[&(BASE + 0x14)].instructions.contains(&(BASE + 0x1C)));
     }
 
     #[test]
