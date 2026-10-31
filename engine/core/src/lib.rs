@@ -804,9 +804,10 @@ impl System {
     }
 
     /// skips the frame about to run when the frontend is behind, or when
-    /// it will not be shown and the title makes a picture every frame.
-    pub fn skip_frames(&mut self, behind: bool, unshown: bool) {
-        self.gpu_work(&[], move |gpu, _, _| gpu.next_frame(behind, unshown));
+    /// it will not be shown and the title makes a picture every frame, never
+    /// more than most of the title's pictures in a row.
+    pub fn skip_frames(&mut self, behind: bool, unshown: bool, most: u32) {
+        self.gpu_work(&[], move |gpu, _, _| gpu.next_frame(behind, unshown, most));
     }
 
     /// draws the bottom screen with every picture while it changes, rather

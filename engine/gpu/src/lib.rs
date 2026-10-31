@@ -299,6 +299,9 @@ pub struct Gpu {
     /// display transfers that would show them, for a frontend that cannot
     /// show them in time, a frame at a time from its first draw.
     pub skip_draws: bool,
+    /// the most pictures the frontend skips in a row, and how many were.
+    most_skipped: u32,
+    pictures_skipped: u32,
     /// the frame skips only because the panel will not show it, which
     /// leaves the bottom screen drawn: some titles draw it only in the
     /// frames between their top pictures.
@@ -427,6 +430,8 @@ impl Gpu {
             shown: 0,
             vertices_drawn: 0,
             skip_draws: false,
+            most_skipped: 3,
+            pictures_skipped: 0,
             keep_bottom: false,
             top_sent: false,
             top_sent_before: [false; 2],
@@ -1424,11 +1429,12 @@ impl Gpu {
     /// in each of the two frames before: drawing every other frame of a title
     /// that makes one a frame loses nothing shown, one that makes one every
     /// other frame never sends two in a row.
-    pub fn next_frame(&mut self, behind: bool, unshown: bool) {
+    pub fn next_frame(&mut self, behind: bool, unshown: bool, most: u32) {
         self.top_sent_before = [self.top_sent_before[1], self.top_sent];
         self.top_sent = false;
         self.skip_draws = behind || (unshown && self.top_sent_before == [true, true]);
         self.keep_bottom = !behind;
+        self.most_skipped = most;
     }
 
     fn right_eye_off(&mut self, why: &str) {
@@ -1457,7 +1463,12 @@ impl Gpu {
         }
         if !self.drawing {
             self.drawing = true;
-            let skip_draws = self.skip_draws && !(screen == 1 && self.keep_bottom);
+            // a picture is drawn after the most the frontend skips in a row,
+            // whichever of its frames it starts in: a title making one every
+            // other frame started each in a skipped one, Pokémon Moon on an
+            // H700 showing one picture from then on
+            let skip_draws = self.skip_draws && !(screen == 1 && self.keep_bottom) && self.pictures_skipped < self.most_skipped.max(1);
+            self.pictures_skipped = if skip_draws { self.pictures_skipped + 1 } else { 0 };
             if skip_draws {
                 self.skipped_at = self.transfers;
             }
