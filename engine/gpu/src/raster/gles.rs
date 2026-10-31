@@ -2938,16 +2938,19 @@ impl Ring {
         // SAFETY: the context is current, and the mapping lasts as long as
         // the buffer, which a ring keeps
         unsafe {
-            let buffer = gl.create_buffer()?;
+            let mut buffer = gl.create_buffer()?;
             gl.bind_buffer(target, Some(buffer));
             if persistent(gl) {
                 let flags = glow::MAP_WRITE_BIT | glow::MAP_PERSISTENT_BIT | glow::MAP_COHERENT_BIT;
                 gl.buffer_storage(target, size as i32, None, flags);
                 let base = gl.map_buffer_range(target, 0, size as i32, flags);
-                if base.is_null() {
-                    return Err("could not map a buffer for good".into());
+                if !base.is_null() {
+                    return Ok(Ring { buffer, size, offset: 0, align, laps: 0, mapped: Some((base, Default::default())) });
                 }
-                return Ok(Ring { buffer, size, offset: 0, align, laps: 0, mapped: Some((base, Default::default())) });
+                log::warn!("could not map a buffer for good, GL error {:#x}, written through GL instead", gl.get_error());
+                gl.delete_buffer(buffer);
+                buffer = gl.create_buffer()?;
+                gl.bind_buffer(target, Some(buffer));
             }
             gl.buffer_data_size(target, size as i32, glow::STREAM_DRAW);
             Ok(Ring { buffer, size, offset: 0, align, laps: 0, mapped: None })
