@@ -582,6 +582,9 @@ fn geometry_stage(
     vertex_outputs: impl Iterator<Item = [Vec4; 16]>,
 ) -> Vec<Vertex> {
     let mode = registers[REG_GS_CONFIG] & 0xFF;
+    if mode == 2 {
+        return fixed_geometry(registers, unit, map, vertex_outputs);
+    }
     if mode != 0 {
         log::warn!("geometry shader mode {mode} is not implemented");
         return Vec::new();
@@ -632,6 +635,36 @@ fn geometry_stage(
         for triangle in triangles {
             for outputs in triangle {
                 vertices.push(to_vertex(map, &pack_outputs(outputs, output_mask)));
+            }
+        }
+    }
+    vertices
+}
+
+/// the fixed primitive mode: each vertex's outputs go into the geometry
+/// shader's float uniforms from the one bits 16-23 name on, and the shader
+/// runs, with no inputs, once every vertex count in bits 8-11 has.
+/// Kid Icarus: Uprising draws with it.
+fn fixed_geometry(registers: &[u32], unit: &ShaderUnit, map: &OutputMap, vertex_outputs: impl Iterator<Item = [Vec4; 16]>) -> Vec<Vertex> {
+    let config = registers[REG_GS_CONFIG];
+    let per_vertex = ((registers[REG_VS_OUTPUT_TOTAL] & 0xF) + 1) as usize;
+    let start = (config >> 16 & 0xFF) as usize;
+    let end = start + per_vertex * ((config >> 8 & 0xF) + 1) as usize;
+    let output_mask = registers[REG_GS_BLOCK + SHADER_OUTPUT_MASK];
+    let mut unit = unit.clone();
+    let mut at = start;
+    let mut vertices = Vec::new();
+    for outputs in vertex_outputs {
+        for &value in &outputs[..per_vertex] {
+            if let Some(uniform) = unit.float_uniforms.get_mut(at) {
+                *uniform = value;
+            }
+            at += 1;
+        }
+        if at >= end {
+            at = start;
+            for triangle in shader::run_geometry_many(&unit, &[[shader::ZERO; shader::INPUT_REGISTERS]]).into_iter().flatten() {
+                vertices.extend(triangle.iter().map(|outputs| to_vertex(map, &pack_outputs(outputs, output_mask))));
             }
         }
     }
