@@ -57,6 +57,25 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             buffer.reply(&mut system.memory, 0x0006, &[1]);
             true
         }
+        // TranslateCountryInfo(info, direction), the info given back, the
+        // united kingdom's provinces 3 to 7 numbered one on toward the
+        // newer version or one back from it
+        0x0008 => {
+            let info = buffer.get(&mut system.memory, 1);
+            let step = match buffer.get(&mut system.memory, 2) as u8 {
+                0 => 4,
+                1 => 1,
+                _ => 0,
+            };
+            let province = (info >> 16) & 0xFF;
+            let translated = if info & 0xFF00_FFFF == 0x6E00_0000 && (3..=7).contains(&province) {
+                info & 0xFF00_FFFF | ((province - 3 + step) % 5 + 3) << 16
+            } else {
+                info
+            };
+            buffer.reply(&mut system.memory, 0x0008, &[translated]);
+            true
+        }
         _ => false,
     }
 }
@@ -134,4 +153,24 @@ fn write_config_block(system: &mut System, block_id: u32, out: u32, size: u32) {
         other => log::debug!("cfg: block 0x{other:08X} is not implemented, returning zeroes"),
     }
     system.memory.write_bytes(out, &data);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::kernel::ipc::Header;
+    use crate::services::{handle_request, tests::system_with_thread, Target};
+
+    /// a country's info comes back as it went in, the united kingdom's
+    /// provinces 3 to 7 renumbered one on or one back.
+    #[test]
+    fn country_info_comes_back() {
+        let (mut system, buffer) = system_with_thread();
+        for (info, direction, expected) in [(0x3100_0000, 1, 0x3100_0000), (0x6E07_0000, 1, 0x6E03_0000), (0x6E03_0000, 0, 0x6E07_0000), (0x6E05_0000, 2, 0x6E05_0000)] {
+            buffer.set(&mut system.memory, 0, Header::new(0x0008, 2, 0).0);
+            buffer.set(&mut system.memory, 1, info);
+            buffer.set(&mut system.memory, 2, direction);
+            handle_request(&mut system, Target::service("cfg:u".into(), 0));
+            assert_eq!((buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2)), (0, expected), "{info:08X} {direction}");
+        }
+    }
 }
