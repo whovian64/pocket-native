@@ -99,6 +99,7 @@ pub fn run(mut args: Vec<String>) {
     if probing {
         args.remove(0);
         probe::start_logging();
+        crash::watch(None);
     } else {
         let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
         // POCKET_NATIVE_LOG=file logs there in place of standard error, which
