@@ -587,13 +587,14 @@ pub struct Status {
     clock: Option<String>,
     /// what a hotkey just did, at the top.
     pub note: Option<&'static str>,
-    /// how many shaders are still building, at the top left.
-    building: Option<usize>,
+    /// how many shaders are still building, at the top left, and how many
+    /// of the generic stand-ins of how many, a first run's long build.
+    building: Option<(usize, (usize, usize))>,
 }
 
 impl Status {
     /// none when the settings show nothing.
-    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>, building: Option<usize>) -> Option<Status> {
+    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>, building: Option<(usize, (usize, usize))>) -> Option<Status> {
         let read = |path: &str| std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse::<i64>().ok());
         let status = Status {
             fps: settings.show_fps.then(|| match read("/sys/class/thermal/thermal_zone0/temp") {
@@ -617,8 +618,14 @@ impl Status {
             canvas.fill([width / 2.0 - half, 8.0, width / 2.0 + half, 32.0], backing);
             canvas.text(BIG, note, width / 2.0 - half + 6.0, 11.0, rgba(TEXT, 255), false);
         }
-        if let Some(building) = self.building {
-            let line = format!("Building shaders ({building})");
+        if let Some((building, (stand_ins, of))) = self.building {
+            // the generic shaders a first run, or the first after an update,
+            // builds for every game, which take longest: said apart
+            let line = if stand_ins > 0 {
+                format!("First-run graphics {}/{of}, shaders ({building})", of.saturating_sub(stand_ins))
+            } else {
+                format!("Building shaders ({building})")
+            };
             canvas.fill([8.0, 8.0, 20.0 + canvas.measure(BIG, &line), 32.0], backing);
             canvas.text(BIG, &line, 14.0, 11.0, rgba(TEXT, 255), false);
         }

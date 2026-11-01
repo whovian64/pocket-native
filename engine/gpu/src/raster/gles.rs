@@ -1253,6 +1253,20 @@ pub fn compiling() -> usize {
     BUILDING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// the generic stand-ins of those, which a first run, or one after an
+/// update, builds once for every game, the slowest programs there are.
+static BUILDING_STAND_INS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// how many of the generic stand-ins are still being built, and how many
+/// there are, for the screen to say so: a long wait the first time is them.
+pub fn compiling_stand_ins() -> (usize, usize) {
+    (BUILDING_STAND_INS.load(std::sync::atomic::Ordering::Relaxed), STAND_IN_COUNT)
+}
+
+/// the stand-ins prepare_stand_ins makes: with and without depth written,
+/// with and without the border, with and without lighting.
+const STAND_IN_COUNT: usize = 8;
+
 /// whether the second window's screen fills all of it, out of shape, rather
 /// than keeping its shape with bars.
 pub fn set_second_stretched(stretched: bool) {
@@ -3808,6 +3822,9 @@ impl Queue {
         if jobs.2 {
             return Err(());
         }
+        if job.key.0[29] != 0 {
+            BUILDING_STAND_INS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // a stand-in's constants say it is the dynamic program. Draws drawn
         // with stand-ins while their programs build need them first
         if job.key.0[29] != 0 && !crate::raster::stand_ins() {
@@ -3903,6 +3920,9 @@ impl Compiler {
                         // SAFETY: the context is current on this thread
                         unsafe { gl.finish() };
                         BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        if job.key.0[29] != 0 {
+                            BUILDING_STAND_INS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         if finished.send((job.key, result)).is_err() {
                             break;
                         }
@@ -5522,6 +5542,7 @@ impl Gles {
                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached }).is_err() {
                     BUILDING.store(0, std::sync::atomic::Ordering::Relaxed);
+                    BUILDING_STAND_INS.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.compiler = None;
                 }
                 return Ok(None);
@@ -7400,6 +7421,40 @@ mod tests {
             assert_eq!(read_copy(&mut gles, &texture), expected, "256x{height} over two drawings");
         }
         assert!(gles.surfaces[small].dirty.is_none(), "the small drawing was written back");
+    }
+
+    #[test]
+    fn every_generic_stand_in_builds() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let worker = gles.worker.clone();
+        let times = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let mut times = Vec::new();
+            for writes_depth in [false, true] {
+                for unbordered in [0, 0x400] {
+                    for lighting in [0, 1] {
+                        let mut constants = [0u32; FRAGMENT_CONSTANTS];
+                        constants[25] = unbordered;
+                        constants[26] = lighting;
+                        constants[28] = if writes_depth { WRITES_DEPTH } else { 0 };
+                        let fragment = fragment_source(&generic_constants(&constants), writes_depth, &[]);
+                        let started = std::time::Instant::now();
+                        if let Err(error) = build_program(gl, VERTEX_SOURCE, &fragment, None) {
+                            panic!("a stand-in did not build, {error}");
+                        }
+                        times.push(started.elapsed().as_millis());
+                    }
+                }
+            }
+            times
+        });
+        eprintln!("the stand-ins built in {times:?} ms");
     }
 
     #[test]
