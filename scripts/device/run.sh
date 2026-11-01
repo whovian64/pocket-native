@@ -29,7 +29,13 @@ if systemctl is-active -q sway.service 2>/dev/null && command -v chvt >/dev/null
     # a blanked console turns the panels off under the game
     echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
 fi
-sudo -n sh -c "echo 1 > /proc/sys/debug/exception-trace" 2>/dev/null
+# spruceOS (Miyoo Flip) keeps two of the four cores offline to save battery;
+# wake them for the game and put them back as they were afterwards
+offline=""
+for c in /sys/devices/system/cpu/cpu[1-9]/online; do
+    [ -f "$c" ] && [ "$(cat "$c")" = 0 ] && { offline="$offline $c"; echo 1 > "$c" 2>/dev/null; }
+done
+if [ "$(id -u)" = 0 ]; then echo 1 > /proc/sys/debug/exception-trace 2>/dev/null; else sudo -n sh -c "echo 1 > /proc/sys/debug/exception-trace" 2>/dev/null; fi
 cd "$game"
 while true; do
     "$dir/pocket-native" "$rom" > "$data/log.txt" 2>&1
@@ -38,9 +44,10 @@ while true; do
 done
 if [ $status -ne 0 ]; then
     echo "exit status $status" >> "$data/log.txt"
-    dmesg | tail -40 >> "$data/log.txt"
+    { dmesg | grep -iE "pocket|segv|sigsegv|fault|Oops|killed" | tail -20; dmesg | tail -10; } >> "$data/log.txt"
 fi
 "$dir/power.sh" normal
+for c in $offline; do echo 0 > "$c" 2>/dev/null; done
 if [ -n "$vt" ]; then
     chvt "$vt"
     # sway's libinput finds its devices again only once one changes
