@@ -19,7 +19,8 @@ case "$1" in
     # the GPU left on demand stayed slow enough to hold Pokémon X at 16 fps,
     # at its top speed 30, the CPU slowing down where it can all the same
     balanced) governors="ondemand performance performance" ;;
-    *) governors=$(cat "$saved" 2>/dev/null || echo "ondemand simple_ondemand dmc_ondemand"); rm -f "$saved" ;;
+    # nothing changed them, nothing to put back
+    *) [ -f "$saved" ] || exit 0; governors=$(cat "$saved"); rm -f "$saved" ;;
 esac
 set -- "$1" $governors
 set_to "$cpu/scaling_max_freq" "$(cat "$cpu/cpuinfo_max_freq")"
