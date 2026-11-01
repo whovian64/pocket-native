@@ -68,7 +68,7 @@ layout(location = 1) out vec4 out_texcoords01;
 layout(location = 2) out vec2 out_texcoord2;
 layout(location = 3) out float out_depth_w;
 layout(location = 4) out vec4 out_quaternion;
-layout(location = 5) out vec3 out_view;
+layout(location = 5) out vec4 out_view;
 layout(location = 6) out float out_w;
 
 void main() {
@@ -79,7 +79,7 @@ void main() {
     out_texcoord2 = texcoord2_depth.xy;
     out_depth_w = texcoord2_depth.z * position.w;
     out_quaternion = quaternion;
-    out_view = view.xyz;
+    out_view = view;
     out_w = position.w;
 }
 "#;
@@ -333,6 +333,8 @@ const UNIFORM_WORDS: usize = 12 * 4 + 4 + 3 * 4 + 4 + 328 + PROCTEX_WORDS + COLO
 const TABLES_SIZE: usize = (24 * 256 + 3 * proctex::MAP_ENTRIES + 4 * proctex::COLOR_ENTRIES + crate::fog::ENTRIES) * 8;
 const FRAGMENT_CONSTANTS: usize = 30;
 const WRITES_DEPTH: u32 = 4;
+/// bit 28 of the texture configuration constant, unit 0 projected.
+const PROJECTED: u32 = 1 << 28;
 
 const STAGE_REGISTERS: [usize; 6] = [0x0C0, 0x0C8, 0x0D0, 0x0D8, 0x0F0, 0x0F8];
 const REG_UPDATE_BUFFER: usize = 0x0E0;
@@ -855,6 +857,8 @@ fn fragment_constants(r: &[u32], enabled: u32, split: u32, sources: [bool; 3], d
         let unbordered = enabled & 1 << unit != 0 && (config >> 8) & 3 != 1 && (config >> 12) & 3 != 1;
         constants[25] |= (sources[unit] as u32) << (16 + unit) | (unbordered as u32) << (20 + unit);
     }
+    // unit 0 projected, which divides its coordinates by set 0's w
+    constants[25] |= (enabled & 1 != 0 && r[TEXTURE_UNIT_BASES[0] + 2] >> 28 & 7 == 3) as u32 * PROJECTED;
     constants[26] = lighting.is_some() as u32;
     constants[27] = r[REG_ALPHA_TEST] & 0x71 | unused_outputs(r);
     constants[28] = depth_flags | if writes_depth { WRITES_DEPTH } else { 0 };
@@ -910,7 +914,7 @@ fn lighting_source(shape: &[u32]) -> String {
     }
     out += "    vec3 normal = rotate(q, surface_normal);\n";
     out += if config == 8 { "    vec3 tangent = rotate(q, surface_tangent);\n" } else { "    vec3 tangent = surface_tangent;\n" };
-    out += "    vec3 view = in_view;\n";
+    out += "    vec3 view = in_view.xyz;\n";
     out += if needs & 2 != 0 { "    vec3 norm_view = normalize(view);\n" } else { "    vec3 norm_view = vec3(0.0);\n" };
     out += "    vec4 diffuse_sum = vec4(0.0, 0.0, 0.0, 1.0);\n    vec4 specular_sum = vec4(0.0, 0.0, 0.0, 1.0);\n";
     const TABLES: [&str; 6] = ["DISTRIBUTION0", "DISTRIBUTION1", "FRESNEL", "REFLECT_RED", "REFLECT_GREEN", "REFLECT_BLUE"];
@@ -1159,13 +1163,13 @@ fn fragment_source(constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, li
             ("precision highp float;\nprecision highp int;\nprecision highp sampler2D;", "precision mediump float;\nprecision highp int;\nprecision mediump sampler2D;"),
             ("in vec4 in_texcoords01", "in highp vec4 in_texcoords01"),
             ("in vec2 in_texcoord2", "in highp vec2 in_texcoord2"),
-            ("in vec3 in_view", "in highp vec3 in_view"),
+            ("in vec4 in_view", "in highp vec4 in_view"),
             ("in float in_depth_w", "in highp float in_depth_w"),
             ("in float in_w", "in highp float in_w"),
             ("sample_unit(uint unit, vec2 uv)", "sample_unit(uint unit, highp vec2 uv)"),
             ("    vec2 st = ", "    highp vec2 st = "),
             ("    float depth = in_depth", "    highp float depth = in_depth"),
-            ("    vec3 view = in_view", "    highp vec3 view = in_view"),
+            ("    vec3 view = in_view.xyz", "    highp vec3 view = in_view.xyz"),
             ("vec3 offset = -view", "highp vec3 offset = -view"),
         ] {
             out = out.replace(from, to);
@@ -6693,7 +6697,7 @@ impl Gles {
                 view[0] * w,
                 view[1] * w,
                 view[2] * w,
-                0.0,
+                view[3] * w,
             ];
             for value in values {
                 bytes.extend_from_slice(&value.to_le_bytes());

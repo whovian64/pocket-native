@@ -218,7 +218,7 @@ impl<'a> Translator<'a> {
         let _ = writeln!(out, "    out_texcoord2 = vec2({});", vector(12..14, "0.0"));
         out.push_str("    out_depth = position.z / position.w * depth_map.x + depth_map.y;\n");
         let _ = writeln!(out, "    out_quaternion = vec4({});", vector(14..18, "0.0"));
-        let _ = writeln!(out, "    out_view = vec3({});", vector(18..21, "0.0"));
+        let _ = writeln!(out, "    out_view = vec4({}, {});", vector(18..21, "0.0"), component(21, "1.0"));
         out.push_str("}\n");
         (out, form)
     }
@@ -881,7 +881,7 @@ layout(location = 1) out vec4 out_texcoords01;
 layout(location = 2) out vec2 out_texcoord2;
 layout(location = 3) noperspective out float out_depth;
 layout(location = 4) out vec4 out_quaternion;
-layout(location = 5) out vec3 out_view;
+layout(location = 5) out vec4 out_view;
 
 layout(std430, set = 0, binding = 6) readonly buffer Shading {
     vec4 floats[96];
