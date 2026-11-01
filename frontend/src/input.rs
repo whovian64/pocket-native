@@ -131,6 +131,10 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
     // the RK3562 handhelds give them the usual numbers too, with the
     // sticks on the usual axes
     let rk3562 = rk3562_pad(&name);
+    // any other pad numbering select and start the usual way, as ROCKNIX's
+    // drivers do, its R36S's r36s_Gamepad among them
+    let keys = std::fs::read_to_string(format!("/sys/class/input/{event}/device/capabilities/key")).unwrap_or_default();
+    let usual = rk3566 || !h700 && !rk3562 && !muos && usual_numbers(&keys);
     log::info!(
         "buttons from {name}{}",
         if h700 {
@@ -141,6 +145,8 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
             ", numbered as on the RK3562 handhelds"
         } else if muos {
             ", numbered as on muOS"
+        } else if usual {
+            ", numbered the usual way"
         } else {
             ""
         }
@@ -197,7 +203,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                 (1, _) => {
                     let code = if h700 {
                         h700_button(code)
-                    } else if rk3566 {
+                    } else if usual {
                         rk3566_button(code)
                     } else if rk3562 {
                         rk3562_button(code)
@@ -212,7 +218,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                         pad.keys.insert(code);
                     }
                 }
-                (3, _) if (h700 || muos || rk3566) && matches!(code, 16 | 17) => {
+                (3, _) if (h700 || muos || usual) && matches!(code, 16 | 17) => {
                     let (less, more) = if code == 16 { (LEFT, RIGHT) } else { (UP, DOWN) };
                     pad.keys.remove(&less);
                     pad.keys.remove(&more);
@@ -263,6 +269,12 @@ const MT_TRACKING_ID: u16 = 0x39;
 
 /// whether a bitmask as /proc/bus/input/devices gives it, words of a long
 /// in hex with the highest first, has the bit.
+/// whether a pad's keys, as sysfs lists them, number select and start the
+/// usual way (314, 315) rather than as the R36S's (704, 705).
+fn usual_numbers(keys: &str) -> bool {
+    has_bit(keys, 314) && !has_bit(keys, SELECT)
+}
+
 fn has_bit(mask: &str, bit: u16) -> bool {
     let bits = 8 * std::mem::size_of::<libc::c_long>();
     let words: Vec<&str> = mask.split_whitespace().rev().collect();
@@ -512,6 +524,22 @@ mod tests {
         assert_eq!(sticks_in_order([false, true, true, false, true, true]), [None, Some(0), Some(1), None, Some(3), Some(4)]);
         // one stick only
         assert_eq!(sticks_in_order([false, false, false, true, true, false]), [None, None, None, Some(0), Some(1), None]);
+    }
+
+    /// a pad with BTN_SELECT and none of the R36S's trigger-happy codes
+    /// numbers its buttons the usual way.
+    #[test]
+    fn pads_numbering_select_the_usual_way_are_told_apart() {
+        let mask = |bits: &[u16]| {
+            let mut words = [0u64; 12];
+            for &bit in bits {
+                words[bit as usize / 64] |= 1 << (bit % 64);
+            }
+            words.iter().rev().map(|word| format!("{word:x}")).collect::<Vec<_>>().join(" ")
+        };
+        assert!(super::usual_numbers(&mask(&[304, 305, 314, 315, 316, 544])));
+        assert!(!super::usual_numbers(&mask(&[304, 305, 314, 704, 705])));
+        assert!(!super::usual_numbers(&mask(&[304, 305, 704, 705])));
     }
 
     #[test]
