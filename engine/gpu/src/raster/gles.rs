@@ -2503,7 +2503,12 @@ fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::P
 /// a separable program: its stages, built once each, behind a stand-in
 /// program that goes by the program's name everywhere else.
 fn build_separable(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
-    let stages = (stage_program(gl, glow::VERTEX_SHADER, vertex)?, stage_program(gl, glow::FRAGMENT_SHADER, fragment)?);
+    // a separable program's stages meet as they are declared, which OpenGL
+    // ES has match in precision too, where fast mode takes colors in at half
+    // and the vertex stage hands them on at full: the pipeline does not
+    // validate then, and Mali leaves out every draw
+    let fragment = fragment.replace("in vec4 in_color", "in highp vec4 in_color").replace("in vec4 in_quaternion", "in highp vec4 in_quaternion");
+    let stages = (stage_program(gl, glow::VERTEX_SHADER, vertex)?, stage_program(gl, glow::FRAGMENT_SHADER, &fragment)?);
     // SAFETY: the context is current on this thread
     let token = unsafe { gl.create_program()? };
     SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).insert((SHARE_GROUP.get(), token), stages);
