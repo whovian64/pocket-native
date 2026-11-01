@@ -59,11 +59,22 @@ pub fn compile(dir: &Path, sources: &[String], library: &Path, progress: Progres
     shared(&objects(dir, sources, progress)?, library)
 }
 
+/// how many files compile at once: one a core, as many as memory has room
+/// for, a file of recompiled code taking gcc up to a gigabyte and Docker on
+/// Windows giving its VM half the PC's.
+pub fn jobs() -> usize {
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let available = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|info| info.lines().find_map(|line| line.strip_prefix("MemAvailable:"))?.split_whitespace().next()?.parse::<usize>().ok());
+    available.map_or(cores, |kib| cores.min((kib / (1280 * 1024)).max(1)))
+}
+
 /// compiles sources, file names inside dir, each into an object beside it,
 /// stopping when progress says so.
 pub fn objects(dir: &Path, sources: &[String], progress: Progress) -> Result<Vec<PathBuf>, String> {
     let compiler = compiler();
-    let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let jobs = jobs();
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let stopped = AtomicBool::new(false);

@@ -134,6 +134,7 @@ pub fn build(rom: &Path, options: &Options, events: &(dyn Fn(Event) + Sync)) -> 
         events(Event::Compiled { done, total });
         !stopped()
     };
+    events(Event::Note(format!("compiling {} files, {} at a time, the longest part", generated.sources.len(), compile::jobs())));
     compile::compile(&generated.dir, &generated.sources, &library, &progress)?;
     events(Event::Built { library: library.clone(), took: start.elapsed() });
     if options.dir.is_some() {
