@@ -3790,7 +3790,8 @@ struct Compile {
 
 /// the programs waiting for a compiler thread: those a draw needs now first,
 /// the generic stand-ins after them, which the driver takes seconds over
-/// each and which draws only use while their own programs build. In arrival
+/// each and which draws only use while their own programs build, unless
+/// ZAKURO_STAND_INS has draws use them, when they come first. In arrival
 /// order otherwise.
 struct Queue {
     jobs: std::sync::Mutex<(std::collections::VecDeque<Compile>, std::collections::VecDeque<Compile>, bool)>,
@@ -3807,8 +3808,9 @@ impl Queue {
         if jobs.2 {
             return Err(());
         }
-        // a stand-in's constants say it is the dynamic program
-        if job.key.0[29] != 0 {
+        // a stand-in's constants say it is the dynamic program. Draws drawn
+        // with stand-ins while their programs build need them first
+        if job.key.0[29] != 0 && !crate::raster::stand_ins() {
             jobs.1.push_back(job);
         } else {
             jobs.0.push_back(job);

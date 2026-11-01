@@ -265,6 +265,10 @@ pub struct Advanced {
     /// new shaders compiled on a thread of their own, draws going on with
     /// stand-ins meanwhile.
     pub background_shaders: bool,
+    /// a draw into a picture a screen shows drawn with the generic stand-in
+    /// while its own program builds, rather than left out: no pop-in, the
+    /// frame slower for it, which a faster GPU than the R36S's can take.
+    pub stand_ins: bool,
     /// a game with a New 3DS mode run as on a New 3DS.
     pub new3ds: bool,
 }
@@ -305,6 +309,7 @@ impl Default for Advanced {
             prewarm: true,
             read_ahead: true,
             background_shaders: true,
+            stand_ins: false,
             new3ds: false,
         }
     }
@@ -371,6 +376,7 @@ impl Advanced {
             ("ZAKURO_GPU_REALTIME", self.realtime_gpu),
             ("ZAKURO_EXACT_EVENTS", self.exact_events),
             ("ZAKURO_SYNC_SHADERS", !self.background_shaders),
+            ("ZAKURO_STAND_INS", self.stand_ins),
         ] {
             if on {
                 std::env::set_var(variable, "1");
