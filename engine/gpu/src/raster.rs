@@ -671,6 +671,30 @@ fn fixed_geometry(registers: &[u32], unit: &ShaderUnit, map: &OutputMap, vertex_
     vertices
 }
 
+fn inspect<M: GpuMemory>(registers: &[u32], memory: &mut M, shaded: &[Vertex], viewport: (f32, f32, f32, f32)) {
+    let points: Vec<Screen> = shaded.iter().filter_map(|v| to_screen(*v, viewport)).collect();
+    let (x0, x1, y0, y1) = points.iter().fold((f32::MAX, f32::MIN, f32::MAX, f32::MIN), |(a, b, c, d), p| (a.min(p.x), b.max(p.x), c.min(p.y), d.max(p.y)));
+    let r = |i: usize| registers[i];
+    let stages: Vec<[u32; 5]> = [0xC0, 0xC8, 0xD0, 0xD8, 0xF0, 0xF8].iter().map(|&b| [r(b), r(b + 1), r(b + 2), r(b + 3), r(b + 4)]).collect();
+    log::trace!(
+        target: "zakuro_gpu::inspect",
+        "fb {:08X} bbox {x0:.0},{y0:.0}-{x1:.0},{y1:.0} n {} texcfg {:08X} u0 {:08X}/{:X}/{:08X}/{:08X} u1 {:08X}/{:X} u2 {:08X}/{:X} stages {:08X?} upd {:08X} bufc {:08X} op {:08X} blend {:08X} alpha {:08X} v0 {:?} {:?}",
+        r(0x11D), shaded.len(), r(0x80), r(0x85), r(0x8E), r(0x82), r(0x83), r(0x95), r(0x96), r(0x9D), r(0x9E), stages, r(0xE0), r(0xFD), r(0x100), r(0x101), r(0x104),
+        shaded.first().map(|v| v.color), shaded.first().map(|v| v.texcoords),
+    );
+    if std::env::var("ZAKURO_DUMP_TEX").ok().and_then(|a| u32::from_str_radix(&a, 16).ok()) != Some(r(REG_TEXTURE0_ADDRESS)) {
+        return;
+    }
+    static DUMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n % 50 == 0 {
+        let (width, height) = (r(REG_TEXTURE0_DIMENSIONS) >> 16 & 0x7FF, r(REG_TEXTURE0_DIMENSIONS) & 0x7FF);
+        let mut bytes = vec![0u8; (width * height * TextureFormat::from_raw(r(REG_TEXTURE0_FORMAT)).bits_per_pixel() / 8) as usize];
+        memory.read(memory.translate(r(REG_TEXTURE0_ADDRESS) << 3), &mut bytes);
+        let _ = std::fs::write(format!("texture-{:08X}-{n}.bin", r(REG_TEXTURE0_ADDRESS)), &bytes);
+    }
+}
+
 /// screen-space vertex, with every varying pre-divided by w so the
 /// rasterizer only has to interpolate linearly and divide once per pixel.
 #[derive(Clone, Copy, Debug)]
@@ -2371,6 +2395,13 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         Vertices::Fetched { .. } => return NOT_FETCHED,
     };
     let triangle_indices = assemble(topology, shaded.len());
+    // RUST_LOG=zakuro_gpu::inspect=trace, drawing in software: each draw's
+    // place on its target and the state it draws with, and with
+    // ZAKURO_DUMP_TEX naming a unit 0 address register's value, that
+    // texture's bytes now and then
+    if log::log_enabled!(target: "zakuro_gpu::inspect", log::Level::Trace) {
+        inspect(registers, memory, shaded, viewport);
+    }
 
     let triangle_count = triangle_indices.len();
     let mut clipped_away = 0u32;
