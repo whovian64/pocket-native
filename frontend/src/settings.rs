@@ -269,6 +269,10 @@ pub struct Advanced {
     /// while its own program builds, rather than left out: no pop-in, the
     /// frame slower for it, which a faster GPU than the R36S's can take.
     pub stand_ins: bool,
+    /// each shader's two halves built on their own and put together when
+    /// drawn, a vertex half once whatever it meets: an experiment, OpenGL ES
+    /// drivers may not take it.
+    pub separable_shaders: bool,
     /// a game with a New 3DS mode run as on a New 3DS.
     pub new3ds: bool,
 }
@@ -310,6 +314,7 @@ impl Default for Advanced {
             read_ahead: true,
             background_shaders: true,
             stand_ins: false,
+            separable_shaders: false,
             new3ds: false,
         }
     }
@@ -337,6 +342,7 @@ impl Advanced {
             draw_ranges: false,
             exact_events: true,
             background_shaders: false,
+            separable_shaders: false,
             ..self
         }
     }
@@ -377,6 +383,7 @@ impl Advanced {
             ("ZAKURO_EXACT_EVENTS", self.exact_events),
             ("ZAKURO_SYNC_SHADERS", !self.background_shaders),
             ("ZAKURO_STAND_INS", self.stand_ins),
+            ("ZAKURO_SEPARABLE_SHADERS", self.separable_shaders),
         ] {
             if on {
                 std::env::set_var(variable, "1");
