@@ -4251,6 +4251,10 @@ impl Gles {
         }
         let started = std::time::Instant::now();
         self.preloading = true;
+        // with several compiler threads they all take the list, the start
+        // waiting for the last of them, rather than the GL thread building
+        // one program after another
+        let queue = self.compiler.is_some() && compilers() > 1;
         let mut units: HashMap<u64, Option<ShaderUnit>> = HashMap::new();
         let mut count = 0;
         for line in text.lines().skip(1) {
@@ -4291,10 +4295,13 @@ impl Gles {
             }
             let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
             let (constants, lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
-            match self.program(&constants, writes_depth, &lighting, vertex, true, None) {
+            match self.program(&constants, writes_depth, &lighting, vertex, !queue, None) {
                 Ok(_) => count += 1,
                 Err(error) => log::warn!("could not prepare a shader from {}, {error}", path.display()),
             }
+        }
+        while self.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            self.take_compiled(true);
         }
         self.preloading = false;
         log::info!("prepared {count} shaders from {} in {:.1} s", path.display(), started.elapsed().as_secs_f64());
@@ -5400,7 +5407,7 @@ impl Gles {
         if let Some(inputs) = inputs {
             self.inputs.insert(key.clone(), inputs());
         }
-        if !wait && !self.preloading {
+        if !wait && (!self.preloading || compilers() > 1) {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
