@@ -699,12 +699,21 @@ void main() {
     vec4 held = vec4(0.0);
     vec4 next_buffer = colors[6];
     uint update = (DYNAMIC != 0u ? misc.x : UPDATE) & 0xFF00u;
-    combine_stage(0u, stage_registers(0u, uvec4(SOURCE0, OPERAND0, COMBINER0, SCALE0)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
-    combine_stage(1u, stage_registers(1u, uvec4(SOURCE1, OPERAND1, COMBINER1, SCALE1)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
-    combine_stage(2u, stage_registers(2u, uvec4(SOURCE2, OPERAND2, COMBINER2, SCALE2)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
-    combine_stage(3u, stage_registers(3u, uvec4(SOURCE3, OPERAND3, COMBINER3, SCALE3)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
-    combine_stage(4u, stage_registers(4u, uvec4(SOURCE4, OPERAND4, COMBINER4, SCALE4)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
-    combine_stage(5u, stage_registers(5u, uvec4(SOURCE5, OPERAND5, COMBINER5, SCALE5)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+    if (DYNAMIC != 0u) {
+        // the generic program, which reads every stage's registers, goes
+        // through them in a loop: the stage with all its cases is built once
+        // rather than six times over, which took Mali seconds a program
+        for (uint stage = 0u; stage < 6u; stage++) {
+            combine_stage(stage, stage_registers(stage, uvec4(0u)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+        }
+    } else {
+        combine_stage(0u, stage_registers(0u, uvec4(SOURCE0, OPERAND0, COMBINER0, SCALE0)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+        combine_stage(1u, stage_registers(1u, uvec4(SOURCE1, OPERAND1, COMBINER1, SCALE1)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+        combine_stage(2u, stage_registers(2u, uvec4(SOURCE2, OPERAND2, COMBINER2, SCALE2)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+        combine_stage(3u, stage_registers(3u, uvec4(SOURCE3, OPERAND3, COMBINER3, SCALE3)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+        combine_stage(4u, stage_registers(4u, uvec4(SOURCE4, OPERAND4, COMBINER4, SCALE4)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+        combine_stage(5u, stage_registers(5u, uvec4(SOURCE5, OPERAND5, COMBINER5, SCALE5)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
+    }
 
     // the color leaves as whole bytes, the way the software path truncates.
     // precise, as everything from the operands on is, or where the driver
