@@ -2288,11 +2288,16 @@ fn assemble(topology: u32, count: usize) -> Vec<(usize, usize, usize)> {
 #[cfg(feature = "gles")]
 const SMALL_DRAW: usize = 6;
 
-/// ZAKURO_NO_SMALL_WAIT turns that off, small draws treated as any other.
+/// on Android, ZAKURO_NO_SMALL_WAIT turning it off, elsewhere only with
+/// ZAKURO_SMALL_WAIT: the R36S's Mali builds a program for seconds on the GL
+/// thread, MK7's first 2400 frames taking 130 s with the waits and 81 without.
 #[cfg(feature = "gles")]
 fn small_draws_wait() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !crate::switch("ZAKURO_NO_SMALL_WAIT", "small draws go without their programs as others do"))
+    *ON.get_or_init(|| match cfg!(target_os = "android") {
+        true => !crate::switch("ZAKURO_NO_SMALL_WAIT", "small draws go without their programs as others do"),
+        false => crate::switch("ZAKURO_SMALL_WAIT", "small draws wait for their own programs"),
+    })
 }
 
 /// ZAKURO_STAND_INS: a draw into a picture a screen shows goes on with the
