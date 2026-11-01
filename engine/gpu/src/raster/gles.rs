@@ -6961,7 +6961,7 @@ impl Gles {
             // its own vertex program comes first and makes it needless
             let built = match draw.stand_in {
                 true => Ok(self.programs.get(&(constants, writes_depth, lighting.clone(), vertex)).copied()),
-                false => self.program(&constants, writes_depth, &lighting, vertex, false, Some(&inputs)),
+                false => self.program(&constants, writes_depth, &lighting, vertex, draw.small, Some(&inputs)),
             };
             let program = match built {
                 Ok(Some(program)) => program,
