@@ -78,7 +78,7 @@ working or not.
 | Anbernic RG DS | Anbernic's Linux | Not yet: one screen only, buttons not found |
 | Anbernic RG DS | ROCKNIX | Both screens and both touch screens, no tester report yet |
 | Android phones | Android 11 or newer, 64-bit | Works, with touch controls or a gamepad |
-| Other ROCKNIX handhelds | ROCKNIX | Should start as on the RG DS, untested |
+| R36S, RK3566 and H700 handhelds | ROCKNIX | Should start: the launcher hands sway's panel to the game, and pads numbering their buttons the usual way (the R36S's r36s_Gamepad among them) are read. No tester report yet |
 | AmberELEC | | Not yet |
 
 Screens other than the R36S's 640x480 work: the layouts follow the
