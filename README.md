@@ -88,8 +88,11 @@ the picture for a panel mounted sideways.
 ### The RG DS under ROCKNIX
 
 The 3DS's top screen goes on the top panel and its bottom screen on the
-bottom one, which you can touch. A tap of L2 or FN + L1 swaps them, and
-**Display > Stretch** fills a panel instead of keeping the 3DS's shape.
+bottom one, which you can touch. A tap of L2 or FN + L1 swaps them.
+**Display > Aspect ratio** shapes the top screen on its panel as it does
+on one screen, and **Crop** there fills the top panel with the top
+screen's 4:3 middle, its sides cut off. **Display > Stretch** fills a
+panel instead of keeping the screen's shape.
 Sway, ROCKNIX's desktop, keeps running while you play: the launcher
 switches the console away from it, which hands the panels to the game,
 and switches back when you quit.
@@ -158,6 +161,10 @@ run or look right, and set the language and region the game is told.
 **Most compatible** turns off every speed hack at once: if that fixes a
 game, turn them back on one at a time to find the one it trips over.
 Settings under a "requires restart" heading need **Restart game**.
+
+**Aspect ratio > Crop** shows the top screen's 4:3 middle, its sides cut
+off, a little bigger than the whole of it would be: on a 4:3 panel the
+top screen fills it.
 
 **Frame interpolation** draws an in-between picture for a game running
 below the target, up to 30 or 60 fps. It follows motion in 16 pixel

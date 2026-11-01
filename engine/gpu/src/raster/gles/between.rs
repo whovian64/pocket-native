@@ -213,9 +213,10 @@ impl Between {
     }
 
     /// draws the halfway picture between the two kept into an area of the
-    /// panel's framebuffer, from its bottom left as GL counts, filtered when
-    /// linear is given. the caller binds the panel's program again.
-    pub(super) unsafe fn draw(&mut self, gl: &glow::Context, panel: Option<glow::Framebuffer>, area: [i32; 4], linear: Option<glow::Sampler>) -> Result<(), String> {
+    /// panel's framebuffer, from its bottom left as GL counts, only the part
+    /// of it in clip when given, filtered when linear is given. the caller
+    /// binds the panel's program again.
+    pub(super) unsafe fn draw(&mut self, gl: &glow::Context, panel: Option<glow::Framebuffer>, area: [i32; 4], clip: Option<[i32; 4]>, linear: Option<glow::Sampler>) -> Result<(), String> {
         let ([luma_program, search, blend], Some(luma), Some(motion), [Some(earlier), Some(newer)]) = (self.programs.ok_or("no programs")?, self.luma, self.motion, self.pictures) else {
             return Err("nothing to interpolate between".into());
         };
@@ -255,7 +256,12 @@ impl Between {
         sampler(blend, "newer", 1);
         sampler(blend, "motion", 2);
         gl.uniform_4_i32(gl.get_uniform_location(blend, "area").as_ref(), area[0], area[1], area[2], area[3]);
+        if let Some([x, y, width, height]) = clip {
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(x, y, width, height);
+        }
         gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        gl.disable(glow::SCISSOR_TEST);
         for unit in [2, 1] {
             gl.active_texture(glow::TEXTURE0 + unit);
             gl.bind_sampler(unit, None);
@@ -323,7 +329,7 @@ mod tests {
             gl.bind_vertex_array(Some(empty));
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
-            between.draw(&gl, Some(framebuffer), [0, 0, width, height], None).unwrap();
+            between.draw(&gl, Some(framebuffer), [0, 0, width, height], None, None).unwrap();
             let mut pixels = vec![0u8; (width * height * 4) as usize];
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
             gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));

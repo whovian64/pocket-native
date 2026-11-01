@@ -1379,6 +1379,27 @@ pub fn compiling() -> usize {
     BUILDING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// how much of the top screen's width is cut off each side, f32 bits, 0
+/// for none.
+static TOP_CROP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// cuts that much of the top screen's width off each side, 0.1 for the 4:3
+/// middle of its 5:3, the area it is shown in the part that is left.
+pub fn set_top_crop(each_side: f32) {
+    TOP_CROP.store(each_side.clamp(0.0, 0.45).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// a screen's area in the framebuffer widened for the crop, and the part of
+/// it that shows, the area as given, from the bottom left as GL counts it.
+fn cropped(area: [i32; 4], top: bool, height: i32) -> ([i32; 4], Option<[i32; 4]>) {
+    let each_side = f32::from_bits(TOP_CROP.load(std::sync::atomic::Ordering::Relaxed));
+    if !top || each_side <= 0.0 {
+        return (area, None);
+    }
+    let width = (area[2] as f32 / (1.0 - 2.0 * each_side)).round() as i32;
+    ([area[0] - (width - area[2]) / 2, area[1], width, area[3]], Some([area[0], height - area[1] - area[3], area[2], area[3]]))
+}
+
 /// whether the second window's screen fills all of it, out of shape, rather
 /// than keeping its shape with bars.
 pub fn set_second_stretched(stretched: bool) {
@@ -2302,8 +2323,9 @@ unsafe fn draw_parts(
     layout: (i32, i32),
     parts: Vec<Part>,
 ) -> Result<(), String> {
+            let framebuffer_height = height;
             for part in parts {
-                let (texture, screen, upright, area, smooth) = match part {
+                let (texture, screen, upright, area, smooth, clip) = match part {
                     Part::Cursor { x, y } => {
                         let (x, y) = (fit.x(x), fit.y(y));
                         gl.enable(glow::SCISSOR_TEST);
@@ -2316,7 +2338,7 @@ unsafe fn draw_parts(
                         continue;
                     }
                     Part::Surface { texture, screen, area, smooth, top, picture } => {
-                        let area = fit.area(area);
+                        let (area, clip) = cropped(fit.area(area), top, height);
                         let step = match picture {
                             Some(version) => panel.between.step((texture, version)),
                             None => {
@@ -2336,12 +2358,12 @@ unsafe fn draw_parts(
                         }
                         if let Step::Halfway = step {
                             let gl_area = [area[0], height - area[1] - area[3], area[2], area[3]];
-                            panel.between.draw(gl, framebuffer, gl_area, smooth.then_some(linear))?;
+                            panel.between.draw(gl, framebuffer, gl_area, clip, smooth.then_some(linear))?;
                             gl.use_program(Some(program));
                             continue;
                         }
                         gl.use_program(Some(program));
-                        (texture, screen, 0, area, smooth)
+                        (texture, screen, 0, area, smooth, clip)
                     }
                     Part::Overlay(overlay) if overlay.whole => {
                         draw_overlay(gl, panel, &overlay, height, fit, layout)?;
@@ -2374,7 +2396,8 @@ unsafe fn draw_parts(
                         };
                         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                         gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&pixels)));
-                        (texture, [width as i32, height as i32, 0, 0], 1, fit.area(area), smooth)
+                        let (area, clip) = cropped(fit.area(area), index == 0, framebuffer_height);
+                        (texture, [width as i32, height as i32, 0, 0], 1, area, smooth, clip)
                     }
                 };
                 let y = height - area[1] - area[3];
@@ -2385,7 +2408,12 @@ unsafe fn draw_parts(
                 gl.uniform_1_i32(gl.get_uniform_location(program, "smooth_scale").as_ref(), smooth as i32);
                 gl.bind_sampler(0, smooth.then_some(linear));
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                if let Some([x, y, width, height]) = clip {
+                    gl.enable(glow::SCISSOR_TEST);
+                    gl.scissor(x, y, width, height);
+                }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                gl.disable(glow::SCISSOR_TEST);
             }
     Ok(())
 }
