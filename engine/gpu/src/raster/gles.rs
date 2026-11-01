@@ -1805,8 +1805,28 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
 /// on the RX6H crashed in the compiler thread with both at it.
 static COMPILER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// how many threads compile programs, ZAKURO_COMPILERS, 1 to 4, 1 when not
+/// given: more build a first run's programs sooner on a driver that takes
+/// them at once, which not all do, the RX6H's Mali crashing with two.
+fn compilers() -> usize {
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        let count = std::env::var("ZAKURO_COMPILERS").ok().and_then(|value| value.parse().ok()).unwrap_or(1usize).clamp(1, 4);
+        if count > 1 {
+            log::info!("switch: {count} threads compiling programs, at once, ZAKURO_COMPILERS");
+        }
+        count
+    })
+}
+
+/// COMPILER_LOCK, held while compiling, unless several compiler threads
+/// are asked for, which only works where the driver lets them all at it.
+fn compiler_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
+    (compilers() == 1).then(|| COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
 fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
-    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _compiling = compiler_lock();
     // SAFETY: on the GL thread, the shaders are deleted once linked
     unsafe {
         let program = gl.create_program()?;
@@ -3553,7 +3573,7 @@ fn disturb() {
 
 type Job = Box<dyn FnOnce() + Send>;
 
-/// what building programs costs, in the log every 50 the driver compiled:
+/// what building programs costs, in the log every 10 the driver compiled:
 /// the wait for the compiler lock, compiling each stage and linking, and how
 /// often a stage's source was one compiled before, which a cache of compiled
 /// shaders would save. Tells where a faster compile has to come from.
@@ -3587,7 +3607,7 @@ fn count_build(vertex: &str, fragment: &str, waited: std::time::Duration, stages
             counts.repeated[index] += 1;
         }
     }
-    if counts.built % 50 == 0 {
+    if counts.built % 10 == 0 {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / counts.built as f64;
         log::info!(
             "programs compiled: {}, on average {:.1} ms waiting for the lock, {:.1} ms until the vertex shader compiled, {:.1} ms until both had, {:.1} ms linking, slowest {:.0} ms; vertex shaders compiled before {} of {}, fragment shaders {}",
@@ -3653,7 +3673,7 @@ type ProgramKey = ([u32; FRAGMENT_CONSTANTS], bool, Vec<u32>, u64);
 /// when it was made before, its samplers on the texture units.
 fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Option<&std::path::Path>) -> Result<glow::Program, String> {
     let started = std::time::Instant::now();
-    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _compiling = compiler_lock();
     // SAFETY: the context is current on this thread, the shaders are deleted
     // once linked into the program
     unsafe {
@@ -3758,38 +3778,57 @@ impl Compiler {
             return None;
         }
         let (jobs, received) = std::sync::mpsc::channel::<Compile>();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(received));
         let (finished, done) = std::sync::mpsc::channel();
         let (ready, started) = std::sync::mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("gles-compiler".into())
-            .spawn(move || {
-                let Some(gl) = egl.shared_context() else {
-                    let _ = ready.send(false);
-                    return;
-                };
-                // SAFETY: lowers the priority of this thread alone, which is
-                // what Linux takes 0 for, the game's threads going first
-                unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
-                // a driver that can compile in threads of its own may use as
-                // many as it likes for this context's programs
-                if gl.supported_extensions().contains("GL_KHR_parallel_shader_compile") {
-                    // SAFETY: the context is current, the extension names it
-                    unsafe { gl.max_shader_compiler_threads(u32::MAX) };
-                    log::info!("the driver compiles this thread's shaders in threads of its own");
-                }
-                let _ = ready.send(true);
-                for job in received {
-                    let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
-                    // SAFETY: the context is current on this thread
-                    unsafe { gl.finish() };
-                    BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                    if finished.send((job.key, result)).is_err() {
-                        break;
+        let mut threads = Vec::new();
+        for index in 0..compilers() {
+            let (received, finished, ready) = (received.clone(), finished.clone(), ready.clone());
+            let spawned = thread::Builder::new()
+                .name(if index == 0 { "gles-compiler".into() } else { format!("gles-compiler{index}") })
+                .spawn(move || {
+                    let Some(gl) = egl.shared_context() else {
+                        let _ = ready.send(false);
+                        return;
+                    };
+                    // SAFETY: lowers the priority of this thread alone, which is
+                    // what Linux takes 0 for, the game's threads going first
+                    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+                    // a driver that can compile in threads of its own may use as
+                    // many as it likes for this context's programs
+                    if gl.supported_extensions().contains("GL_KHR_parallel_shader_compile") {
+                        // SAFETY: the context is current, the extension names it
+                        unsafe { gl.max_shader_compiler_threads(u32::MAX) };
+                        log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
-                }
-            })
-            .ok()?;
-        started.recv().unwrap_or(false).then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
+                    let _ = ready.send(true);
+                    loop {
+                        // one job at a time off the shared queue, the lock let
+                        // go before the build
+                        let job = received.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv();
+                        let Ok(job) = job else { break };
+                        let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
+                        // SAFETY: the context is current on this thread
+                        unsafe { gl.finish() };
+                        BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        if finished.send((job.key, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            if let Ok(spawned) = spawned {
+                threads.push(spawned);
+            }
+        }
+        drop(ready);
+        // every thread that started says whether it has a context, the first
+        // that has one is enough to go on
+        let mut any = false;
+        for _ in 0..threads.len() {
+            any |= started.recv().unwrap_or(false);
+        }
+        let thread = (!threads.is_empty()).then(|| threads.remove(0))?;
+        any.then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
     }
 }
 
@@ -5192,7 +5231,7 @@ impl Gles {
 
     fn compute(&self, source: &str) -> Result<glow::Program, String> {
         let gl = &self.gl;
-        let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _compiling = compiler_lock();
         // SAFETY: the context is current, the shader is deleted once linked
         unsafe {
             let program = gl.create_program()?;
