@@ -150,7 +150,9 @@ Every setting has a line of help at the bottom of the menu.
 - **Performance:** frame cap (20, 30 or 60) and power (saver, balanced,
   performance)
 - **This game:** options from the game's profile, where it has some
-- **Controls:** touch cursor speed, Nintendo or Xbox A/B, left stick as
+- **Controls:** touch cursor speed, the touch cursor shown or hidden
+  (on two screens Auto shows it only while the stick moves it), Nintendo
+  or Xbox A/B, left stick as
   circle pad or D-pad, the D-pad's job, tilt directions, and the touch
   controls on Android
 - **Game:** resume, advanced settings, reset, quit

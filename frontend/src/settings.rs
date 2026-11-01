@@ -113,6 +113,17 @@ pub enum RightStick {
     CStick,
 }
 
+/// whether the touch cursor is drawn over the bottom screen: always, never,
+/// or on a handheld with two screens, whose bottom one takes a finger, only
+/// for a moment after the stick or the d-pad moved it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Cursor {
+    #[default]
+    Auto,
+    Shown,
+    Hidden,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rotation {
     Auto,
@@ -147,6 +158,7 @@ pub struct Settings {
     pub frame_cap: u32,
     pub power: Power,
     pub touch_speed: Speed,
+    pub cursor: Cursor,
     pub buttons: Buttons,
     pub left_stick: Stick,
     /// the d-pad as the circle pad or the touch cursor, for handhelds short
@@ -179,6 +191,7 @@ impl Default for Settings {
             frame_cap: 30,
             power: Power::Performance,
             touch_speed: Speed::Normal,
+            cursor: Cursor::Auto,
             buttons: Buttons::Nintendo,
             left_stick: Stick::CirclePad,
             dpad: Dpad::Dpad,

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::font::{rgba, Canvas};
 use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Aspect, Buttons, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
+use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -36,6 +36,7 @@ enum Field {
     Power,
     Option(usize),
     TouchSpeed,
+    Cursor,
     Buttons,
     LeftStick,
     Dpad,
@@ -175,7 +176,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation])),
             ("Performance", only(vec![Field::FrameCap, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", only(vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
+            ("Controls", only(vec![Field::TouchSpeed, Field::Cursor, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
@@ -250,6 +251,7 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
             return (option.name.clone(), option.values[on as usize].clone());
         }
         Field::TouchSpeed => ("Touch cursor speed", format!("{:?}", settings.touch_speed)),
+        Field::Cursor => ("Touch cursor", format!("{:?}", settings.cursor)),
         Field::Buttons => ("A/B layout", format!("{:?}", settings.buttons)),
         Field::LeftStick => ("Left stick", if settings.left_stick == Stick::CirclePad { "Circle pad" } else { "D-pad" }.into()),
         Field::Dpad => {
@@ -315,6 +317,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
             game.options.insert(option.name.clone(), !on);
         }
         Field::TouchSpeed => settings.touch_speed = step(&[Speed::Slow, Speed::Normal, Speed::Fast], settings.touch_speed, by),
+        Field::Cursor => settings.cursor = step(&[Cursor::Auto, Cursor::Shown, Cursor::Hidden], settings.cursor, by),
         Field::Buttons => settings.buttons = step(&[Buttons::Nintendo, Buttons::Xbox], settings.buttons, by),
         Field::LeftStick => settings.left_stick = step(&[Stick::CirclePad, Stick::Dpad], settings.left_stick, by),
         Field::Dpad => settings.dpad = step(&[Dpad::Dpad, Dpad::CirclePad, Dpad::Touch], settings.dpad, by),
@@ -357,6 +360,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::Power => "How fast the CPU and GPU run. Performance is fastest and warmest, Saver lasts longest.",
         Field::Option(index) => &profile.options[index].help,
         Field::TouchSpeed => "How fast the right stick moves the touch cursor. R2 or R3 touches.",
+        Field::Cursor => "The cursor over the bottom screen. Auto hides it on two screens but while the stick moves it.",
         Field::Buttons => "Which face buttons are A and B: where Nintendo puts them, or where Xbox does.",
         Field::LeftStick => "The left stick as the circle pad, or as the d-pad.",
         Field::Dpad => "The d-pad as itself, the circle pad or the touch cursor. FN or L3 with Select switches it in game.",
