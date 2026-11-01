@@ -1660,12 +1660,14 @@ impl Kms {
         let second = second.filter(|&(bottom, _)| bottom != 0 && bottom != crtc);
         set_stacked(second.is_some());
         // sway lets go of the panels a moment after it stopped, as under
-        // ROCKNIX, and a modeset before then fails
+        // ROCKNIX, and a modeset before then fails. only busy is worth
+        // waiting out: ArkOS's kernel keeps the call to root, where the
+        // panel is already ours as the first to open it
         let master = symbol(&drm, "drmSetMaster");
         if !master.is_null() {
             let master: extern "C" fn(i32) -> i32 = std::mem::transmute(master);
             let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            while master(fd) != 0 && std::time::Instant::now() < until {
+            while master(fd) != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBUSY) && std::time::Instant::now() < until {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
