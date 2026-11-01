@@ -197,9 +197,10 @@ impl TexEnv {
                 let pick = |source: Source| -> [f32; 4] {
                     match source {
                         Source::PrimaryColor => primary,
-                        Source::PrimaryFragmentColor => fragment.map_or(primary, |(diffuse, _)| diffuse),
-                        // without fragment lighting there is no specular term
-                        Source::SecondaryFragmentColor => fragment.map_or([0.0, 0.0, 0.0, 1.0], |(_, specular)| specular),
+                        // without fragment lighting both are zero: Xenoblade's
+                        // glow blends towards red by the primary one
+                        Source::PrimaryFragmentColor => fragment.map_or([0.0; 4], |(diffuse, _)| diffuse),
+                        Source::SecondaryFragmentColor => fragment.map_or([0.0; 4], |(_, specular)| specular),
                         Source::Texture(unit) => textures[unit.min(3)],
                         Source::PreviousBuffer => buffer,
                         Source::Constant => stage.constant,

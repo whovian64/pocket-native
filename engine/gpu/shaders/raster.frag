@@ -689,10 +689,10 @@ void main() {
         textures[3] = procedural(set == 0u ? in_texcoords01.xy : (set == 1u ? in_texcoords01.zw : in_texcoord2));
     }
 
-    // without fragment lighting the primary fragment color is the vertex
-    // color and there is no specular term
-    vec4 fragment_primary = primary;
-    vec4 fragment_secondary = vec4(0.0, 0.0, 0.0, 1.0);
+    // without fragment lighting both are zero: Xenoblade's glow blends
+    // towards red by the primary one
+    vec4 fragment_primary = vec4(0.0);
+    vec4 fragment_secondary = vec4(0.0);
     if (LIGHTING != 0u) {
         shade(textures, fragment_primary, fragment_secondary);
     }
