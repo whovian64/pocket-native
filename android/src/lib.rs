@@ -134,6 +134,18 @@ fn set_up(own: &Path, folder: &Path, data: &Path) {
     if let Some(id) = folder.file_name() {
         std::env::set_var("ZAKURO_RECOMPILED", own.join("code").join(id).with_extension("so"));
     }
+    // where the game ran code its build missed, in its folder on the card as
+    // on ArkOS, which the kit's rebuild takes from games/<title id>: beside
+    // the code, in the app's own storage, nobody could copy it out
+    let hints = folder.join("title.hints");
+    if let Some(id) = folder.file_name() {
+        // what a game wrote beside its code before, copied over once
+        let before = own.join("code").join(id).with_extension("hints");
+        if !hints.exists() && std::fs::copy(&before, &hints).is_ok() {
+            let _ = std::fs::remove_file(&before);
+        }
+    }
+    std::env::set_var("ZAKURO_HINTS", hints);
     std::env::set_var("ZAKURO_SHADER_MANIFEST", data.join("shaders.txt"));
     std::env::set_var("POCKET_NATIVE_TITLES", own.join("titles"));
     std::env::set_var("POCKET_NATIVE_CONFIG", own.join("config"));

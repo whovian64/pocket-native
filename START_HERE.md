@@ -196,6 +196,13 @@ the card back over the one in the kit's `build` folder, then open `Rebuild
 all games` (`Rebuild all games.bat` on Windows), and the build makes those
 parts run at full speed too. Copy the folder onto the card again after.
 
+On Android the app keeps `title.hints` in the game's own folder,
+`Android/data/io.github.pocketnative/files/games/<title id>/` on the card (or
+on the phone's storage without one). Copy it into the same game's folder in
+the kit, `build/Pocket Native/pocket-native/games/<title id>/`, then
+`Rebuild all games` and add the rebuilt game in the app again: its saves,
+settings and hints stay.
+
 ## If something goes wrong
 
 **Windows says it protected your PC, or asks whether to run the file.**

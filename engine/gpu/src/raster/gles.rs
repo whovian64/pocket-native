@@ -1178,6 +1178,13 @@ fn fragment_source(constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, li
     if ADRENO.load(std::sync::atomic::Ordering::Relaxed) {
         out = out.replace(SWITCH_COMPARE, ADRENO_COMPARE);
     }
+    // ZAKURO_UNROLLED_STAND_INS: the generic program with the six stages
+    // written out as before the loop, for telling whether the loop is what
+    // a driver draws wrong
+    static UNROLLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *UNROLLED.get_or_init(|| crate::switch("ZAKURO_UNROLLED_STAND_INS", "the generic program's stages written out")) {
+        out = out.replace("    if (DYNAMIC != 0u) {\n        // the generic program, which reads every stage's registers", "    if (false) {\n        // the generic program, which reads every stage's registers");
+    }
     out
 }
 
@@ -1413,6 +1420,20 @@ fn cropped(area: [i32; 4], top: bool, height: i32) -> ([i32; 4], Option<[i32; 4]
     let width = (area[2] as f32 / (1.0 - 2.0 * each_side)).round() as i32;
     ([area[0] - (width - area[2]) / 2, area[1], width, area[3]], Some([area[0], height - area[1] - area[3], area[2], area[3]]))
 }
+
+/// the generic stand-ins of those, which a first run, or one after an
+/// update, builds once for every game, the slowest programs there are.
+static BUILDING_STAND_INS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// how many of the generic stand-ins are still being built, and how many
+/// there are, for the screen to say so: a long wait the first time is them.
+pub fn compiling_stand_ins() -> (usize, usize) {
+    (BUILDING_STAND_INS.load(std::sync::atomic::Ordering::Relaxed), STAND_IN_COUNT)
+}
+
+/// the stand-ins prepare_stand_ins makes: with and without depth written,
+/// with and without the border, with and without lighting.
+const STAND_IN_COUNT: usize = 8;
 
 /// whether the second window's screen fills all of it, out of shape, rather
 /// than keeping its shape with bars.
@@ -2178,8 +2199,31 @@ pub unsafe fn note_compiler_crash(log: libc::c_int) {
     }
 }
 
+/// how many threads compile programs, ZAKURO_COMPILERS, 1 to 4: more build
+/// a first run's programs sooner on a driver that takes them at once, which
+/// not all do, the RX6H's Mali crashing with two. Three on Android, where
+/// the RG DS's Mali-G52 built its stand-ins in 15 s rather than 36 with
+/// them, one elsewhere.
+fn compilers() -> usize {
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        let default = if cfg!(target_os = "android") { 3 } else { 1 };
+        let count = std::env::var("ZAKURO_COMPILERS").ok().and_then(|value| value.parse().ok()).unwrap_or(default).clamp(1, 4);
+        if count > 1 {
+            log::info!("{count} threads compiling programs, at once (ZAKURO_COMPILERS)");
+        }
+        count
+    })
+}
+
+/// COMPILER_LOCK, held while compiling, unless several compiler threads
+/// are asked for, which only works where the driver lets them all at it.
+fn compiler_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
+    (compilers() == 1).then(|| COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
 fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
-    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _compiling = compiler_lock();
     // SAFETY: on the GL thread, the shaders are deleted once linked
     unsafe {
         let program = gl.create_program()?;
@@ -2698,7 +2742,212 @@ fn remember(name: &str, address: *const c_void) -> *const c_void {
     if name == "glDrawRangeElementsBaseVertex" {
         DRAW_RANGE.store(address as usize, std::sync::atomic::Ordering::Relaxed);
     }
+    if let Some(index) = PIPELINE_NAMES.iter().position(|&wanted| wanted == name) {
+        PIPELINE_FNS[index].store(address as usize, std::sync::atomic::Ordering::Relaxed);
+    }
     address
+}
+
+/// the program pipeline calls separable programs need, which glow does not
+/// wrap, as the loader found them, in this order.
+/// The last three only check a pipeline, in the tests.
+const PIPELINE_NAMES: [&str; 8] = ["glProgramParameteri", "glGenProgramPipelines", "glDeleteProgramPipelines", "glUseProgramStages", "glBindProgramPipeline", "glValidateProgramPipeline", "glGetProgramPipelineiv", "glGetProgramPipelineInfoLog"];
+static PIPELINE_FNS: [std::sync::atomic::AtomicUsize; 8] = [const { std::sync::atomic::AtomicUsize::new(0) }; 8];
+const PIPELINE_NEEDED: usize = 5;
+
+fn pipeline_fn(index: usize) -> usize {
+    PIPELINE_FNS[index].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// ZAKURO_SEPARABLE_SHADERS: each program's two stages built as programs of
+/// their own and put together at draw time in a program pipeline, as
+/// Azahar's OpenGL renderer does on desktops, rather than linked together
+/// for every pairing: a vertex stage is linked once whatever fragment
+/// stages it meets, which on Mali took 300 ms to 1.8 s a pairing. Azahar
+/// keeps it off on OpenGL ES, where drivers have had trouble with it, so it
+/// is off unless asked for, and needs the driver's pipeline calls.
+fn separable() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let asked = crate::switch("ZAKURO_SEPARABLE_SHADERS", "shader stages built apart and put together when drawn");
+        let loaded = (0..PIPELINE_NEEDED).all(|index| pipeline_fn(index) != 0);
+        if asked && !loaded {
+            log::warn!("the driver has no program pipelines, shader stages stay linked together");
+        }
+        asked && loaded
+    })
+}
+
+const PROGRAM_SEPARABLE: u32 = 0x8258;
+const VERTEX_SHADER_BIT: u32 = 0x1;
+const FRAGMENT_SHADER_BIT: u32 = 0x2;
+
+type StagePrograms = rustc_hash::FxHashMap<(usize, u32, u64), glow::Program>;
+type Separate = rustc_hash::FxHashMap<(usize, glow::Program), (glow::Program, glow::Program)>;
+
+/// the stage programs built, by the contexts sharing them, stage and
+/// source, shared by every thread that builds programs.
+static STAGE_PROGRAMS: std::sync::Mutex<Option<StagePrograms>> = std::sync::Mutex::new(None);
+
+/// the stand-in program a separable program goes by, everywhere a linked
+/// one does, and the stage programs it stands for, by the contexts sharing
+/// them too: two renderers' programs can have the same name.
+static SEPARATE: std::sync::Mutex<Option<Separate>> = std::sync::Mutex::new(None);
+
+/// the renderer's name, which the program cache's file names start from.
+static RENDERER_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+thread_local! {
+    /// the contexts this thread's shares objects with, the EGL they came
+    /// from, which stage programs are kept by.
+    static SHARE_GROUP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// the GL thread's pipelines, which unlike programs are its context's
+    /// own, by the stand-in they are for.
+    static PIPELINES: std::cell::RefCell<rustc_hash::FxHashMap<glow::Program, u32>> = std::cell::RefCell::new(Default::default());
+}
+
+/// a stage of a separable program, built or loaded once and kept.
+fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::Program, String> {
+    let key = (SHARE_GROUP.get(), stage, fnv(&[source]));
+    if let Some(&found) = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).get(&key) {
+        return Ok(found);
+    }
+    let _compiling = compiler_lock();
+    let started = std::time::Instant::now();
+    let cached = RENDERER_NAME.get().and_then(|name| program_cache_path(name, if stage == glow::VERTEX_SHADER { "separable vertex" } else { "separable fragment" }, source));
+    // SAFETY: the context is current on this thread, the pipeline calls
+    // were loaded from it and take the program's name
+    let program = unsafe {
+        let program = gl.create_program()?;
+        let parameter: extern "system" fn(u32, u32, i32) = std::mem::transmute(pipeline_fn(0));
+        parameter(program.0.get(), PROGRAM_SEPARABLE, 1);
+        let loaded = cached.as_deref().and_then(|path| std::fs::read(path).ok()).filter(|bytes| bytes.len() > 4).is_some_and(|bytes| {
+            let format = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format });
+            gl.get_program_link_status(program)
+        });
+        if !loaded {
+            let (shader, kept) = match compiled_shader(stage, source) {
+                Some(shader) => (shader, true),
+                None => {
+                    let shader = gl.create_shader(stage)?;
+                    gl.shader_source(shader, source);
+                    gl.compile_shader(shader);
+                    (shader, false)
+                }
+            };
+            if !kept && !gl.get_shader_compile_status(shader) {
+                let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
+                gl.delete_shader(shader);
+                gl.delete_program(program);
+                return Err(error);
+            }
+            gl.attach_shader(program, shader);
+            gl.program_binary_retrievable_hint(program, true);
+            gl.link_program(program);
+            gl.detach_shader(program, shader);
+            if !kept {
+                keep_shader(gl, stage, source, shader);
+            }
+            if !gl.get_program_link_status(program) {
+                let error = format!("could not link a shader stage, {}", gl.get_program_info_log(program));
+                gl.delete_program(program);
+                return Err(error);
+            }
+            if let (Some(path), Some(binary)) = (cached.as_deref(), gl.get_program_binary(program)) {
+                let mut bytes = binary.format.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&binary.buffer);
+                let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, bytes));
+            }
+        }
+        if stage == glow::FRAGMENT_SHADER {
+            for unit in 0..3 {
+                if let Some(location) = gl.get_uniform_location(program, &format!("texture{unit}")) {
+                    gl.program_uniform_1_i32(program, Some(&location), unit);
+                }
+            }
+        }
+        let took = started.elapsed();
+        if !loaded && took >= std::time::Duration::from_millis(100) {
+            log::info!("a slow {} stage: {:.0} ms, {} lines", if stage == glow::VERTEX_SHADER { "vertex" } else { "fragment" }, took.as_secs_f64() * 1000.0, source.lines().count());
+        }
+        program
+    };
+    // another thread may have built the same stage meanwhile, its stays
+    let mut stages = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stages = stages.get_or_insert_with(Default::default);
+    if let Some(&found) = stages.get(&key) {
+        // SAFETY: the context is current, nothing has used this one
+        unsafe { gl.delete_program(program) };
+        return Ok(found);
+    }
+    stages.insert(key, program);
+    Ok(program)
+}
+
+/// a separable program: its stages, built once each, behind a stand-in
+/// program that goes by the program's name everywhere else.
+fn build_separable(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
+    // a separable program's stages meet as they are declared, which OpenGL
+    // ES has match in precision too: fast mode takes colors and the
+    // quaternion in at half, so the vertex stage hands them on at half,
+    // which loses nothing the fragment stage kept. Left at full, the
+    // pipeline does not validate and Mali leaves out every draw
+    let vertex = if fragment.contains("precision mediump float;") {
+        vertex.replace("out vec4 out_color;", "out mediump vec4 out_color;").replace("out vec4 out_quaternion;", "out mediump vec4 out_quaternion;")
+    } else {
+        vertex.to_owned()
+    };
+    let stages = (stage_program(gl, glow::VERTEX_SHADER, &vertex)?, stage_program(gl, glow::FRAGMENT_SHADER, fragment)?);
+    // SAFETY: the context is current on this thread
+    let token = unsafe { gl.create_program()? };
+    SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).insert((SHARE_GROUP.get(), token), stages);
+    Ok(token)
+}
+
+/// makes a program current to draw with: a linked one as it is, a separable
+/// one's stages through the GL thread's pipeline for them, made the first
+/// time.
+fn bind_program(gl: &glow::Context, program: glow::Program) {
+    let stages = if separable() { SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().and_then(|separate| separate.get(&(SHARE_GROUP.get(), program)).copied()) } else { None };
+    // SAFETY: on the GL thread, the program and stages were made in contexts
+    // sharing its objects, the pipeline in its own
+    unsafe {
+        let Some((vertex, fragment)) = stages else {
+            gl.use_program(Some(program));
+            return;
+        };
+        let pipeline = PIPELINES.with(|pipelines| {
+            *pipelines.borrow_mut().entry(program).or_insert_with(|| {
+                let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
+                let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
+                let mut pipeline = 0u32;
+                generate(1, &mut pipeline);
+                stages_of(pipeline, VERTEX_SHADER_BIT, vertex.0.get());
+                stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.0.get());
+                pipeline
+            })
+        });
+        let bind: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(4));
+        gl.use_program(None);
+        bind(pipeline);
+    }
+}
+
+/// deletes a program a draw used, a separable one's stand-in and pipeline,
+/// its stages kept for others.
+fn delete_program(gl: &glow::Context, program: glow::Program) {
+    let separate = SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_mut().and_then(|separate| separate.remove(&(SHARE_GROUP.get(), program))).is_some();
+    // SAFETY: on the GL thread, after every draw that used it
+    unsafe {
+        if separate {
+            if let Some(pipeline) = PIPELINES.with(|pipelines| pipelines.borrow_mut().remove(&program)) {
+                let delete: extern "system" fn(i32, *const u32) = std::mem::transmute(pipeline_fn(2));
+                delete(1, &pipeline);
+            }
+        }
+        gl.delete_program(program);
+    }
 }
 
 fn symbol(library: &libloading::Library, name: &str) -> *const c_void {
@@ -3449,7 +3698,7 @@ impl DrawJob {
                     cache.framebuffer = Some(self.framebuffer);
                 }
                 if cache.program != Some(self.program) {
-                    gl.use_program(Some(self.program));
+                    bind_program(&gl, self.program);
                     cache.program = Some(self.program);
                 }
                 let range = (self.depth_range.0.to_bits(), self.depth_range.1.to_bits());
@@ -3954,13 +4203,134 @@ fn disturb() {
 
 type Job = Box<dyn FnOnce() + Send>;
 
+/// what building programs costs, in the log every 10 the driver compiled:
+/// the wait for the compiler lock, compiling each stage and linking, and how
+/// often a stage's source was one compiled before, which a cache of compiled
+/// shaders would save. Tells where a faster compile has to come from.
+fn count_build(vertex: &str, fragment: &str, waited: std::time::Duration, stages: [std::time::Duration; 3]) {
+    struct Counts {
+        built: u32,
+        waited: std::time::Duration,
+        stages: [std::time::Duration; 3],
+        slowest: std::time::Duration,
+        seen: [rustc_hash::FxHashSet<u64>; 2],
+        repeated: [u32; 2],
+    }
+    static COUNTS: std::sync::Mutex<Option<Counts>> = std::sync::Mutex::new(None);
+    let mut counts = COUNTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let counts = counts.get_or_insert_with(|| Counts {
+        built: 0,
+        waited: std::time::Duration::ZERO,
+        stages: [std::time::Duration::ZERO; 3],
+        slowest: std::time::Duration::ZERO,
+        seen: Default::default(),
+        repeated: [0; 2],
+    });
+    counts.built += 1;
+    counts.waited += waited;
+    for (total, stage) in counts.stages.iter_mut().zip(stages) {
+        *total += stage;
+    }
+    counts.slowest = counts.slowest.max(stages[1] + stages[2]);
+    // a program the driver takes long over is what a player sees stall: the
+    // first few each run say what it is made of
+    static SLOW_LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if stages[1] + stages[2] >= std::time::Duration::from_millis(100) && SLOW_LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+        let form = if vertex.contains("switch (pc)") { "a dispatch loop" } else if vertex.contains("void run()") { "translated" } else { "the generic one" };
+        log::info!(
+            "a slow program: {:.0} ms compiling, {:.0} ms linking; its vertex shader {} lines, {form}, its fragment shader {} lines{}",
+            stages[1].as_secs_f64() * 1000.0,
+            stages[2].as_secs_f64() * 1000.0,
+            vertex.lines().count(),
+            fragment.lines().count(),
+            if fragment.contains("const uint DYNAMIC = 1u;") { ", a generic stand-in" } else { "" }
+        );
+    }
+    for (index, source) in [vertex, fragment].into_iter().enumerate() {
+        if !counts.seen[index].insert(fnv(&[source])) {
+            counts.repeated[index] += 1;
+        }
+    }
+    if counts.built % 10 == 0 {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / counts.built as f64;
+        log::info!(
+            "programs compiled: {}, on average {:.1} ms before compiling (the lock and looking for a saved copy), {:.1} ms until the vertex shader compiled, {:.1} ms until both had, {:.1} ms linking, slowest {:.0} ms; vertex shaders compiled before {} of {}, fragment shaders {}",
+            counts.built,
+            ms(counts.waited),
+            ms(counts.stages[0]),
+            ms(counts.stages[1]),
+            ms(counts.stages[2]),
+            counts.slowest.as_secs_f64() * 1000.0,
+            counts.repeated[0],
+            counts.built,
+            counts.repeated[1]
+        );
+    }
+}
+
+/// stages compiled a shader each on this thread, by stage and source, to
+/// link into the next program that has the same one: programs share their
+/// vertex stages far more than not, and each was compiled anew. The objects
+/// belong to the context, shared with the GL thread's.
+const KEPT_SHADERS: usize = 512;
+
+thread_local! {
+    static SHADERS: std::cell::RefCell<rustc_hash::FxHashMap<(u32, u64), glow::Shader>> = std::cell::RefCell::new(Default::default());
+}
+
+fn compiled_shader(stage: u32, source: &str) -> Option<glow::Shader> {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OFF.get_or_init(|| crate::switch("ZAKURO_NO_SHADER_REUSE", "every program compiles both its stages")) {
+        return None;
+    }
+    SHADERS.with(|shaders| shaders.borrow().get(&(stage, fnv(&[source]))).copied())
+}
+
+/// keeps a stage that compiled for the next program with the same source,
+/// or deletes it, when it failed or reuse is off. Past KEPT_SHADERS kept,
+/// they all go and the count starts again.
+fn keep_shader(gl: &glow::Context, stage: u32, source: &str, shader: glow::Shader) {
+    // SAFETY: the context is current on this thread, a shader only goes
+    // once detached from the program just linked
+    unsafe {
+        if !gl.get_shader_compile_status(shader) || std::env::var_os("ZAKURO_NO_SHADER_REUSE").is_some() {
+            gl.delete_shader(shader);
+            return;
+        }
+        SHADERS.with(|shaders| {
+            let mut shaders = shaders.borrow_mut();
+            if shaders.len() >= KEPT_SHADERS {
+                for (_, old) in shaders.drain() {
+                    gl.delete_shader(old);
+                }
+            }
+            if let Some(old) = shaders.insert((stage, fnv(&[source])), shader) {
+                gl.delete_shader(old);
+            }
+        });
+    }
+}
+
 type ProgramKey = ([u32; FRAGMENT_CONSTANTS], bool, Vec<u32>, u64);
 
 /// compiles and links a program, or loads it from the program binary cache
 /// when it was made before, its samplers on the texture units.
+/// microseconds spent in build_program, for prewarm's breakdown.
+static BUILD_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Option<&std::path::Path>) -> Result<glow::Program, String> {
     let started = std::time::Instant::now();
-    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    struct Timed(std::time::Instant);
+    impl Drop for Timed {
+        fn drop(&mut self) {
+            BUILD_MICROS.fetch_add(self.0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _timed = Timed(started);
+    if separable() {
+        return build_separable(gl, vertex, fragment);
+    }
+    let _compiling = compiler_lock();
     // SAFETY: the context is current on this thread, the shaders are deleted
     // once linked into the program
     unsafe {
@@ -3970,32 +4340,59 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
             gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format });
             gl.get_program_link_status(program)
         });
+        let waited = started.elapsed();
         if !loaded {
-            let mut shaders = Vec::new();
-            for (stage, source) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
-                let shader = gl.create_shader(stage)?;
-                gl.shader_source(shader, source);
-                at_compiler([source, ""]);
-                gl.compile_shader(shader);
-                at_compiler(["", ""]);
-                if !gl.get_shader_compile_status(shader) {
+            let mut stages = [std::time::Duration::ZERO; 3];
+            let sources = [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)];
+            // both stages handed to the driver before waiting on either,
+            // so that one compiling in parallel works on them together, and
+            // a stage compiled before taken as it is
+            let began = std::time::Instant::now();
+            let mut shaders = Vec::with_capacity(2);
+            for (stage, source) in sources {
+                shaders.push(match compiled_shader(stage, source) {
+                    Some(shader) => (shader, true),
+                    None => {
+                        let shader = gl.create_shader(stage)?;
+                        gl.shader_source(shader, source);
+                        at_compiler([source, ""]);
+                        gl.compile_shader(shader);
+                        at_compiler(["", ""]);
+                        (shader, false)
+                    }
+                });
+            }
+            for (index, &(shader, kept)) in shaders.iter().enumerate() {
+                if !kept && !gl.get_shader_compile_status(shader) {
                     let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
-                    shaders.into_iter().chain([shader]).for_each(|shader| gl.delete_shader(shader));
+                    for &(shader, kept) in &shaders {
+                        if !kept {
+                            gl.delete_shader(shader);
+                        }
+                    }
                     gl.delete_program(program);
                     return Err(error);
                 }
+                stages[index] = began.elapsed();
+            }
+            for &(shader, _) in &shaders {
                 gl.attach_shader(program, shader);
-                shaders.push(shader);
             }
             gl.program_binary_retrievable_hint(program, true);
             at_compiler([vertex, fragment]);
+            let began = std::time::Instant::now();
             gl.link_program(program);
             at_compiler(["", ""]);
-            for shader in shaders {
+            for (&(shader, kept), (stage, source)) in shaders.iter().zip(sources) {
                 gl.detach_shader(program, shader);
-                gl.delete_shader(shader);
+                if !kept {
+                    keep_shader(gl, stage, source, shader);
+                }
             }
-            if !gl.get_program_link_status(program) {
+            let linked = gl.get_program_link_status(program);
+            stages[2] = began.elapsed();
+            count_build(vertex, fragment, waited, stages);
+            if !linked {
                 let error = format!("could not link a program, {}", gl.get_program_info_log(program));
                 gl.delete_program(program);
                 return Err(error);
@@ -4025,11 +4422,81 @@ struct Compile {
     cached: Option<std::path::PathBuf>,
 }
 
+/// the programs waiting for a compiler thread: those a draw needs now first,
+/// the generic stand-ins after them, which the driver takes seconds over
+/// each and which draws only use while their own programs build, unless
+/// ZAKURO_STAND_INS has draws use them, when they come first. In arrival
+/// order otherwise.
+struct Queue {
+    jobs: std::sync::Mutex<(std::collections::VecDeque<Compile>, std::collections::VecDeque<Compile>, bool)>,
+    ready: std::sync::Condvar,
+}
+
+impl Queue {
+    fn new() -> Queue {
+        Queue { jobs: std::sync::Mutex::new((Default::default(), Default::default(), false)), ready: std::sync::Condvar::new() }
+    }
+
+    fn send(&self, job: Compile) -> Result<(), ()> {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if jobs.2 {
+            return Err(());
+        }
+        if job.key.0[29] != 0 {
+            BUILDING_STAND_INS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // a stand-in's constants say it is the dynamic program. Draws drawn
+        // with stand-ins while their programs build need them first
+        if job.key.0[29] != 0 && !crate::raster::stand_ins() {
+            jobs.1.push_back(job);
+        } else {
+            jobs.0.push_back(job);
+        }
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// the next job, waiting for one, or none once closed.
+    fn take(&self) -> Option<Compile> {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(job) = jobs.0.pop_front().or_else(|| jobs.1.pop_front()) {
+                return Some(job);
+            }
+            if jobs.2 {
+                return None;
+            }
+            jobs = self.ready.wait(jobs).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn close(&self) {
+        self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).2 = true;
+        self.ready.notify_all();
+    }
+}
+
+/// the compiler threads' queue, closed when the compiler goes, which ends
+/// them.
+struct Jobs(std::sync::Arc<Queue>);
+
+impl Jobs {
+    fn send(&self, job: Compile) -> Result<(), ()> {
+        self.0.send(job)
+    }
+}
+
+impl Drop for Jobs {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 /// a thread compiling new programs in a context that shares the GL thread's
 /// objects, so that a draw goes on with a stand-in rather than wait for the
 /// driver's compiler.
 struct Compiler {
-    jobs: std::sync::mpsc::Sender<Compile>,
+    jobs: Jobs,
     thread: thread::JoinHandle<()>,
     done: std::sync::mpsc::Receiver<(ProgramKey, Result<glow::Program, String>)>,
     pending: rustc_hash::FxHashSet<ProgramKey>,
@@ -4041,32 +4508,60 @@ impl Compiler {
         if crate::switch("ZAKURO_SYNC_SHADERS", "shaders compiled when a draw needs them") {
             return None;
         }
-        let (jobs, received) = std::sync::mpsc::channel::<Compile>();
+        let received = std::sync::Arc::new(Queue::new());
+        let jobs = Jobs(received.clone());
         let (finished, done) = std::sync::mpsc::channel();
         let (ready, started) = std::sync::mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("gles-compiler".into())
-            .spawn(move || {
-                let Some(gl) = egl.shared_context() else {
-                    let _ = ready.send(false);
-                    return;
-                };
-                // SAFETY: lowers the priority of this thread alone, which is
-                // what Linux takes 0 for, the game's threads going first
-                unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
-                let _ = ready.send(true);
-                for job in received {
-                    let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
-                    // SAFETY: the context is current on this thread
-                    unsafe { gl.finish() };
-                    BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                    if finished.send((job.key, result)).is_err() {
-                        break;
+        let mut threads = Vec::new();
+        for index in 0..compilers() {
+            let (received, finished, ready) = (received.clone(), finished.clone(), ready.clone());
+            let spawned = thread::Builder::new()
+                .name(if index == 0 { "gles-compiler".into() } else { format!("gles-compiler{index}") })
+                .spawn(move || {
+                    let Some(gl) = egl.shared_context() else {
+                        let _ = ready.send(false);
+                        return;
+                    };
+                    SHARE_GROUP.set(egl as *const Egl as usize);
+                    // SAFETY: lowers the priority of this thread alone, which is
+                    // what Linux takes 0 for, the game's threads going first
+                    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+                    // a driver that can compile in threads of its own may use as
+                    // many as it likes for this context's programs
+                    if gl.supported_extensions().contains("GL_KHR_parallel_shader_compile") {
+                        // SAFETY: the context is current, the extension names it
+                        unsafe { gl.max_shader_compiler_threads(u32::MAX) };
+                        log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
-                }
-            })
-            .ok()?;
-        started.recv().unwrap_or(false).then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
+                    let _ = ready.send(true);
+                    // one job at a time off the shared queue, the lock let go
+                    // before the build
+                    while let Some(job) = received.take() {
+                        let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
+                        // SAFETY: the context is current on this thread
+                        unsafe { gl.finish() };
+                        BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        if job.key.0[29] != 0 {
+                            BUILDING_STAND_INS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        if finished.send((job.key, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            if let Ok(spawned) = spawned {
+                threads.push(spawned);
+            }
+        }
+        drop(ready);
+        // every thread that started says whether it has a context, the first
+        // that has one is enough to go on
+        let mut any = false;
+        for _ in 0..threads.len() {
+            any |= started.recv().unwrap_or(false);
+        }
+        let thread = (!threads.is_empty()).then(|| threads.remove(0))?;
+        any.then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
     }
 }
 
@@ -4123,6 +4618,7 @@ impl Worker {
                     }
                     let gl: &'static glow::Context = Box::leak(Box::new(gl));
                     GL_CONTEXT.set(Some(gl));
+                    SHARE_GROUP.set(egl as *const Egl as usize);
                     let _ = ready.send(Ok((GlRef(gl), Compiler::start(egl))));
                     for (keeps_clears, job) in receiver {
                         if !keeps_clears {
@@ -4329,6 +4825,7 @@ impl Gles {
         // SAFETY: on the GL thread, every object is made from its context
         unsafe {
             let name = format!("{} ({})", gl.get_parameter_string(glow::RENDERER), gl.get_parameter_string(glow::VERSION));
+            let _ = RENDERER_NAME.set(name.clone());
             let vertex_array = gl.create_vertex_array()?;
             let vertices = Ring::new(&gl, glow::ARRAY_BUFFER, 8 << 20, VERTEX_SIZE)?;
             gl.bind_vertex_array(Some(vertex_array));
@@ -4361,6 +4858,12 @@ impl Gles {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::DITHER);
             log::info!("drawing with OpenGL ES on {name}");
+            let extensions = gl.supported_extensions();
+            log::info!(
+                "shader compiling: KHR_parallel_shader_compile {}, ARB_parallel_shader_compile {}",
+                if extensions.contains("GL_KHR_parallel_shader_compile") { "yes" } else { "no" },
+                if extensions.contains("GL_ARB_parallel_shader_compile") { "yes" } else { "no" }
+            );
             ADRENO.store(name.contains("Adreno"), std::sync::atomic::Ordering::Relaxed);
             if gl.supported_extensions().contains("GL_OES_compressed_ETC1_RGB8_texture") && !crate::switch("ZAKURO_NO_ETC1", "ETC1 textures decoded") {
                 crate::raster::SAMPLES_ETC1.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4486,6 +4989,12 @@ impl Gles {
         }
         let started = std::time::Instant::now();
         self.preloading = true;
+        // with several compiler threads they all take the list, the start
+        // waiting for the last of them, rather than the GL thread building
+        // one program after another
+        let queue = self.compiler.is_some() && compilers() > 1;
+        let built_before = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed);
+        let (mut translating, mut programs) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let mut units: HashMap<u64, Option<ShaderUnit>> = HashMap::new();
         let mut count = 0;
         for line in text.lines().skip(1) {
@@ -4507,7 +5016,10 @@ impl Gles {
                     });
                     let Some(unit) = unit else { continue };
                     unit.entry_point = entry as u32;
-                    let Ok(hash) = self.vertex_stage(unit, semantics) else { continue };
+                    let began = std::time::Instant::now();
+                    let stage = self.vertex_stage(unit, semantics);
+                    translating += began.elapsed();
+                    let Ok(hash) = stage else { continue };
                     hash
                 }
                 None => continue,
@@ -4526,13 +5038,28 @@ impl Gles {
             }
             let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
             let (constants, lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
-            match self.program(&constants, writes_depth, &lighting, vertex, true, None) {
+            let began = std::time::Instant::now();
+            match self.program(&constants, writes_depth, &lighting, vertex, !queue, None) {
                 Ok(_) => count += 1,
                 Err(error) => log::warn!("could not prepare a shader from {}, {error}", path.display()),
             }
+            programs += began.elapsed();
+        }
+        let waiting = std::time::Instant::now();
+        while self.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            self.take_compiled(true);
         }
         self.preloading = false;
-        log::info!("prepared {count} shaders from {} in {:.1} s", path.display(), started.elapsed().as_secs_f64());
+        let built = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(built_before) as f64 / 1e6;
+        log::info!(
+            "prepared {count} shaders from {} in {:.1} s: {:.1} s translating vertex programs, {:.1} s handing out programs, {:.1} s waiting on the compiler threads, {:.1} s building them in all",
+            path.display(),
+            started.elapsed().as_secs_f64(),
+            translating.as_secs_f64(),
+            programs.as_secs_f64(),
+            waiting.elapsed().as_secs_f64(),
+            built
+        );
     }
 
     pub fn name(&self) -> &str {
@@ -5466,7 +5993,7 @@ impl Gles {
 
     fn compute(&self, source: &str) -> Result<glow::Program, String> {
         let gl = &self.gl;
-        let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _compiling = compiler_lock();
         // SAFETY: the context is current, the shader is deleted once linked
         unsafe {
             let program = gl.create_program()?;
@@ -5638,12 +6165,13 @@ impl Gles {
         if let Some(inputs) = inputs {
             self.inputs.insert(key.clone(), inputs());
         }
-        if !wait && !self.preloading {
+        if !wait && (!self.preloading || compilers() > 1) {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached }).is_err() {
                     BUILDING.store(0, std::sync::atomic::Ordering::Relaxed);
+                    BUILDING_STAND_INS.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.compiler = None;
                 }
                 return Ok(None);
@@ -6459,7 +6987,7 @@ impl Gles {
             // finish letting the driver take their memory back
             unsafe {
                 textures.into_iter().for_each(|texture| gl.delete_texture(texture));
-                programs.into_iter().for_each(|program| gl.delete_program(program));
+                programs.into_iter().for_each(|program| delete_program(&gl, program));
                 gl.finish();
             }
         });
@@ -7096,7 +7624,7 @@ impl Gles {
             // its own vertex program comes first and makes it needless
             let built = match draw.stand_in {
                 true => Ok(self.programs.get(&(constants, writes_depth, lighting.clone(), vertex)).copied()),
-                false => self.program(&constants, writes_depth, &lighting, vertex, false, Some(&inputs)),
+                false => self.program(&constants, writes_depth, &lighting, vertex, draw.small, Some(&inputs)),
             };
             let program = match built {
                 Ok(Some(program)) => program,
@@ -7563,6 +8091,150 @@ mod tests {
             assert_eq!(read_copy(&mut gles, &texture), expected, "256x{height} over two drawings");
         }
         assert!(gles.surfaces[small].dirty.is_none(), "the small drawing was written back");
+    }
+
+    #[test]
+    fn every_generic_stand_in_builds() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let worker = gles.worker.clone();
+        let times = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let mut times = Vec::new();
+            for writes_depth in [false, true] {
+                for unbordered in [0, 0x400] {
+                    for lighting in [0, 1] {
+                        let mut constants = [0u32; FRAGMENT_CONSTANTS];
+                        constants[25] = unbordered;
+                        constants[26] = lighting;
+                        constants[28] = if writes_depth { WRITES_DEPTH } else { 0 };
+                        let fragment = fragment_source(&generic_constants(&constants), writes_depth, &[]);
+                        let started = std::time::Instant::now();
+                        if let Err(error) = build_program(gl, VERTEX_SOURCE, &fragment, None) {
+                            panic!("a stand-in did not build, {error}");
+                        }
+                        times.push(started.elapsed().as_millis());
+                    }
+                }
+            }
+            times
+        });
+        eprintln!("the stand-ins built in {times:?} ms");
+    }
+
+    #[test]
+    fn separable_stages_put_together_validate() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        if (0..PIPELINE_FNS.len()).any(|index| pipeline_fn(index) == 0) {
+            eprintln!("no program pipelines here, skipped");
+            return;
+        }
+        let worker = gles.worker.clone();
+        let failures = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let mut failures = Vec::new();
+            for writes_depth in [false, true] {
+                for lighting in [0, 1] {
+                    let mut constants = [0u32; FRAGMENT_CONSTANTS];
+                    constants[26] = lighting;
+                    constants[28] = if writes_depth { WRITES_DEPTH } else { 0 };
+                    let fragment = fragment_source(&generic_constants(&constants), writes_depth, &[]);
+                    let token = build_separable(gl, VERTEX_SOURCE, &fragment).expect("the stages build");
+                    let (vertex, fragment) = SEPARATE.lock().unwrap().as_ref().unwrap()[&(SHARE_GROUP.get(), token)];
+                    // SAFETY: on the GL thread with its context current
+                    unsafe {
+                        let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
+                        let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
+                        let mut pipeline = 0u32;
+                        generate(1, &mut pipeline);
+                        stages_of(pipeline, VERTEX_SHADER_BIT, vertex.0.get());
+                        stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.0.get());
+                        let validate: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(5));
+                        let status: extern "system" fn(u32, u32, *mut i32) = std::mem::transmute(pipeline_fn(6));
+                        let log: extern "system" fn(u32, i32, *mut i32, *mut u8) = std::mem::transmute(pipeline_fn(7));
+                        validate(pipeline);
+                        let mut valid = 0;
+                        status(pipeline, glow::VALIDATE_STATUS, &mut valid);
+                        if valid == 0 {
+                            let mut text = vec![0u8; 4096];
+                            let mut length = 0;
+                            log(pipeline, text.len() as i32, &mut length, text.as_mut_ptr());
+                            failures.push(format!("depth {writes_depth}, lighting {lighting}: {}", String::from_utf8_lossy(&text[..length.max(0) as usize])));
+                        }
+                    }
+                    delete_program(gl, token);
+                }
+            }
+            failures
+        });
+        assert!(failures.is_empty(), "pipelines that did not validate: {failures:#?}");
+    }
+
+    #[test]
+    fn the_compiler_queue_takes_what_draws_need_before_stand_ins() {
+        let job = |name: &str, stand_in: bool| {
+            let mut constants = [0u32; FRAGMENT_CONSTANTS];
+            constants[29] = stand_in as u32;
+            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None }
+        };
+        let queue = Queue::new();
+        for (name, stand_in) in [("stand-in 1", true), ("stand-in 2", true), ("draw 1", false), ("stand-in 3", true), ("draw 2", false)] {
+            assert!(queue.send(job(name, stand_in)).is_ok());
+        }
+        let order: Vec<String> = std::iter::from_fn(|| {
+            let mut jobs = queue.jobs.lock().unwrap();
+            jobs.0.pop_front().or_else(|| jobs.1.pop_front()).map(|job| job.vertex)
+        })
+        .collect();
+        assert_eq!(order, ["draw 1", "draw 2", "stand-in 1", "stand-in 2", "stand-in 3"]);
+        // closed, a waiting thread is let go and nothing more is taken
+        queue.close();
+        assert!(queue.take().is_none());
+        assert!(queue.send(job("late", false)).is_err());
+    }
+
+    #[test]
+    fn programs_sharing_a_vertex_stage_compile_it_once() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        // separable stages are kept as programs of their own, and loaded
+        // from the program cache before any shader is compiled
+        if separable() {
+            return;
+        }
+        const VERTEX: &str = "#version 310 es\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+        let fragment = |red: f32| format!("#version 310 es\nprecision mediump float;\nlayout(location = 0) out vec4 color;\nvoid main() {{ color = vec4({red:.1}, 0.0, 0.0, 1.0); }}\n");
+        let (first, second) = (fragment(0.5), fragment(1.0));
+        let worker = gles.worker.clone();
+        let kept = worker.run(move || {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            assert!(build_program(gl, VERTEX, &first, None).is_ok());
+            let after_one = SHADERS.with(|shaders| shaders.borrow().len());
+            assert!(build_program(gl, VERTEX, &second, None).is_ok());
+            // a program whose fragment stage fails leaves what was kept usable
+            assert!(build_program(gl, VERTEX, "#version 310 es\nthis is not glsl\n", None).is_err());
+            assert!(build_program(gl, VERTEX, &first, None).is_ok());
+            (after_one, SHADERS.with(|shaders| shaders.borrow().len()))
+        });
+        // the vertex stage and the first fragment stage, then only the second
+        // fragment stage new
+        assert_eq!(kept, (2, 3));
     }
 
     #[test]

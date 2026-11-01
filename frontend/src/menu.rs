@@ -64,7 +64,7 @@ const ON_OFF: [&str; 2] = ["Off", "On"];
 /// the advanced settings that turn on and off, see settings::Advanced: the
 /// name, the setting, what off and on show as, and the help under the list.
 #[allow(clippy::type_complexity)]
-const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 33] = [
+const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 35] = [
     ("Bottom screen skipping", |a| &mut a.skip_bottom, ON_OFF, "Draws the bottom screen less often while it stands still. Try Off if it flickers, lags or goes black."),
     ("Speed hacks", |a| &mut a.fast, ON_OFF, "Turns the ten speed hacks below on or off together. Off is the first thing to try when a game looks wrong."),
     ("Quick surface checks", |a| &mut a.quick_checks, ON_OFF, "Checks pictures against memory at a few spots only. Try Off if old pictures or garbage stay after a scene change."),
@@ -98,6 +98,8 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 33] = [
     ("Draw only shown frames", |a| &mut a.shown_only, ON_OFF, "Leaves out the frames the frame cap never shows, easing the GPU. Try Off if it stutters."),
     ("Compressed alpha textures", |a| &mut a.etc1a4, ON_OFF, "Keeps see-through compressed textures compressed too. Try Off if a game runs slower than on 0.4.0."),
     ("New 3DS mode", |a| &mut a.new3ds, ON_OFF, "Runs a game that has a New 3DS mode in it, with its extra memory and effects. Slower on most handhelds."),
+    ("While shaders build", |a| &mut a.stand_ins, ["Leave out", "Stand-in"], "Stand-in draws new things plainly at once while their shaders build, no pop-in. Leave out keeps frames faster."),
+    ("Split shaders", |a| &mut a.separable_shaders, ON_OFF, "Experiment: builds shader halves once and pairs them when drawn, for less stutter. Off if graphics break."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -182,7 +184,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
         Page::Advanced => vec![
             ("Applies at once", vec![Field::Toggle(0), Field::Toggle(29), Field::Toggle(30), Field::FrameSkip]),
             ("Speed hacks - requires restart", toggles(1..=11)),
-            ("Graphics - requires restart", [toggles(12..=18), vec![Field::Toggle(31)], toggles(19..=22), vec![Field::Toggle(28)]].concat()),
+            ("Graphics - requires restart", [toggles(12..=18), vec![Field::Toggle(31)], toggles(19..=22), vec![Field::Toggle(28), Field::Toggle(33), Field::Toggle(34)]].concat()),
             ("CPU - requires restart", toggles(23..=24)),
             ("Loading - requires restart", toggles(25..=27)),
             ("System - requires restart", vec![Field::Language, Field::Region, Field::Toggle(32)]),
@@ -591,13 +593,14 @@ pub struct Status {
     clock: Option<String>,
     /// what a hotkey just did, at the top.
     pub note: Option<&'static str>,
-    /// how many shaders are still building, at the top left.
-    building: Option<usize>,
+    /// how many shaders are still building, at the top left, and how many
+    /// of the generic stand-ins of how many, a first run's long build.
+    building: Option<(usize, (usize, usize))>,
 }
 
 impl Status {
     /// none when the settings show nothing.
-    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>, building: Option<usize>) -> Option<Status> {
+    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>, building: Option<(usize, (usize, usize))>) -> Option<Status> {
         let read = |path: &str| std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse::<i64>().ok());
         let status = Status {
             fps: settings.show_fps.then(|| match read("/sys/class/thermal/thermal_zone0/temp") {
@@ -621,8 +624,14 @@ impl Status {
             canvas.fill([width / 2.0 - half, 8.0, width / 2.0 + half, 32.0], backing);
             canvas.text(BIG, note, width / 2.0 - half + 6.0, 11.0, rgba(TEXT, 255), false);
         }
-        if let Some(building) = self.building {
-            let line = format!("Building shaders ({building})");
+        if let Some((building, (stand_ins, of))) = self.building {
+            // the generic shaders a first run, or the first after an update,
+            // builds for every game, which take longest: said apart
+            let line = if stand_ins > 0 {
+                format!("First-run graphics {}/{of}, shaders ({building})", of.saturating_sub(stand_ins))
+            } else {
+                format!("Building shaders ({building})")
+            };
             canvas.fill([8.0, 8.0, 20.0 + canvas.measure(BIG, &line), 32.0], backing);
             canvas.text(BIG, &line, 14.0, 11.0, rgba(TEXT, 255), false);
         }

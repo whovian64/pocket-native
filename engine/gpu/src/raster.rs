@@ -1768,6 +1768,7 @@ impl DrawState<'_> {
             fragment_state: self.fragment_state,
             stand_in: false,
             skippable: false,
+            small: false,
         }
     }
 }
@@ -2280,6 +2281,29 @@ fn assemble(topology: u32, count: usize) -> Vec<(usize, usize, usize)> {
     }
 }
 
+/// the vertices up to which a draw waits for its own program, as Azahar's
+/// Vulkan renderer has draws of six or fewer wait while larger ones go
+/// without: two triangles, a quad, are the screens' panels, fades and HUD
+/// pieces, missed at once when left out, and their programs build quickly.
+#[cfg(feature = "gles")]
+const SMALL_DRAW: usize = 6;
+
+/// ZAKURO_NO_SMALL_WAIT turns that off, small draws treated as any other.
+#[cfg(feature = "gles")]
+fn small_draws_wait() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !crate::switch("ZAKURO_NO_SMALL_WAIT", "small draws go without their programs as others do"))
+}
+
+/// ZAKURO_STAND_INS: a draw into a picture a screen shows goes on with the
+/// generic stand-in while its own program builds, rather than being left
+/// out, so nothing pops in late, at the cost of slower frames meanwhile.
+#[cfg(feature = "gles")]
+pub(crate) fn stand_ins() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::switch("ZAKURO_STAND_INS", "draws stand in while their shaders build, none left out"))
+}
+
 /// assembles shaded vertices into triangles the way the primitive configuration
 /// says, and fills them with the current back-end state.
 fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Resources, vertices: Vertices) -> u32 {
@@ -2300,9 +2324,14 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
 
     let color_buffer_raw = loc_register(registers, REG_COLOR_BUFFER_ADDRESS);
     let target_addr = memory.translate(color_buffer_raw);
+    // a draw of a quad or two waits for its program, never left out
     #[cfg(feature = "gles")]
-    let skippable = viewport_height == 400.0 && resources.shown_top.contains(&target_addr)
-        || viewport_height == 320.0 && resources.redrawn_bottom.is_some_and(|(start, end)| start < target_addr.saturating_add(240 * 320 * 4) && target_addr < end);
+    let small = vertex_count <= SMALL_DRAW && small_draws_wait();
+    #[cfg(feature = "gles")]
+    let skippable = !stand_ins()
+        && !small
+        && (viewport_height == 400.0 && resources.shown_top.contains(&target_addr)
+            || viewport_height == 320.0 && resources.redrawn_bottom.is_some_and(|(start, end)| start < target_addr.saturating_add(240 * 320 * 4) && target_addr < end));
     // the format sits in bits 16-18 of the register, not the low bits, the low
     // half holds how many bytes a pixel takes.
     let target_format = ColorFormat::from_color_buffer((registers[REG_COLOR_BUFFER_FORMAT] >> 16) & 7);
@@ -2453,7 +2482,9 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
                 fetched,
                 prepared,
             };
-            match hardware.draw(memory, &state.hardware(registers, host::Geometry::Shaded(&shading))) {
+            let mut draw = state.hardware(registers, host::Geometry::Shaded(&shading));
+            draw.small = small;
+            match hardware.draw(memory, &draw) {
                 Ok(()) => return (indices.len() / 3) as u32,
                 Err(_) if fetched.is_some() => return NOT_FETCHED,
                 Err(error) if error == gles::COMPILING && skippable => return 0,
@@ -2515,6 +2546,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             let mut draw = state.hardware(registers, host::Geometry::Triangles(&triangles));
             draw.stand_in = compiling;
             draw.skippable = skippable;
+            draw.small = small;
             match hardware.draw(memory, &draw) {
                 Ok(()) => return triangle_count as u32,
                 Err(error) if first_time(&error) => log::error!("the GPU could not draw, {error}, drawing in software"),

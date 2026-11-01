@@ -568,7 +568,7 @@ pub fn run(mut args: Vec<String>) {
             if second || said != status.as_ref().and_then(|status: &Status| status.note) {
                 let building = zakuro_gpu::compiling();
                 building_since = if building > 0 { building_since.or(Some(Instant::now())) } else { None };
-                let building = building_since.filter(|since| since.elapsed() >= Duration::from_secs(1)).map(|_| building);
+                let building = building_since.filter(|since| since.elapsed() >= Duration::from_secs(1)).map(|_| (building, zakuro_gpu::compiling_stand_ins()));
                 let now = Status::now(&settings, last_fps, said, building);
                 if now != status {
                     overlay = now.as_ref().map(|now| {
