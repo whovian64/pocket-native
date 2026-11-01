@@ -3602,6 +3602,20 @@ fn count_build(vertex: &str, fragment: &str, waited: std::time::Duration, stages
         *total += stage;
     }
     counts.slowest = counts.slowest.max(stages[1] + stages[2]);
+    // a program the driver takes long over is what a player sees stall: the
+    // first few each run say what it is made of
+    static SLOW_LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if stages[1] + stages[2] >= std::time::Duration::from_millis(100) && SLOW_LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+        let form = if vertex.contains("switch (pc)") { "a dispatch loop" } else if vertex.contains("void run()") { "translated" } else { "the generic one" };
+        log::info!(
+            "a slow program: {:.0} ms compiling, {:.0} ms linking; its vertex shader {} lines, {form}, its fragment shader {} lines{}",
+            stages[1].as_secs_f64() * 1000.0,
+            stages[2].as_secs_f64() * 1000.0,
+            vertex.lines().count(),
+            fragment.lines().count(),
+            if fragment.contains("light") { ", with lighting" } else { "" }
+        );
+    }
     for (index, source) in [vertex, fragment].into_iter().enumerate() {
         if !counts.seen[index].insert(fnv(&[source])) {
             counts.repeated[index] += 1;
@@ -3610,7 +3624,7 @@ fn count_build(vertex: &str, fragment: &str, waited: std::time::Duration, stages
     if counts.built % 10 == 0 {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / counts.built as f64;
         log::info!(
-            "programs compiled: {}, on average {:.1} ms waiting for the lock, {:.1} ms until the vertex shader compiled, {:.1} ms until both had, {:.1} ms linking, slowest {:.0} ms; vertex shaders compiled before {} of {}, fragment shaders {}",
+            "programs compiled: {}, on average {:.1} ms before compiling (the lock and looking for a saved copy), {:.1} ms until the vertex shader compiled, {:.1} ms until both had, {:.1} ms linking, slowest {:.0} ms; vertex shaders compiled before {} of {}, fragment shaders {}",
             counts.built,
             ms(counts.waited),
             ms(counts.stages[0]),
@@ -3671,8 +3685,18 @@ type ProgramKey = ([u32; FRAGMENT_CONSTANTS], bool, Vec<u32>, u64);
 
 /// compiles and links a program, or loads it from the program binary cache
 /// when it was made before, its samplers on the texture units.
+/// microseconds spent in build_program, for prewarm's breakdown.
+static BUILD_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Option<&std::path::Path>) -> Result<glow::Program, String> {
     let started = std::time::Instant::now();
+    struct Timed(std::time::Instant);
+    impl Drop for Timed {
+        fn drop(&mut self) {
+            BUILD_MICROS.fetch_add(self.0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _timed = Timed(started);
     let _compiling = compiler_lock();
     // SAFETY: the context is current on this thread, the shaders are deleted
     // once linked into the program
@@ -4255,6 +4279,8 @@ impl Gles {
         // waiting for the last of them, rather than the GL thread building
         // one program after another
         let queue = self.compiler.is_some() && compilers() > 1;
+        let built_before = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed);
+        let (mut translating, mut programs) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let mut units: HashMap<u64, Option<ShaderUnit>> = HashMap::new();
         let mut count = 0;
         for line in text.lines().skip(1) {
@@ -4276,7 +4302,10 @@ impl Gles {
                     });
                     let Some(unit) = unit else { continue };
                     unit.entry_point = entry as u32;
-                    let Ok(hash) = self.vertex_stage(unit, semantics) else { continue };
+                    let began = std::time::Instant::now();
+                    let stage = self.vertex_stage(unit, semantics);
+                    translating += began.elapsed();
+                    let Ok(hash) = stage else { continue };
                     hash
                 }
                 None => continue,
@@ -4295,16 +4324,28 @@ impl Gles {
             }
             let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
             let (constants, lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
+            let began = std::time::Instant::now();
             match self.program(&constants, writes_depth, &lighting, vertex, !queue, None) {
                 Ok(_) => count += 1,
                 Err(error) => log::warn!("could not prepare a shader from {}, {error}", path.display()),
             }
+            programs += began.elapsed();
         }
+        let waiting = std::time::Instant::now();
         while self.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
             self.take_compiled(true);
         }
         self.preloading = false;
-        log::info!("prepared {count} shaders from {} in {:.1} s", path.display(), started.elapsed().as_secs_f64());
+        let built = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(built_before) as f64 / 1e6;
+        log::info!(
+            "prepared {count} shaders from {} in {:.1} s: {:.1} s translating vertex programs, {:.1} s handing out programs, {:.1} s waiting on the compiler threads, {:.1} s building them in all",
+            path.display(),
+            started.elapsed().as_secs_f64(),
+            translating.as_secs_f64(),
+            programs.as_secs_f64(),
+            waiting.elapsed().as_secs_f64(),
+            built
+        );
     }
 
     pub fn name(&self) -> &str {
