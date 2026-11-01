@@ -46,6 +46,10 @@ pub(super) struct Draw<'a> {
     /// its program builds rather than drawn with the generic one, which a
     /// handheld's GPU runs too slowly.
     pub(super) skippable: bool,
+    /// a quad or two, a menu's panel, a fade or a piece of the HUD: waits
+    /// for its program rather than go missing or stand in, as Azahar has its
+    /// draws of 6 vertices or fewer wait. Its programs are small and quick.
+    pub(super) small: bool,
 }
 
 /// the triangles of a draw.
