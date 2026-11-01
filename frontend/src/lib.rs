@@ -180,7 +180,7 @@ pub fn run(mut args: Vec<String>) {
             let pad = Arc::new(Mutex::new(Pad::default()));
             match input::gamepad().filter(|_| std::env::var_os("ZAKURO_INPUT").is_none() && probe.is_none()) {
                 Some((device, name)) => input::read_pad(device, name, pad.clone()),
-                None => log::warn!("no gamepad found"),
+                None => log::warn!("no gamepad found among {}", input::devices()),
             }
             if std::env::var_os("ZAKURO_INPUT").is_none() && probe.is_none() {
                 for (device, bottom) in input::touchscreens() {

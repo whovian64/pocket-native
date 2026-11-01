@@ -3272,9 +3272,16 @@ impl Egl {
         if context.is_null() {
             return Err(format!("could not create an OpenGL ES 3.1 context, 0x{:X}", loaded.GetError()));
         }
-        let surface = loaded.CreateWindowSurface(display, config, window, std::ptr::null());
+        let mut surface = loaded.CreateWindowSurface(display, config, window, std::ptr::null());
+        let mut error = if surface.is_null() { loaded.GetError() } else { 0 };
+        // a framebuffer driver that takes no window for the screen, as
+        // PowerVR's does, refuses the size Mali's takes
+        if surface.is_null() && error == egl::BAD_NATIVE_WINDOW as i32 && !window.is_null() {
+            surface = loaded.CreateWindowSurface(display, config, std::ptr::null_mut(), std::ptr::null());
+            error = if surface.is_null() { loaded.GetError() } else { 0 };
+        }
         if surface.is_null() {
-            return Err(format!("could not make a window surface, 0x{:X}", loaded.GetError()));
+            return Err(format!("could not make a window surface, 0x{error:X}, {}", drawing_libraries()));
         }
         if loaded.MakeCurrent(display, surface, surface, context) == 0 {
             return Err(format!("could not make the context current, 0x{:X}", loaded.GetError()));

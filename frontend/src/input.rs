@@ -103,6 +103,13 @@ pub fn gamepad() -> Option<(String, String)> {
     })
 }
 
+/// the input devices' names, for a log to say what a pad it missed is called.
+pub fn devices() -> String {
+    let devices = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
+    let names: Vec<&str> = devices.lines().filter_map(|line| line.strip_prefix("N: Name=")).collect();
+    names.join(", ")
+}
+
 /// Anbernic's H700 handhelds, which number their buttons another way and
 /// give the d-pad as a hat.
 fn h700_pad(name: &str) -> bool {
