@@ -2357,7 +2357,202 @@ fn remember(name: &str, address: *const c_void) -> *const c_void {
     if name == "glDrawRangeElementsBaseVertex" {
         DRAW_RANGE.store(address as usize, std::sync::atomic::Ordering::Relaxed);
     }
+    if let Some(index) = PIPELINE_NAMES.iter().position(|&wanted| wanted == name) {
+        PIPELINE_FNS[index].store(address as usize, std::sync::atomic::Ordering::Relaxed);
+    }
     address
+}
+
+/// the program pipeline calls separable programs need, which glow does not
+/// wrap, as the loader found them, in this order.
+/// The last three only check a pipeline, in the tests.
+const PIPELINE_NAMES: [&str; 8] = ["glProgramParameteri", "glGenProgramPipelines", "glDeleteProgramPipelines", "glUseProgramStages", "glBindProgramPipeline", "glValidateProgramPipeline", "glGetProgramPipelineiv", "glGetProgramPipelineInfoLog"];
+static PIPELINE_FNS: [std::sync::atomic::AtomicUsize; 8] = [const { std::sync::atomic::AtomicUsize::new(0) }; 8];
+const PIPELINE_NEEDED: usize = 5;
+
+fn pipeline_fn(index: usize) -> usize {
+    PIPELINE_FNS[index].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// ZAKURO_SEPARABLE_SHADERS: each program's two stages built as programs of
+/// their own and put together at draw time in a program pipeline, as
+/// Azahar's OpenGL renderer does on desktops, rather than linked together
+/// for every pairing: a vertex stage is linked once whatever fragment
+/// stages it meets, which on Mali took 300 ms to 1.8 s a pairing. Azahar
+/// keeps it off on OpenGL ES, where drivers have had trouble with it, so it
+/// is off unless asked for, and needs the driver's pipeline calls.
+fn separable() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let asked = crate::switch("ZAKURO_SEPARABLE_SHADERS", "shader stages built apart and put together when drawn");
+        let loaded = (0..PIPELINE_NEEDED).all(|index| pipeline_fn(index) != 0);
+        if asked && !loaded {
+            log::warn!("the driver has no program pipelines, shader stages stay linked together");
+        }
+        asked && loaded
+    })
+}
+
+const PROGRAM_SEPARABLE: u32 = 0x8258;
+const VERTEX_SHADER_BIT: u32 = 0x1;
+const FRAGMENT_SHADER_BIT: u32 = 0x2;
+
+type StagePrograms = rustc_hash::FxHashMap<(usize, u32, u64), glow::Program>;
+type Separate = rustc_hash::FxHashMap<(usize, glow::Program), (glow::Program, glow::Program)>;
+
+/// the stage programs built, by the contexts sharing them, stage and
+/// source, shared by every thread that builds programs.
+static STAGE_PROGRAMS: std::sync::Mutex<Option<StagePrograms>> = std::sync::Mutex::new(None);
+
+/// the stand-in program a separable program goes by, everywhere a linked
+/// one does, and the stage programs it stands for, by the contexts sharing
+/// them too: two renderers' programs can have the same name.
+static SEPARATE: std::sync::Mutex<Option<Separate>> = std::sync::Mutex::new(None);
+
+/// the renderer's name, which the program cache's file names start from.
+static RENDERER_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+thread_local! {
+    /// the contexts this thread's shares objects with, the EGL they came
+    /// from, which stage programs are kept by.
+    static SHARE_GROUP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// the GL thread's pipelines, which unlike programs are its context's
+    /// own, by the stand-in they are for.
+    static PIPELINES: std::cell::RefCell<rustc_hash::FxHashMap<glow::Program, u32>> = std::cell::RefCell::new(Default::default());
+}
+
+/// a stage of a separable program, built or loaded once and kept.
+fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::Program, String> {
+    let key = (SHARE_GROUP.get(), stage, fnv(&[source]));
+    if let Some(&found) = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).get(&key) {
+        return Ok(found);
+    }
+    let _compiling = compiler_lock();
+    let started = std::time::Instant::now();
+    let cached = RENDERER_NAME.get().and_then(|name| program_cache_path(name, if stage == glow::VERTEX_SHADER { "separable vertex" } else { "separable fragment" }, source));
+    // SAFETY: the context is current on this thread, the pipeline calls
+    // were loaded from it and take the program's name
+    let program = unsafe {
+        let program = gl.create_program()?;
+        let parameter: extern "system" fn(u32, u32, i32) = std::mem::transmute(pipeline_fn(0));
+        parameter(program.0.get(), PROGRAM_SEPARABLE, 1);
+        let loaded = cached.as_deref().and_then(|path| std::fs::read(path).ok()).filter(|bytes| bytes.len() > 4).is_some_and(|bytes| {
+            let format = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format });
+            gl.get_program_link_status(program)
+        });
+        if !loaded {
+            let (shader, kept) = match compiled_shader(stage, source) {
+                Some(shader) => (shader, true),
+                None => {
+                    let shader = gl.create_shader(stage)?;
+                    gl.shader_source(shader, source);
+                    gl.compile_shader(shader);
+                    (shader, false)
+                }
+            };
+            if !kept && !gl.get_shader_compile_status(shader) {
+                let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
+                gl.delete_shader(shader);
+                gl.delete_program(program);
+                return Err(error);
+            }
+            gl.attach_shader(program, shader);
+            gl.program_binary_retrievable_hint(program, true);
+            gl.link_program(program);
+            gl.detach_shader(program, shader);
+            if !kept {
+                keep_shader(gl, stage, source, shader);
+            }
+            if !gl.get_program_link_status(program) {
+                let error = format!("could not link a shader stage, {}", gl.get_program_info_log(program));
+                gl.delete_program(program);
+                return Err(error);
+            }
+            if let (Some(path), Some(binary)) = (cached.as_deref(), gl.get_program_binary(program)) {
+                let mut bytes = binary.format.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&binary.buffer);
+                let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, bytes));
+            }
+        }
+        if stage == glow::FRAGMENT_SHADER {
+            for unit in 0..3 {
+                if let Some(location) = gl.get_uniform_location(program, &format!("texture{unit}")) {
+                    gl.program_uniform_1_i32(program, Some(&location), unit);
+                }
+            }
+        }
+        let took = started.elapsed();
+        if !loaded && took >= std::time::Duration::from_millis(100) {
+            log::info!("a slow {} stage: {:.0} ms, {} lines", if stage == glow::VERTEX_SHADER { "vertex" } else { "fragment" }, took.as_secs_f64() * 1000.0, source.lines().count());
+        }
+        program
+    };
+    // another thread may have built the same stage meanwhile, its stays
+    let mut stages = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stages = stages.get_or_insert_with(Default::default);
+    if let Some(&found) = stages.get(&key) {
+        // SAFETY: the context is current, nothing has used this one
+        unsafe { gl.delete_program(program) };
+        return Ok(found);
+    }
+    stages.insert(key, program);
+    Ok(program)
+}
+
+/// a separable program: its stages, built once each, behind a stand-in
+/// program that goes by the program's name everywhere else.
+fn build_separable(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
+    let stages = (stage_program(gl, glow::VERTEX_SHADER, vertex)?, stage_program(gl, glow::FRAGMENT_SHADER, fragment)?);
+    // SAFETY: the context is current on this thread
+    let token = unsafe { gl.create_program()? };
+    SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).insert((SHARE_GROUP.get(), token), stages);
+    Ok(token)
+}
+
+/// makes a program current to draw with: a linked one as it is, a separable
+/// one's stages through the GL thread's pipeline for them, made the first
+/// time.
+fn bind_program(gl: &glow::Context, program: glow::Program) {
+    let stages = if separable() { SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().and_then(|separate| separate.get(&(SHARE_GROUP.get(), program)).copied()) } else { None };
+    // SAFETY: on the GL thread, the program and stages were made in contexts
+    // sharing its objects, the pipeline in its own
+    unsafe {
+        let Some((vertex, fragment)) = stages else {
+            gl.use_program(Some(program));
+            return;
+        };
+        let pipeline = PIPELINES.with(|pipelines| {
+            *pipelines.borrow_mut().entry(program).or_insert_with(|| {
+                let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
+                let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
+                let mut pipeline = 0u32;
+                generate(1, &mut pipeline);
+                stages_of(pipeline, VERTEX_SHADER_BIT, vertex.0.get());
+                stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.0.get());
+                pipeline
+            })
+        });
+        let bind: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(4));
+        gl.use_program(None);
+        bind(pipeline);
+    }
+}
+
+/// deletes a program a draw used, a separable one's stand-in and pipeline,
+/// its stages kept for others.
+fn delete_program(gl: &glow::Context, program: glow::Program) {
+    let separate = SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_mut().and_then(|separate| separate.remove(&(SHARE_GROUP.get(), program))).is_some();
+    // SAFETY: on the GL thread, after every draw that used it
+    unsafe {
+        if separate {
+            if let Some(pipeline) = PIPELINES.with(|pipelines| pipelines.borrow_mut().remove(&program)) {
+                let delete: extern "system" fn(i32, *const u32) = std::mem::transmute(pipeline_fn(2));
+                delete(1, &pipeline);
+            }
+        }
+        gl.delete_program(program);
+    }
 }
 
 fn symbol(library: &libloading::Library, name: &str) -> *const c_void {
@@ -3102,7 +3297,7 @@ impl DrawJob {
                     cache.framebuffer = Some(self.framebuffer);
                 }
                 if cache.program != Some(self.program) {
-                    gl.use_program(Some(self.program));
+                    bind_program(&gl, self.program);
                     cache.program = Some(self.program);
                 }
                 let range = (self.depth_range.0.to_bits(), self.depth_range.1.to_bits());
@@ -3721,6 +3916,9 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
         }
     }
     let _timed = Timed(started);
+    if separable() {
+        return build_separable(gl, vertex, fragment);
+    }
     let _compiling = compiler_lock();
     // SAFETY: the context is current on this thread, the shaders are deleted
     // once linked into the program
@@ -3909,6 +4107,7 @@ impl Compiler {
                         let _ = ready.send(false);
                         return;
                     };
+                    SHARE_GROUP.set(egl as *const Egl as usize);
                     // SAFETY: lowers the priority of this thread alone, which is
                     // what Linux takes 0 for, the game's threads going first
                     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
@@ -4004,6 +4203,7 @@ impl Worker {
                     }
                     let gl: &'static glow::Context = Box::leak(Box::new(gl));
                     GL_CONTEXT.set(Some(gl));
+                    SHARE_GROUP.set(egl as *const Egl as usize);
                     let _ = ready.send(Ok((GlRef(gl), Compiler::start(egl))));
                     for (keeps_clears, job) in receiver {
                         if !keeps_clears {
@@ -4208,6 +4408,7 @@ impl Gles {
         // SAFETY: on the GL thread, every object is made from its context
         unsafe {
             let name = format!("{} ({})", gl.get_parameter_string(glow::RENDERER), gl.get_parameter_string(glow::VERSION));
+            let _ = RENDERER_NAME.set(name.clone());
             let vertex_array = gl.create_vertex_array()?;
             let vertices = Ring::new(&gl, glow::ARRAY_BUFFER, 8 << 20, VERTEX_SIZE)?;
             gl.bind_vertex_array(Some(vertex_array));
@@ -6365,7 +6566,7 @@ impl Gles {
             // finish letting the driver take their memory back
             unsafe {
                 textures.into_iter().for_each(|texture| gl.delete_texture(texture));
-                programs.into_iter().for_each(|program| gl.delete_program(program));
+                programs.into_iter().for_each(|program| delete_program(&gl, program));
                 gl.finish();
             }
         });
@@ -7465,6 +7666,60 @@ mod tests {
     }
 
     #[test]
+    fn separable_stages_put_together_validate() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        if (0..PIPELINE_FNS.len()).any(|index| pipeline_fn(index) == 0) {
+            eprintln!("no program pipelines here, skipped");
+            return;
+        }
+        let worker = gles.worker.clone();
+        let failures = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let mut failures = Vec::new();
+            for writes_depth in [false, true] {
+                for lighting in [0, 1] {
+                    let mut constants = [0u32; FRAGMENT_CONSTANTS];
+                    constants[26] = lighting;
+                    constants[28] = if writes_depth { WRITES_DEPTH } else { 0 };
+                    let fragment = fragment_source(&generic_constants(&constants), writes_depth, &[]);
+                    let token = build_separable(gl, VERTEX_SOURCE, &fragment).expect("the stages build");
+                    let (vertex, fragment) = SEPARATE.lock().unwrap().as_ref().unwrap()[&(SHARE_GROUP.get(), token)];
+                    // SAFETY: on the GL thread with its context current
+                    unsafe {
+                        let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
+                        let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
+                        let mut pipeline = 0u32;
+                        generate(1, &mut pipeline);
+                        stages_of(pipeline, VERTEX_SHADER_BIT, vertex.0.get());
+                        stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.0.get());
+                        let validate: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(5));
+                        let status: extern "system" fn(u32, u32, *mut i32) = std::mem::transmute(pipeline_fn(6));
+                        let log: extern "system" fn(u32, i32, *mut i32, *mut u8) = std::mem::transmute(pipeline_fn(7));
+                        validate(pipeline);
+                        let mut valid = 0;
+                        status(pipeline, glow::VALIDATE_STATUS, &mut valid);
+                        if valid == 0 {
+                            let mut text = vec![0u8; 4096];
+                            let mut length = 0;
+                            log(pipeline, text.len() as i32, &mut length, text.as_mut_ptr());
+                            failures.push(format!("depth {writes_depth}, lighting {lighting}: {}", String::from_utf8_lossy(&text[..length.max(0) as usize])));
+                        }
+                    }
+                    delete_program(gl, token);
+                }
+            }
+            failures
+        });
+        assert!(failures.is_empty(), "pipelines that did not validate: {failures:#?}");
+    }
+
+    #[test]
     fn the_compiler_queue_takes_what_draws_need_before_stand_ins() {
         let job = |name: &str, stand_in: bool| {
             let mut constants = [0u32; FRAGMENT_CONSTANTS];
@@ -7496,6 +7751,11 @@ mod tests {
                 return;
             }
         };
+        // separable stages are kept as programs of their own, and loaded
+        // from the program cache before any shader is compiled
+        if separable() {
+            return;
+        }
         const VERTEX: &str = "#version 310 es\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
         let fragment = |red: f32| format!("#version 310 es\nprecision mediump float;\nlayout(location = 0) out vec4 color;\nvoid main() {{ color = vec4({red:.1}, 0.0, 0.0, 1.0); }}\n");
         let (first, second) = (fragment(0.5), fragment(1.0));
