@@ -2504,11 +2504,16 @@ fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::P
 /// program that goes by the program's name everywhere else.
 fn build_separable(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
     // a separable program's stages meet as they are declared, which OpenGL
-    // ES has match in precision too, where fast mode takes colors in at half
-    // and the vertex stage hands them on at full: the pipeline does not
-    // validate then, and Mali leaves out every draw
-    let fragment = fragment.replace("in vec4 in_color", "in highp vec4 in_color").replace("in vec4 in_quaternion", "in highp vec4 in_quaternion");
-    let stages = (stage_program(gl, glow::VERTEX_SHADER, vertex)?, stage_program(gl, glow::FRAGMENT_SHADER, &fragment)?);
+    // ES has match in precision too: fast mode takes colors and the
+    // quaternion in at half, so the vertex stage hands them on at half,
+    // which loses nothing the fragment stage kept. Left at full, the
+    // pipeline does not validate and Mali leaves out every draw
+    let vertex = if fragment.contains("precision mediump float;") {
+        vertex.replace("out vec4 out_color;", "out mediump vec4 out_color;").replace("out vec4 out_quaternion;", "out mediump vec4 out_quaternion;")
+    } else {
+        vertex.to_owned()
+    };
+    let stages = (stage_program(gl, glow::VERTEX_SHADER, &vertex)?, stage_program(gl, glow::FRAGMENT_SHADER, fragment)?);
     // SAFETY: the context is current on this thread
     let token = unsafe { gl.create_program()? };
     SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).insert((SHARE_GROUP.get(), token), stages);
