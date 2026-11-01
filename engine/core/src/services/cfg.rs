@@ -18,6 +18,10 @@ pub const CONSOLE_HASH: u64 = 0x0000_5255_3341_5A55;
 /// the highest there is, so a game finds any version it knows accepted.
 pub const EULA_VERSION: [u8; 2] = [0x7F, 0x7F];
 
+/// the console's country codes by id, two letters each, blank where an id
+/// has none, as the CFG module keeps them.
+const COUNTRY_CODES: &[u8; 374] = b"  JP            AIAGARAWBSBBBZBOBRVGCAKYCLCOCRDMDOECSVGFGDGPGTGYHTHNJMMQMXMSANNIPAPYPEKNLCVCSRTTTCUSUYVIVE                      ALAUATBEBABWBGHRCYCZDKEEFIFRDEGRHUISIEITLVLSLILTLUMKMTMEMZNANLNZNOPLPTRORURSSKSIZAESSZSECHTRGBZMZWAZMRMLNETDSDERDJSOADGIGGIMJEMCTW              KR              HKMO            IDSGTHPHMY      CN              AEINEGOMQAKWSASYBHJO            SMVABM";
+
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
     match header.command_id() {
         // GetConfigInfoBlk2(size, block id) with the result written to a
@@ -76,9 +80,33 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             buffer.reply(&mut system.memory, 0x0008, &[translated]);
             true
         }
+        // GetCountryCodeString(id) -> its two letters
+        0x0009 => {
+            let id = buffer.get(&mut system.memory, 1) as u16 as usize;
+            match COUNTRY_CODES.get(id * 2..id * 2 + 2).filter(|code| code != b"  ") {
+                Some(code) => buffer.reply(&mut system.memory, 0x0009, &[code[0] as u32 | (code[1] as u32) << 8]),
+                None => buffer.reply_error(&mut system.memory, 0x0009, COUNTRY_NOT_FOUND),
+            }
+            true
+        }
+        // GetCountryCodeID(two letters) -> its id
+        0x000A => {
+            let code = (buffer.get(&mut system.memory, 1) as u16).to_le_bytes();
+            match COUNTRY_CODES.chunks(2).position(|letters| letters == code && code != *b"  ") {
+                Some(id) => buffer.reply(&mut system.memory, 0x000A, &[id as u32]),
+                None => {
+                    buffer.reply(&mut system.memory, 0x000A, &[0xFF]);
+                    buffer.set(&mut system.memory, 1, COUNTRY_NOT_FOUND);
+                }
+            }
+            true
+        }
         _ => false,
     }
 }
+
+/// not found, config, wrong argument, permanent.
+const COUNTRY_NOT_FOUND: u32 = 0xD901_03FA;
 
 /// factory values of the stereo camera configuration block.
 const STEREO_CAMERA_SETTINGS: [f32; 8] = [
@@ -172,5 +200,20 @@ mod tests {
             handle_request(&mut system, Target::service("cfg:u".into(), 0));
             assert_eq!((buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2)), (0, expected), "{info:08X} {direction}");
         }
+    }
+
+    /// a country's letters by id and back, as the CFG module has them.
+    #[test]
+    fn country_codes_go_both_ways() {
+        let (mut system, buffer) = system_with_thread();
+        let mut ask = |command: u16, value: u32| {
+            buffer.set(&mut system.memory, 0, Header::new(command, 1, 0).0);
+            buffer.set(&mut system.memory, 1, value);
+            handle_request(&mut system, Target::service("cfg:u".into(), 0));
+            (buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2))
+        };
+        assert_eq!(ask(0x0009, 49), (0, u16::from_le_bytes(*b"US") as u32));
+        assert_eq!(ask(0x000A, u16::from_le_bytes(*b"GB") as u32), (0, 110));
+        assert_eq!(ask(0x0009, 2).0, super::COUNTRY_NOT_FOUND);
     }
 }
