@@ -2549,6 +2549,64 @@ fn bind_program(gl: &glow::Context, program: glow::Program) {
     }
 }
 
+thread_local! {
+    /// what the GL thread's draws took since it last said, the first draw
+    /// with each program apart: a driver can leave work on a program, or a
+    /// pipeline of separable stages, to the first draw that uses it.
+    static DRAW_SPENT: std::cell::RefCell<DrawSpent> = std::cell::RefCell::new(DrawSpent::default());
+}
+
+#[derive(Default)]
+struct DrawSpent {
+    since: Option<std::time::Instant>,
+    seen: rustc_hash::FxHashSet<glow::Program>,
+    draws: (u32, std::time::Duration),
+    first: (u32, std::time::Duration, std::time::Duration),
+}
+
+/// counts a draw's time on the GL thread, and every 5 s logs what draws took,
+/// for telling what grows over a session.
+fn draw_spent(program: glow::Program, took: std::time::Duration) {
+    DRAW_SPENT.with(|spent| {
+        let mut spent = spent.borrow_mut();
+        let since = *spent.since.get_or_insert_with(std::time::Instant::now);
+        if spent.seen.insert(program) {
+            spent.first.0 += 1;
+            spent.first.1 += took;
+            spent.first.2 = spent.first.2.max(took);
+        } else {
+            spent.draws.0 += 1;
+            spent.draws.1 += took;
+        }
+        let elapsed = since.elapsed();
+        if elapsed >= std::time::Duration::from_secs(5) {
+            let ms = |time: std::time::Duration| time.as_secs_f64() * 1000.0;
+            let stages = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().map_or(0, |stages| stages.len());
+            let pipelines = PIPELINES.with(|pipelines| pipelines.borrow().len());
+            // the resident set, in pages, from the second field of statm
+            let resident = std::fs::read_to_string("/proc/self/statm").ok().and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok()).map_or(0, |pages| pages * 4096 / (1 << 20));
+            log::info!(
+                "draws over {:.1} s: {} taking {:.0} ms ({:.3} ms each), {} first with their program taking {:.0} ms (longest {:.1} ms); {} programs seen, {} stage programs, {} pipelines, {} MB resident{}",
+                elapsed.as_secs_f64(),
+                spent.draws.0,
+                ms(spent.draws.1),
+                ms(spent.draws.1) / spent.draws.0.max(1) as f64,
+                spent.first.0,
+                ms(spent.first.1),
+                ms(spent.first.2),
+                spent.seen.len(),
+                stages,
+                pipelines,
+                resident,
+                if separable() { ", split shaders" } else { "" },
+            );
+            spent.since = Some(std::time::Instant::now());
+            spent.draws = Default::default();
+            spent.first = Default::default();
+        }
+    });
+}
+
 /// deletes a program a draw used, a separable one's stand-in and pipeline,
 /// its stages kept for others.
 fn delete_program(gl: &glow::Context, program: glow::Program) {
@@ -3231,7 +3289,11 @@ struct DrawJob {
 
 impl DrawJob {
     fn submit_logged(self, gl: GlRef) {
-        if let Err(error) = self.submit(gl) {
+        let started = std::time::Instant::now();
+        let program = self.program;
+        let result = self.submit(gl);
+        draw_spent(program, started.elapsed());
+        if let Err(error) = result {
             if super::first_time(&error) {
                 log::error!("the GPU could not draw, {error}");
             }
