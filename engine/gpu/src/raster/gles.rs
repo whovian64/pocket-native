@@ -2832,7 +2832,9 @@ fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::P
                 None => {
                     let shader = gl.create_shader(stage)?;
                     gl.shader_source(shader, source);
+                    at_compiler([source, ""]);
                     gl.compile_shader(shader);
+                    at_compiler(["", ""]);
                     (shader, false)
                 }
             };
@@ -2844,7 +2846,9 @@ fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::P
             }
             gl.attach_shader(program, shader);
             gl.program_binary_retrievable_hint(program, true);
+            at_compiler([source, ""]);
             gl.link_program(program);
+            at_compiler(["", ""]);
             gl.detach_shader(program, shader);
             if !kept {
                 keep_shader(gl, stage, source, shader);
