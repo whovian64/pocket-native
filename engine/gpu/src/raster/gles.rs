@@ -1079,6 +1079,13 @@ fn fragment_source(constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, li
     if ADRENO.load(std::sync::atomic::Ordering::Relaxed) {
         out = out.replace(SWITCH_COMPARE, ADRENO_COMPARE);
     }
+    // ZAKURO_UNROLLED_STAND_INS: the generic program with the six stages
+    // written out as before the loop, for telling whether the loop is what
+    // a driver draws wrong
+    static UNROLLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *UNROLLED.get_or_init(|| crate::switch("ZAKURO_UNROLLED_STAND_INS", "the generic program's stages written out")) {
+        out = out.replace("    if (DYNAMIC != 0u) {\n        // the generic program, which reads every stage's registers", "    if (false) {\n        // the generic program, which reads every stage's registers");
+    }
     out
 }
 
