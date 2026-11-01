@@ -63,7 +63,7 @@ const ON_OFF: [&str; 2] = ["Off", "On"];
 /// the advanced settings that turn on and off, see settings::Advanced: the
 /// name, the setting, what off and on show as, and the help under the list.
 #[allow(clippy::type_complexity)]
-const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 34] = [
+const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 35] = [
     ("Bottom screen skipping", |a| &mut a.skip_bottom, ON_OFF, "Draws the bottom screen less often while it stands still. Try Off if it flickers, lags or goes black."),
     ("Speed hacks", |a| &mut a.fast, ON_OFF, "Turns the ten speed hacks below on or off together. Off is the first thing to try when a game looks wrong."),
     ("Quick surface checks", |a| &mut a.quick_checks, ON_OFF, "Checks pictures against memory at a few spots only. Try Off if old pictures or garbage stay after a scene change."),
@@ -98,6 +98,7 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 34] = [
     ("Compressed alpha textures", |a| &mut a.etc1a4, ON_OFF, "Keeps see-through compressed textures compressed too. Try Off if a game runs slower than on 0.4.0."),
     ("New 3DS mode", |a| &mut a.new3ds, ON_OFF, "Runs a game that has a New 3DS mode in it, with its extra memory and effects. Slower on most handhelds."),
     ("While shaders build", |a| &mut a.stand_ins, ["Leave out", "Stand-in"], "Stand-in draws new things plainly at once while their shaders build, no pop-in. Leave out keeps frames faster."),
+    ("Split shaders", |a| &mut a.separable_shaders, ON_OFF, "Experiment: builds shader halves once and pairs them when drawn, for less stutter. Off if graphics break."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -182,7 +183,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
         Page::Advanced => vec![
             ("Applies at once", vec![Field::Toggle(0), Field::Toggle(29), Field::Toggle(30), Field::FrameSkip]),
             ("Speed hacks - requires restart", toggles(1..=11)),
-            ("Graphics - requires restart", [toggles(12..=18), vec![Field::Toggle(31)], toggles(19..=22), vec![Field::Toggle(28), Field::Toggle(33)]].concat()),
+            ("Graphics - requires restart", [toggles(12..=18), vec![Field::Toggle(31)], toggles(19..=22), vec![Field::Toggle(28), Field::Toggle(33), Field::Toggle(34)]].concat()),
             ("CPU - requires restart", toggles(23..=24)),
             ("Loading - requires restart", toggles(25..=27)),
             ("System - requires restart", vec![Field::Language, Field::Region, Field::Toggle(32)]),
