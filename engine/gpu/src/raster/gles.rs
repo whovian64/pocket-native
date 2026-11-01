@@ -14,7 +14,7 @@ use glutin_egl_sys::egl;
 
 use super::host::{Draw, Geometry, Input, Shading, Transfer};
 use between::{Between, Step};
-use super::{color_words, BoundTexture, DepthMap, DrawnTexture, Screen, Wrap, COLOR_WORDS, TEXTURE_UNIT_BASES};
+use super::{color_words, BoundTexture, DepthMap, DrawnTexture, Lod, Screen, Wrap, COLOR_WORDS, TEXTURE_UNIT_BASES};
 use crate::blend::LogicOp;
 use crate::format::{morton_offset, ColorFormat};
 use crate::texture::Packing;
@@ -3509,9 +3509,6 @@ impl std::ops::Deref for GlRef {
     }
 }
 
-/// GL_OES_compressed_ETC1_RGB8_texture's format.
-const ETC1_RGB8_OES: u32 = 0x8D64;
-
 /// in fast mode, ZAKURO_NO_CULL turning it off, heavy meshes drawn inside an
 /// occlusion query, and left
 /// out for a few pictures after one found nothing of them on screen, which
@@ -4077,7 +4074,7 @@ pub struct Gles {
     surfaces: Vec<Surface>,
     framebuffers: rustc_hash::FxHashMap<(Option<usize>, Option<usize>), glow::Framebuffer>,
     textures: rustc_hash::FxHashMap<usize, Texture>,
-    samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap), glow::Sampler>,
+    samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap, Lod, bool), glow::Sampler>,
     blank: glow::Texture,
     transfer: Option<glow::Program>,
     reinterpreter: Option<glow::Program>,
@@ -6538,7 +6535,7 @@ impl Gles {
             Some((Packing::Etc1A4, _)) => Some(self.texture_name()?),
             _ => None,
         };
-        let (gl, texels, packed, width, height) = (self.gl, bound.texels.clone(), bound.packed.clone(), bound.width as i32, bound.height as i32);
+        let (gl, texels, packed, width, height, levels) = (self.gl, bound.texels.clone(), bound.packed.clone(), bound.width as i32, bound.height as i32, bound.levels as i32);
         self.worker.post_keeping(move || {
             disturb();
             // SAFETY: on the GL thread, the name is new and the texels cover
@@ -6547,25 +6544,38 @@ impl Gles {
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 match packed {
                     Some((packing @ (Packing::Etc1 | Packing::Etc1A4), blocks)) => {
-                        let (blocks, alphas) = blocks.split_at((width * height / 2) as usize);
-                        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, 0);
-                        gl.compressed_tex_image_2d(glow::TEXTURE_2D, 0, ETC1_RGB8_OES as i32, width, height, 0, blocks.len() as i32, blocks);
+                        // each size's blocks, then with ETC1A4 its alphas.
+                        // ETC1 is ETC2 too, whose storage takes every size,
+                        // where ETC1's own way drew the smaller ones wrong
+                        gl.tex_storage_2d(glow::TEXTURE_2D, levels, glow::COMPRESSED_RGB8_ETC2, width, height);
                         if let (Packing::Etc1A4, Some(alpha)) = (packing, alpha) {
                             gl.bind_texture(glow::TEXTURE_2D, Some(alpha));
-                            gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::R8, width, height);
-                            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width, height, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(alphas)));
+                            gl.tex_storage_2d(glow::TEXTURE_2D, levels, glow::R8, width, height);
+                        }
+                        let mut at = 0;
+                        for level in 0..levels {
+                            let (width, height) = (width >> level, height >> level);
+                            let (size, alphas) = ((width * height / 2) as usize, (width * height) as usize);
+                            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                            gl.compressed_tex_sub_image_2d(glow::TEXTURE_2D, level, 0, 0, width, height, glow::COMPRESSED_RGB8_ETC2, glow::CompressedPixelUnpackData::Slice(&blocks[at..at + size]));
+                            at += size;
+                            if let (Packing::Etc1A4, Some(alpha)) = (packing, alpha) {
+                                gl.bind_texture(glow::TEXTURE_2D, Some(alpha));
+                                gl.tex_sub_image_2d(glow::TEXTURE_2D, level, 0, 0, width, height, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&blocks[at..at + alphas])));
+                                at += alphas;
+                            }
                         }
                     }
                     Some((packing, bytes)) => {
                         use glow::{GREEN, ONE, RED, ZERO};
-                        let (internal, format, kind, swizzle) = match packing {
-                            Packing::Rgb565 => (glow::RGB565, glow::RGB, glow::UNSIGNED_SHORT_5_6_5, None),
-                            Packing::Rgba5551 => (glow::RGB5_A1, glow::RGBA, glow::UNSIGNED_SHORT_5_5_5_1, None),
-                            Packing::Rgba4 => (glow::RGBA4, glow::RGBA, glow::UNSIGNED_SHORT_4_4_4_4, None),
-                            Packing::Luminance => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, Some([RED, RED, RED, ONE])),
-                            Packing::Alpha => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, Some([ZERO, ZERO, ZERO, RED])),
-                            Packing::LuminanceAlpha => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([RED, RED, RED, GREEN])),
-                            Packing::Hilo => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([ZERO, RED, GREEN, ONE])),
+                        let (internal, format, kind, swizzle, bytes_each) = match packing {
+                            Packing::Rgb565 => (glow::RGB565, glow::RGB, glow::UNSIGNED_SHORT_5_6_5, None, 2),
+                            Packing::Rgba5551 => (glow::RGB5_A1, glow::RGBA, glow::UNSIGNED_SHORT_5_5_5_1, None, 2),
+                            Packing::Rgba4 => (glow::RGBA4, glow::RGBA, glow::UNSIGNED_SHORT_4_4_4_4, None, 2),
+                            Packing::Luminance => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, Some([RED, RED, RED, ONE]), 1),
+                            Packing::Alpha => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, Some([ZERO, ZERO, ZERO, RED]), 1),
+                            Packing::LuminanceAlpha => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([RED, RED, RED, GREEN]), 2),
+                            Packing::Hilo => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([ZERO, RED, GREEN, ONE]), 2),
                             Packing::Etc1 | Packing::Etc1A4 => unreachable!(),
                         };
                         if let Some(swizzle) = swizzle {
@@ -6573,12 +6583,24 @@ impl Gles {
                                 gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, source as i32);
                             }
                         }
-                        gl.tex_storage_2d(glow::TEXTURE_2D, 1, internal, width, height);
-                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width, height, format, kind, glow::PixelUnpackData::Slice(Some(&bytes)));
+                        gl.tex_storage_2d(glow::TEXTURE_2D, levels, internal, width, height);
+                        let mut at = 0;
+                        for level in 0..levels {
+                            let (width, height) = (width >> level, height >> level);
+                            let size = (width * height) as usize * bytes_each;
+                            gl.tex_sub_image_2d(glow::TEXTURE_2D, level, 0, 0, width, height, format, kind, glow::PixelUnpackData::Slice(Some(&bytes[at..at + size])));
+                            at += size;
+                        }
                     }
                     None => {
-                        gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, width, height);
-                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(texels.as_flattened())));
+                        gl.tex_storage_2d(glow::TEXTURE_2D, levels, glow::RGBA8, width, height);
+                        let mut at = 0;
+                        for level in 0..levels {
+                            let (width, height) = (width >> level, height >> level);
+                            let size = (width * height) as usize;
+                            gl.tex_sub_image_2d(glow::TEXTURE_2D, level, 0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(texels[at..at + size].as_flattened())));
+                            at += size;
+                        }
                     }
                 }
             }
@@ -6587,8 +6609,12 @@ impl Gles {
         Ok((texture, alpha))
     }
 
-    fn sampler(&mut self, linear: bool, s: Wrap, t: Wrap) -> Result<glow::Sampler, String> {
-        if let Some(&sampler) = self.samplers.get(&(linear, s, t)) {
+    /// a sampler magnifying bilinear or not, minifying as lod has it,
+    /// between sizes when there are some.
+    fn sampler(&mut self, linear: bool, s: Wrap, t: Wrap, lod: Lod, sizes: bool) -> Result<glow::Sampler, String> {
+        let lod = Lod { bias: 0, ..lod };
+        let lod = if sizes { lod } else { Lod { min: 0, max: 0, between: false, ..lod } };
+        if let Some(&sampler) = self.samplers.get(&(linear, s, t, lod, sizes)) {
             return Ok(sampler);
         }
         let mode = |wrap: Wrap| match wrap {
@@ -6597,19 +6623,29 @@ impl Gles {
             _ => glow::CLAMP_TO_EDGE,
         } as i32;
         let filter = if linear { glow::LINEAR } else { glow::NEAREST } as i32;
+        let minify = match (sizes, lod.linear, lod.between) {
+            (false, false, _) => glow::NEAREST,
+            (false, true, _) => glow::LINEAR,
+            (true, false, false) => glow::NEAREST_MIPMAP_NEAREST,
+            (true, true, false) => glow::LINEAR_MIPMAP_NEAREST,
+            (true, false, true) => glow::NEAREST_MIPMAP_LINEAR,
+            (true, true, true) => glow::LINEAR_MIPMAP_LINEAR,
+        } as i32;
         // SAFETY: on the GL thread, which makes the names
         let sampler = pooled(&self.worker, self.gl, (&mut self.sampler_names, &mut self.samplers_coming), |gl| unsafe { gl.create_sampler() }.ok(), "sampler")?;
         let (gl, wrap_s, wrap_t) = (self.gl, mode(s), mode(t));
         self.worker.post_keeping(move || {
             // SAFETY: on the GL thread, the name is new
             unsafe {
-                gl.sampler_parameter_i32(sampler, glow::TEXTURE_MIN_FILTER, filter);
+                gl.sampler_parameter_i32(sampler, glow::TEXTURE_MIN_FILTER, minify);
                 gl.sampler_parameter_i32(sampler, glow::TEXTURE_MAG_FILTER, filter);
+                gl.sampler_parameter_f32(sampler, glow::TEXTURE_MIN_LOD, lod.min as f32);
+                gl.sampler_parameter_f32(sampler, glow::TEXTURE_MAX_LOD, lod.max as f32);
                 gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_S, wrap_s);
                 gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_T, wrap_t);
             }
         });
-        self.samplers.insert((linear, s, t), sampler);
+        self.samplers.insert((linear, s, t, lod, sizes), sampler);
         Ok(sampler)
     }
 
@@ -6765,7 +6801,7 @@ impl Gles {
         let (mut enabled, mut split) = (0, 0);
         for (unit, texture) in draw.textures.iter().enumerate() {
             if let Some(texture) = texture {
-                let sampler = self.sampler(texture.linear, texture.wrap_s, texture.wrap_t)?;
+                let sampler = self.sampler(texture.linear, texture.wrap_s, texture.wrap_t, texture.lod, texture.levels > 1 && texture.drawn.is_none())?;
                 let image = match &texture.drawn {
                     Some(drawn) => match self.whole_surface(drawn).filter(|&index| index != color && self.surfaces[index].dirty.is_some()) {
                         Some(index) => {
@@ -6822,7 +6858,9 @@ impl Gles {
             let texture_config = (r[REG_TEXTURE_CONFIG] & !7) | enabled;
             words.extend([r[REG_UPDATE_BUFFER], r[REG_BUFFER_COLOR], r[REG_ALPHA_TEST], texture_config]);
             for (unit, (base, source)) in TEXTURE_UNIT_BASES.into_iter().zip(sources).enumerate() {
-                words.extend([r[base + 2], r[base], source.is_some() as u32, split >> unit & 1]);
+                // the bias in the top half of the in place flag's word
+                let bias = ((r[base + 3] << 19) as i32 >> 19) as u16 as u32;
+                words.extend([r[base + 2], r[base], source.is_some() as u32 | bias << 16, split >> unit & 1]);
             }
             let depth_flags = depth_map.w_buffer as u32 | (shaded as u32) << 1;
             words.extend([depth_flags, draw.lighting.is_some() as u32, depth_map.scale.to_bits(), depth_map.offset.to_bits()]);

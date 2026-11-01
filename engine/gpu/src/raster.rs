@@ -824,6 +824,44 @@ struct BoundTexture {
     width: u32,
     height: u32,
     border: [f32; 4],
+    /// how many sizes the texels hold, each half the last, and how the GPU
+    /// goes between them, see Lod.
+    levels: u32,
+    lod: Lod,
+}
+
+/// how a unit goes between a texture's sizes, from GPUREG_TEXUNITi_LOD and
+/// the filters in GPUREG_TEXUNITi_PARAM: the bias in 256ths, the smallest
+/// and largest level the unit allows, 0 being the largest size, bilinear
+/// sampling when minifying, and blending the two sizes about the level
+/// rather than taking the nearer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Lod {
+    pub(crate) bias: i16,
+    pub(crate) min: u8,
+    pub(crate) max: u8,
+    pub(crate) linear: bool,
+    pub(crate) between: bool,
+}
+
+/// how many sizes a unit's texture has: as many as the largest level of
+/// detail GPUREG_TEXUNITi_LOD allows, each half the last, down to 8 texels
+/// a side, the tiles' size.
+fn level_count(registers: &[u32], base: usize, width: u32, height: u32) -> u32 {
+    let largest = (registers[base + 3] >> 16) & 0xF;
+    1 + largest.min(width.trailing_zeros().min(height.trailing_zeros()).saturating_sub(3))
+}
+
+/// the width, height and byte offset of each of a texture's sizes, which
+/// follow each other in memory.
+fn texture_levels(format: TextureFormat, width: u32, height: u32, levels: u32) -> impl Iterator<Item = (u32, u32, usize)> {
+    let bits = format.bits_per_pixel() as u64;
+    (0..levels).scan(0usize, move |offset, level| {
+        let (width, height) = (width >> level, height >> level);
+        let found = (width, height, *offset);
+        *offset += (width as u64 * height as u64 * bits).div_ceil(8) as usize;
+        Some(found)
+    })
 }
 
 /// what draws keep from one to the next.
@@ -930,7 +968,8 @@ pub struct TextureCache {
 }
 
 /// address, format, size, and whether it is packed for a GPU.
-type TextureKey = (u32, TextureFormat, u32, u32, bool);
+/// address, format, width, height, whether it packs, and how many sizes.
+type TextureKey = (u32, TextureFormat, u32, u32, bool, u32);
 
 /// a texture as a GPU stores it, and how.
 pub(crate) type Packed = (crate::texture::Packing, Arc<[u8]>);
@@ -1003,7 +1042,7 @@ impl TextureCache {
 
     /// the texture decoded from data, which was read after stamp.
     fn decoded(&mut self, key: TextureKey, data: &[u8], stamp: u64) -> (Arc<[[u8; 4]]>, Option<Packed>) {
-        let (_, format, width, height, packs) = key;
+        let (_, format, width, height, packs, levels) = key;
         let hash = fingerprint(data);
         let checked = (self.list, self.written.len(), stamp, false);
         let hit = self.entries.get(&key).is_some_and(|decoded| decoded.hash == hash);
@@ -1012,7 +1051,7 @@ impl TextureCache {
             decoded.checked = checked;
             return (decoded.texels.clone(), decoded.packed.clone());
         }
-        let count = (width * height) as usize;
+        let count = texture_levels(format, width, height, levels).map(|(w, h, _)| (w * h) as usize).sum::<usize>();
         // a handheld in fast mode has little memory to spare, a quarter
         let limit = if crate::fast_with(crate::speedup::SMALL_CACHE) { CACHED_TEXELS / 4 } else { CACHED_TEXELS };
         if self.texels + count > limit {
@@ -1023,8 +1062,16 @@ impl TextureCache {
         // are, ETC1 compressed, ETC1A4 so with its alpha a byte a texel
         // apart, and the rest at 1 or 2 bytes a texel, where RGBA8 is 2 to 8
         // times the memory, here and on the GPU
+        // each size packed or decoded, one after the other
         let packed = packs
-            .then(|| crate::texture::pack_texels(data, format, width, height))
+            .then(|| {
+                let mut sizes = texture_levels(format, width, height, levels).map(|(w, h, offset)| crate::texture::pack_texels(&data[offset..], format, w, h));
+                let (packing, mut bytes) = sizes.next()??;
+                for size in sizes {
+                    bytes.extend(size?.1);
+                }
+                Some((packing, bytes))
+            })
             .flatten()
             .filter(|&(packing, _)| match packing {
                 crate::texture::Packing::Etc1 => SAMPLES_ETC1.load(std::sync::atomic::Ordering::Relaxed),
@@ -1034,7 +1081,7 @@ impl TextureCache {
             .map(|(packing, bytes)| (packing, Arc::from(bytes)));
         let texels: Arc<[[u8; 4]]> = match packed {
             Some(_) => Arc::from([]),
-            None => crate::texture::decode_texels(data, format, width, height).into(),
+            None => texture_levels(format, width, height, levels).flat_map(|(w, h, offset)| crate::texture::decode_texels(&data[offset..], format, w, h)).collect(),
         };
         if let Some(old) = self.entries.insert(key, Decoded { hash, texels: texels.clone(), packed: packed.clone(), checked }) {
             self.texels -= old.texels.len() + old.packed.map_or(0, |(_, bytes)| bytes.len() / 4);
@@ -1063,7 +1110,7 @@ fn texture_stats(key: TextureKey, bytes: usize, hit: bool) {
     if *looked == 5000 {
         let mut most: Vec<_> = changed.iter().collect();
         most.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let most: Vec<String> = most.iter().take(8).map(|((addr, format, w, h, _), n)| format!("{addr:08x} {format:?} {w}x{h} x{n}")).collect();
+        let most: Vec<String> = most.iter().take(8).map(|((addr, format, w, h, _, _), n)| format!("{addr:08x} {format:?} {w}x{h} x{n}")).collect();
         log::info!("textures: {looked} looked at, {decoded} decoded, {} KiB hashed; most decoded {most:?}", *hashed / 1024);
         *counts = None;
     }
@@ -1208,6 +1255,8 @@ fn empty_texture() -> BoundTexture {
         width: 1,
         height: 1,
         border: [0.0; 4],
+        levels: 1,
+        lod: Lod::default(),
     }
 }
 
@@ -1242,10 +1291,12 @@ fn bind_texture<M: GpuMemory>(
 
     let addr = memory.translate(address);
     log::trace!("texture unit {unit}: 0x{address:08X} -> 0x{addr:08X}, {width}x{height} {format:?}");
-    let bits = (width as u64) * (height as u64) * format.bits_per_pixel() as u64;
-    let size = bits.div_ceil(8) as usize;
+    // the smaller sizes go to a GPU, which picks between them, and one read
+    // from a drawing has the one
+    let levels = if packs && drawn.is_none() { level_count(registers, base, width, height) } else { 1 };
+    let size = texture_levels(format, width, height, levels + 1).last().map_or(0, |(_, _, end)| end);
 
-    let key = (addr, format, width, height, packs);
+    let key = (addr, format, width, height, packs, levels);
     let (texels, packed) = match (drawn, cache.checked(key, size as u32)) {
         (Some(_), _) => (Arc::from([]), None),
         (None, Some(decoded)) => decoded,
@@ -1265,10 +1316,21 @@ fn bind_texture<M: GpuMemory>(
     // filter mode in bit 1 (magnification) and 2 (minification), the wrap
     // modes for T and S in bits 8-10 and 12-14.
     let config = registers[base + 2];
+    let lod = registers[base + 3];
+    let max = ((lod >> 16) & 0xF).min(levels - 1);
     Some(BoundTexture {
         texels,
         packed,
         drawn,
+        levels,
+        lod: Lod {
+            // 13 bits with the sign, 8 of them a fraction
+            bias: ((lod << 19) as i32 >> 19) as i16,
+            min: ((lod >> 24) & 0xF).min(max) as u8,
+            max: max as u8,
+            linear: config & 0x4 != 0,
+            between: config & (1 << 24) != 0,
+        },
         linear: config & 0x2 != 0,
         wrap_t: Wrap::from_raw(config >> 8),
         wrap_s: Wrap::from_raw(config >> 12),
@@ -2799,6 +2861,8 @@ mod tests {
             width: 8,
             height: 8,
             border: RED,
+            levels: 1,
+            lod: Lod::default(),
         };
         let white = [1.0; 4];
         assert_eq!(texture(Wrap::ClampToBorder).texel(-1, 3), RED);
@@ -2812,7 +2876,7 @@ mod tests {
     #[test]
     fn textures_are_checked_once_a_list_unless_written_over() {
         let mut cache = TextureCache::default();
-        let key = (0x7100_1000, TextureFormat::Rgba8, 8, 8, false);
+        let key = (0x7100_1000, TextureFormat::Rgba8, 8, 8, false, 1);
         cache.begin_list();
         assert!(cache.checked(key, 256).is_none(), "never seen");
         cache.decoded(key, &[0x11; 256], crate::journal::now());
@@ -2833,12 +2897,26 @@ mod tests {
     #[test]
     fn the_texture_cache_notices_changed_bytes() {
         let mut cache = TextureCache::default();
-        let key = (0x1000, TextureFormat::Rgba8, 8, 8, false);
+        let key = (0x1000, TextureFormat::Rgba8, 8, 8, false, 1);
         let first = cache.decoded(key, &[0x11; 256], 0).0;
         let again = cache.decoded(key, &[0x11; 256], 0).0;
         assert!(Arc::ptr_eq(&first, &again));
         let changed = cache.decoded(key, &[0x22; 256], 0).0;
         assert_ne!(first[0], changed[0]);
+    }
+
+    /// a texture's smaller sizes follow it as the unit's largest level of
+    /// detail allows, none under 8 texels a side, each half the last.
+    #[test]
+    fn a_texture_has_as_many_sizes_as_its_unit_allows() {
+        let mut registers = vec![0u32; 0x300];
+        let base = TEXTURE_UNIT_BASES[0];
+        registers[base + 3] = 5 << 16;
+        assert_eq!(level_count(&registers, base, 64, 32), 3);
+        registers[base + 3] = 1 << 16;
+        assert_eq!(level_count(&registers, base, 64, 32), 2);
+        let levels: Vec<_> = texture_levels(TextureFormat::Etc1, 64, 32, 3).collect();
+        assert_eq!(levels, [(64, 32, 0), (32, 16, 1024), (16, 8, 1280)]);
     }
 
     /// a projected texture divides its coordinates by set 0's w: a quad with

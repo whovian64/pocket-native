@@ -157,7 +157,9 @@ vec4 sample_unit(uint unit, vec2 uv) {
     uint config = units[unit].x;
     uint wrap_t = (config >> 8) & 7u;
     uint wrap_s = (config >> 12) & 7u;
-    bool in_place = DYNAMIC != 0u ? units[unit].z != 0u : (TEXTURE_CONFIG & (0x10000u << unit)) != 0u;
+    bool in_place = DYNAMIC != 0u ? (units[unit].z & 1u) != 0u : (TEXTURE_CONFIG & (0x10000u << unit)) != 0u;
+    // the unit's level of detail bias, in 256ths in the word's top half
+    float bias = float(int(units[unit].z) >> 16) / 256.0;
     // precise as the combiners are. the coordinate itself the driver may
     // still interpolate a hair apart from one shader to another
     precise vec2 st = vec2(uv.x, in_place ? uv.y : 1.0 - uv.y);
@@ -171,18 +173,18 @@ vec4 sample_unit(uint unit, vec2 uv) {
     // bit 24 on for each unit with its alpha apart
     if (DYNAMIC != 0u ? units[unit].w != 0u : (TEXTURE_CONFIG & (0x1000000u << unit)) != 0u) {
         if (unit == 0u) {
-            return vec4(texture(texture0, st).rgb, texture(alpha0, st).r);
+            return vec4(texture(texture0, st, bias).rgb, texture(alpha0, st, bias).r);
         } else if (unit == 1u) {
-            return vec4(texture(texture1, st).rgb, texture(alpha1, st).r);
+            return vec4(texture(texture1, st, bias).rgb, texture(alpha1, st, bias).r);
         }
-        return vec4(texture(texture2, st).rgb, texture(alpha2, st).r);
+        return vec4(texture(texture2, st, bias).rgb, texture(alpha2, st, bias).r);
     }
     if (unit == 0u) {
-        return texture(texture0, st);
+        return texture(texture0, st, bias);
     } else if (unit == 1u) {
-        return texture(texture1, st);
+        return texture(texture1, st, bias);
     }
-    return texture(texture2, st);
+    return texture(texture2, st, bias);
 }
 
 precise float lookup(uint table, uint entry, float delta) {

@@ -1751,7 +1751,7 @@ const FRAGMENT: [bool; 0x300] = {
     let mut fragment = [false; 0x300];
     let mut register = 0x040;
     while register < 0x200 {
-        fragment[register] = !matches!(register, 0x082 | 0x084..=0x08E | 0x092 | 0x094..=0x096 | 0x09A | 0x09C..=0x09E);
+        fragment[register] = !matches!(register, 0x082 | 0x085..=0x08E | 0x092 | 0x095..=0x096 | 0x09A | 0x09D..=0x09E);
         register += 1;
     }
     fragment
