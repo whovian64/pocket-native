@@ -1266,6 +1266,20 @@ struct DrmModeInfo {
 }
 
 #[repr(C)]
+struct DrmModeObjectProperties {
+    count_props: u32,
+    props: *mut u32,
+    prop_values: *mut u64,
+}
+
+#[repr(C)]
+struct DrmModeProperty {
+    prop_id: u32,
+    flags: u32,
+    name: [u8; 32],
+}
+
+#[repr(C)]
 struct DrmModeConnector {
     connector_id: u32,
     encoder_id: u32,
@@ -1484,6 +1498,11 @@ unsafe fn follow_window(egl: &Egl, wanted: *mut c_void) -> bool {
 /// the panel's refresh period, and how long before its refresh the last
 /// picture was handed over, in nanoseconds, 0 when not known.
 static PANEL_PERIOD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// the panel's "panel orientation" property, how the kernel says it is
+/// mounted: 2 its left side up, 3 its right side up, as on handhelds whose
+/// panel is portrait under a mainline kernel, as ROCKNIX's are. -1 unknown.
+static PANEL_ORIENTATION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 static PANEL_SLACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// the panel's refresh period, and how long before its refresh the last
@@ -1597,6 +1616,24 @@ impl Kms {
         // DSI-2 on the RG DS under ROCKNIX, else the first connected
         let top = std::env::var("ZAKURO_KMS_TOP").unwrap_or_else(|_| "DSI-2".into());
         let (connector, name, mode, crtc, possible) = panels.remove(panels.iter().position(|panel| panel.1 == top).unwrap_or(0));
+        // how the kernel says the panel is mounted
+        let properties = call!(drm, "drmModeObjectGetProperties", fn(i32, u32, u32) -> *mut DrmModeObjectProperties, fd, connector, 0xC0C0_C0C0);
+        if !properties.is_null() {
+            let found = &*properties;
+            for i in 0..found.count_props as usize {
+                let property = call!(drm, "drmModeGetProperty", fn(i32, u32) -> *mut DrmModeProperty, fd, *found.props.add(i));
+                if property.is_null() {
+                    continue;
+                }
+                if (*property).name.starts_with(b"panel orientation\0") {
+                    let orientation = *found.prop_values.add(i) as i32;
+                    log::info!("the panel's orientation is {orientation}");
+                    PANEL_ORIENTATION.store(orientation, std::sync::atomic::Ordering::Relaxed);
+                }
+                call!(drm, "drmModeFreeProperty", fn(*mut DrmModeProperty) -> (), property);
+            }
+            call!(drm, "drmModeFreeObjectProperties", fn(*mut DrmModeObjectProperties) -> (), properties);
+        }
         // another panel the same size is the bottom one, both shown as one
         // picture stacked, unless ZAKURO_KMS_SINGLE=1 keeps to one
         let bottom = panels
@@ -2207,7 +2244,12 @@ fn panel_turn(width: i32, height: i32) -> Option<i32> {
         Some("0") | Some("off") => None,
         Some("90") => Some(0),
         Some("270") => Some(1),
-        _ => (height > width).then_some(0),
+        // as wlroots turns a panel with its left or right side up
+        _ => match PANEL_ORIENTATION.load(std::sync::atomic::Ordering::Relaxed) {
+            2 => Some(1),
+            3 => Some(0),
+            _ => (height > width).then_some(0),
+        },
     }
 }
 
