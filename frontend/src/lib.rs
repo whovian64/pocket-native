@@ -182,6 +182,11 @@ pub fn run(mut args: Vec<String>) {
                 Some((device, name)) => input::read_pad(device, name, pad.clone()),
                 None => log::warn!("no gamepad found"),
             }
+            if std::env::var_os("ZAKURO_INPUT").is_none() && probe.is_none() {
+                for (device, bottom) in input::touchscreens() {
+                    input::read_touch(device, bottom, pad.clone());
+                }
+            }
             pad
         }
     };
