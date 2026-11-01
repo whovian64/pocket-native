@@ -3123,6 +3123,7 @@ impl Egl {
                 display = get(EGL_PLATFORM_GBM_KHR, kms.device, std::ptr::null());
                 ready = !display.is_null() && loaded.Initialize(display, &mut major, &mut minor) != 0;
             }
+            log::info!("EGL on the GBM device, {}, {}", if ready { "by platform" } else { "by the legacy call" }, drawing_libraries());
             if !ready {
                 display = loaded.GetDisplay(kms.device as glutin_egl_sys::EGLNativeDisplayType);
                 ready = !display.is_null() && loaded.Initialize(display, &mut major, &mut minor) != 0;
