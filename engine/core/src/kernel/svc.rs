@@ -142,8 +142,10 @@ fn control_memory(system: &mut System) {
             };
             // the whole point of the linear heap is that the guest can derive
             // a physical address from a virtual one, so the mapping offset
-            // must match exactly.
+            // must match exactly. the kernel hands out pages zeroed, freed
+            // ones too
             let vaddr = system.kernel.linear_base + (block.addr - FCRAM_PADDR);
+            system.memory.zero_physical(block.addr, block.size);
             system.memory.map(
                 vaddr,
                 block.addr,
@@ -171,6 +173,7 @@ fn control_memory(system: &mut System) {
                 system.cpu.regs[0] = errors::OUT_OF_MEMORY.0;
                 return;
             };
+            system.memory.zero_physical(block.addr, block.size);
             system.memory.map(
                 base,
                 block.addr,
@@ -185,9 +188,11 @@ fn control_memory(system: &mut System) {
         }
         MEMOP_FREE => {
             if let Some(mapping) = system.memory.mapping_at(addr0).copied() {
+                // the pages from addr0 on, not from the mapping's start
+                let offset = addr0 - mapping.base;
                 system.memory.phys.free(crate::memory::PhysicalBlock {
-                    addr: mapping.paddr,
-                    size: size.min(mapping.size),
+                    addr: mapping.paddr + offset,
+                    size: size.min(mapping.size - offset),
                 });
             }
             system.memory.unmap(addr0, size);
@@ -1197,5 +1202,25 @@ mod tests {
         };
         let first = read();
         assert_eq!(read() - first, SYSTEM_TICK_COST);
+    }
+
+    /// memory comes back zeroed after it was freed, and freeing the second
+    /// half of a block frees that half.
+    #[test]
+    fn freed_memory_comes_back_zeroed() {
+        let mut system = System::new(crate::Config::default());
+        let control = |system: &mut System, operation: u32, address: u32, size: u32| {
+            system.cpu.regs[..5].copy_from_slice(&[operation, address, 0, size, 3]);
+            dispatch(system, 0x01);
+            (system.cpu.regs[0], system.cpu.regs[1])
+        };
+        let (result, address) = control(&mut system, MEMOP_ALLOC | MEMOP_LINEAR_FLAG, 0, 0x2000);
+        assert_eq!(result, 0);
+        system.memory.write32(address + 0x1000, 0xDEAD_BEEF);
+        let paddr = system.memory.mapping_at(address).map(|m| m.paddr).unwrap();
+        control(&mut system, MEMOP_FREE, address + 0x1000, 0x1000);
+        let (_, again) = control(&mut system, MEMOP_ALLOC | MEMOP_LINEAR_FLAG, 0, 0x1000);
+        assert_eq!(system.memory.mapping_at(again).map(|m| m.paddr), Some(paddr + 0x1000), "the freed half");
+        assert_eq!(system.memory.read32(again), 0);
     }
 }
