@@ -138,6 +138,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
     // sticks on the usual axes
     let rk3562 = rk3562_pad(&name);
     let miyoo = miyoo_pad(&name);
+    RADIAL.store(miyoo, std::sync::atomic::Ordering::Relaxed);
     // any other pad numbering select and start the usual way, as ROCKNIX's
     // drivers do, its R36S's r36s_Gamepad among them
     let keys = std::fs::read_to_string(format!("/sys/class/input/{event}/device/capabilities/key")).unwrap_or_default();
@@ -503,6 +504,10 @@ const HOLD_FLOOR: f32 = 0.6;
 
 static HELD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+/// whether the left stick goes through circle, for the Miyoo Flip's pad,
+/// whose gate falls short; every other stick is read per axis as before.
+static RADIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// the left stick as a circle pad position, the dead zone and the reach
 /// taken on the whole vector rather than each axis, so that a diagonal held
 /// against the gate counts as far as a cardinal, and the position never
@@ -546,10 +551,11 @@ pub fn controls(keys: &HashSet<u16>, axes: &[i32; 8], settings: &Settings) -> (P
     }
     let (x, y) = match dpad(keys) {
         (across, down) if settings.dpad == Dpad::CirclePad && (across, down) != (0.0, 0.0) => (across, -down),
-        _ => {
+        _ if RADIAL.load(std::sync::atomic::Ordering::Relaxed) => {
             let (x, y) = circle(axes[0], axes[1]);
             (x, -y)
         }
+        _ => (stick(axes[0]), -stick(axes[1])),
     };
     match settings.left_stick {
         Stick::CirclePad => (buttons, x, y),
