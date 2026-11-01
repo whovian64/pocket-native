@@ -2145,6 +2145,15 @@ fn assemble(topology: u32, count: usize) -> Vec<(usize, usize, usize)> {
     }
 }
 
+/// ZAKURO_STAND_INS: a draw into a picture a screen shows goes on with the
+/// generic stand-in while its own program builds, rather than being left
+/// out, so nothing pops in late, at the cost of slower frames meanwhile.
+#[cfg(feature = "gles")]
+pub(crate) fn stand_ins() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::switch("ZAKURO_STAND_INS", "draws stand in while their shaders build, none left out"))
+}
+
 /// assembles shaded vertices into triangles the way the primitive configuration
 /// says, and fills them with the current back-end state.
 fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Resources, vertices: Vertices) -> u32 {
@@ -2166,8 +2175,9 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     let color_buffer_raw = loc_register(registers, REG_COLOR_BUFFER_ADDRESS);
     let target_addr = memory.translate(color_buffer_raw);
     #[cfg(feature = "gles")]
-    let skippable = viewport_height == 400.0 && resources.shown_top.contains(&target_addr)
-        || viewport_height == 320.0 && resources.redrawn_bottom.is_some_and(|(start, end)| start < target_addr.saturating_add(240 * 320 * 4) && target_addr < end);
+    let skippable = !stand_ins()
+        && (viewport_height == 400.0 && resources.shown_top.contains(&target_addr)
+            || viewport_height == 320.0 && resources.redrawn_bottom.is_some_and(|(start, end)| start < target_addr.saturating_add(240 * 320 * 4) && target_addr < end));
     // the format sits in bits 16-18 of the register, not the low bits, the low
     // half holds how many bytes a pixel takes.
     let target_format = ColorFormat::from_color_buffer((registers[REG_COLOR_BUFFER_FORMAT] >> 16) & 7);
