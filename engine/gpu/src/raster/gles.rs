@@ -3613,7 +3613,7 @@ fn count_build(vertex: &str, fragment: &str, waited: std::time::Duration, stages
             stages[2].as_secs_f64() * 1000.0,
             vertex.lines().count(),
             fragment.lines().count(),
-            if fragment.contains("light") { ", with lighting" } else { "" }
+            if fragment.contains("const uint DYNAMIC = 1u;") { ", a generic stand-in" } else { "" }
         );
     }
     for (index, source) in [vertex, fragment].into_iter().enumerate() {
@@ -3785,11 +3785,76 @@ struct Compile {
     cached: Option<std::path::PathBuf>,
 }
 
+/// the programs waiting for a compiler thread: those a draw needs now first,
+/// the generic stand-ins after them, which the driver takes seconds over
+/// each and which draws only use while their own programs build. In arrival
+/// order otherwise.
+struct Queue {
+    jobs: std::sync::Mutex<(std::collections::VecDeque<Compile>, std::collections::VecDeque<Compile>, bool)>,
+    ready: std::sync::Condvar,
+}
+
+impl Queue {
+    fn new() -> Queue {
+        Queue { jobs: std::sync::Mutex::new((Default::default(), Default::default(), false)), ready: std::sync::Condvar::new() }
+    }
+
+    fn send(&self, job: Compile) -> Result<(), ()> {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if jobs.2 {
+            return Err(());
+        }
+        // a stand-in's constants say it is the dynamic program
+        if job.key.0[29] != 0 {
+            jobs.1.push_back(job);
+        } else {
+            jobs.0.push_back(job);
+        }
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// the next job, waiting for one, or none once closed.
+    fn take(&self) -> Option<Compile> {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(job) = jobs.0.pop_front().or_else(|| jobs.1.pop_front()) {
+                return Some(job);
+            }
+            if jobs.2 {
+                return None;
+            }
+            jobs = self.ready.wait(jobs).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn close(&self) {
+        self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).2 = true;
+        self.ready.notify_all();
+    }
+}
+
+/// the compiler threads' queue, closed when the compiler goes, which ends
+/// them.
+struct Jobs(std::sync::Arc<Queue>);
+
+impl Jobs {
+    fn send(&self, job: Compile) -> Result<(), ()> {
+        self.0.send(job)
+    }
+}
+
+impl Drop for Jobs {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 /// a thread compiling new programs in a context that shares the GL thread's
 /// objects, so that a draw goes on with a stand-in rather than wait for the
 /// driver's compiler.
 struct Compiler {
-    jobs: std::sync::mpsc::Sender<Compile>,
+    jobs: Jobs,
     thread: thread::JoinHandle<()>,
     done: std::sync::mpsc::Receiver<(ProgramKey, Result<glow::Program, String>)>,
     pending: rustc_hash::FxHashSet<ProgramKey>,
@@ -3801,8 +3866,8 @@ impl Compiler {
         if crate::switch("ZAKURO_SYNC_SHADERS", "shaders compiled when a draw needs them") {
             return None;
         }
-        let (jobs, received) = std::sync::mpsc::channel::<Compile>();
-        let received = std::sync::Arc::new(std::sync::Mutex::new(received));
+        let received = std::sync::Arc::new(Queue::new());
+        let jobs = Jobs(received.clone());
         let (finished, done) = std::sync::mpsc::channel();
         let (ready, started) = std::sync::mpsc::channel();
         let mut threads = Vec::new();
@@ -3826,11 +3891,9 @@ impl Compiler {
                         log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
                     let _ = ready.send(true);
-                    loop {
-                        // one job at a time off the shared queue, the lock let
-                        // go before the build
-                        let job = received.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv();
-                        let Ok(job) = job else { break };
+                    // one job at a time off the shared queue, the lock let go
+                    // before the build
+                    while let Some(job) = received.take() {
                         let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
                         // SAFETY: the context is current on this thread
                         unsafe { gl.finish() };
@@ -7332,6 +7395,29 @@ mod tests {
             assert_eq!(read_copy(&mut gles, &texture), expected, "256x{height} over two drawings");
         }
         assert!(gles.surfaces[small].dirty.is_none(), "the small drawing was written back");
+    }
+
+    #[test]
+    fn the_compiler_queue_takes_what_draws_need_before_stand_ins() {
+        let job = |name: &str, stand_in: bool| {
+            let mut constants = [0u32; FRAGMENT_CONSTANTS];
+            constants[29] = stand_in as u32;
+            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None }
+        };
+        let queue = Queue::new();
+        for (name, stand_in) in [("stand-in 1", true), ("stand-in 2", true), ("draw 1", false), ("stand-in 3", true), ("draw 2", false)] {
+            assert!(queue.send(job(name, stand_in)).is_ok());
+        }
+        let order: Vec<String> = std::iter::from_fn(|| {
+            let mut jobs = queue.jobs.lock().unwrap();
+            jobs.0.pop_front().or_else(|| jobs.1.pop_front()).map(|job| job.vertex)
+        })
+        .collect();
+        assert_eq!(order, ["draw 1", "draw 2", "stand-in 1", "stand-in 2", "stand-in 3"]);
+        // closed, a waiting thread is let go and nothing more is taken
+        queue.close();
+        assert!(queue.take().is_none());
+        assert!(queue.send(job("late", false)).is_err());
     }
 
     #[test]
