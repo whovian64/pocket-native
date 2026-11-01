@@ -1805,15 +1805,18 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
 /// on the RX6H crashed in the compiler thread with both at it.
 static COMPILER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// how many threads compile programs, ZAKURO_COMPILERS, 1 to 4, 1 when not
-/// given: more build a first run's programs sooner on a driver that takes
-/// them at once, which not all do, the RX6H's Mali crashing with two.
+/// how many threads compile programs, ZAKURO_COMPILERS, 1 to 4: more build
+/// a first run's programs sooner on a driver that takes them at once, which
+/// not all do, the RX6H's Mali crashing with two. Three on Android, where
+/// the RG DS's Mali-G52 built its stand-ins in 15 s rather than 36 with
+/// them, one elsewhere.
 fn compilers() -> usize {
     static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *COUNT.get_or_init(|| {
-        let count = std::env::var("ZAKURO_COMPILERS").ok().and_then(|value| value.parse().ok()).unwrap_or(1usize).clamp(1, 4);
+        let default = if cfg!(target_os = "android") { 3 } else { 1 };
+        let count = std::env::var("ZAKURO_COMPILERS").ok().and_then(|value| value.parse().ok()).unwrap_or(default).clamp(1, 4);
         if count > 1 {
-            log::info!("switch: {count} threads compiling programs, at once, ZAKURO_COMPILERS");
+            log::info!("{count} threads compiling programs, at once (ZAKURO_COMPILERS)");
         }
         count
     })
