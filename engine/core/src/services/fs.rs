@@ -688,6 +688,18 @@ fn user_command(system: &mut System, buffer: &CommandBuffer, header: Header) -> 
             true
         }
 
+        // SetThisSaveDataSecureValue / GetThisSaveDataSecureValue: nothing
+        // is kept, and the answer is no value with the title a game card,
+        // which a title takes as the check not applying to its save
+        0x086E => {
+            buffer.reply(&mut system.memory, command, &[]);
+            true
+        }
+        0x086F => {
+            buffer.reply(&mut system.memory, command, &[0, 1, 0, 0]);
+            true
+        }
+
         _ => false,
     }
 }
@@ -1188,3 +1200,32 @@ fn decode_path(system: &mut System, path_type: u32, path_size: u32, path_ptr: u3
 /// kept so the descriptor helper stays in scope for the mapped-buffer replies
 /// above, which build their descriptors by hand.
 pub const _MAPPED_BUFFER_RW: u32 = Descriptor::static_buffer(0, 0);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::tests::system_with_thread;
+    use crate::services::{handle_request, Target};
+
+    /// Smash asks for its save's secure value and sets one: no value comes
+    /// back, as a game card's, with nothing left unimplemented.
+    #[test]
+    fn secure_values_say_none_as_a_game_card() {
+        let (mut system, buffer) = system_with_thread();
+        buffer.set(&mut system.memory, 0, Header::new(0x086F, 1, 0).0);
+        buffer.set(&mut system.memory, 1, 0x1000);
+        handle_request(&mut system, Target::service("fs:USER".into(), 0));
+        assert_eq!(buffer.header(&mut system.memory), Header::new(0x086F, 5, 0));
+        let words: Vec<u32> = (1..6).map(|index| buffer.get(&mut system.memory, index)).collect();
+        assert_eq!(words, [0, 0, 1, 0, 0]);
+
+        buffer.set(&mut system.memory, 0, Header::new(0x086E, 3, 0).0);
+        buffer.set(&mut system.memory, 1, 0x1000);
+        buffer.set(&mut system.memory, 2, 0xB6A1_B7EA);
+        buffer.set(&mut system.memory, 3, 0x8000_921D);
+        handle_request(&mut system, Target::service("fs:USER".into(), 0));
+        assert_eq!(buffer.header(&mut system.memory), Header::new(0x086E, 1, 0));
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+        assert!(system.services.unimplemented.is_empty());
+    }
+}
