@@ -3,7 +3,8 @@
 # for Pocket Native's Power setting, normal as the system keeps them, for after
 # a game
 cpu=/sys/devices/system/cpu/cpufreq/policy0
-gpu=$(ls -d /sys/devices/platform/*.gpu/devfreq/*.gpu 2>/dev/null | head -1)
+# Rockchip's ff400000.gpu and the H700's 1800000.gpu alike, as muOS finds it
+gpu=$(ls -d /sys/class/devfreq/*gpu* 2>/dev/null | head -1)
 dmc=/sys/devices/platform/dmc/devfreq/dmc
 # Knulli runs ports as root, with no sudo
 set_to() { if [ "$(id -u)" = 0 ]; then echo "$2" > "$1"; else echo "$2" | sudo -n tee "$1" >/dev/null; fi 2>/dev/null; }
