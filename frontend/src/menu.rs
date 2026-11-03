@@ -85,7 +85,7 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 34] = [
     ("Textures past a drawing", |a| &mut a.past_drawing, ON_OFF, "Fills a texture bigger than its picture with the picture's edge. Try Off for streaks or missing glow."),
     ("Compressed textures", |a| &mut a.etc1, ON_OFF, "Leaves compressed textures to the GPU. Try Off for blocky or wrongly colored textures."),
     ("Generic shaders", |a| &mut a.generic_shaders, ON_OFF, "One program for every draw rather than one each. Slower to draw, but nothing new to build. Try On for hitches."),
-    ("Generic lighting", |a| &mut a.generic_lighting, ON_OFF, "The same for lit draws only. Try On for hitches when lights change."),
+    ("Generic lighting", |a| &mut a.generic_lighting, ON_OFF, "The same for lit draws only, very slow on the R36S. Try On only for hitches when lights change."),
     ("Vertex ranges", |a| &mut a.draw_ranges, ON_OFF, "Reads only the vertices a draw uses. Try Off if shapes are missing or broken."),
     ("GPU thread", |a| &mut a.gpu_thread, ON_OFF, "Draws on a core of its own. Try Off for crashes or glitches that come and go, it is slower."),
     ("Real-time GPU", |a| &mut a.realtime_gpu, ON_OFF, "Time goes on while the GPU draws, as on the console. Try On if the game runs too fast or its timing is off."),
