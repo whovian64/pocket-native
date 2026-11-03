@@ -69,7 +69,7 @@ working or not.
 |---|---|---|
 | R36S and its clones | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones | The main target, developed and tested on an R36S with ArkOS |
 | Powkiddy RX6H | dArkOS for clones | Played by testers. No FN button: L3 does its job |
-| Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | Knulli, muOS | Played by testers |
+| Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | Knulli, muOS | Played by testers: Super Mario 3D Land, A Link Between Worlds, Smash, Project X Zone 1 and 2, Shantae and the Pirate's Curse, Dragon Ball Z: Extreme Butoden, Kingdom Hearts 3D. Power's Balanced and Performance raise the GPU's clock too |
 | Miyoo Flip | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
 | Anbernic RG353 and RG503 | ArkOS | Buttons mapped, no tester report yet |
 | Anbernic RG52 Mini | dArkOS | Played by testers |
@@ -77,9 +77,9 @@ working or not.
 | AYN Thor | Android | Works, both screens |
 | Anbernic RG DS | Android | Works, both screens |
 | Anbernic RG DS | Anbernic's Linux | Not yet: one screen only, buttons not found |
-| Anbernic RG DS | ROCKNIX | Both screens and both touch screens, no tester report yet |
+| Anbernic RG DS | ROCKNIX | Played by a tester on both screens and both touch screens: Pokémon Alpha Sapphire at full speed |
 | Android phones | Android 11 or newer, 64-bit | Works, with touch controls or a gamepad |
-| R36S, RK3566 and H700 handhelds | ROCKNIX | Should start: the launcher hands sway's panel to the game, and pads numbering their buttons the usual way (the R36S's r36s_Gamepad among them) are read. No tester report yet |
+| R36S, RK3566 and H700 handhelds | ROCKNIX | Should start: the launcher hands sway's panel to the game, and pads numbering their buttons the usual way (the R36S's r36s_Gamepad among them) are read, as is the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. No tester report yet on these |
 | AmberELEC | | Not yet |
 
 Screens other than the R36S's 640x480 work: the layouts follow the
