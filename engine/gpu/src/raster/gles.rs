@@ -2165,6 +2165,17 @@ fn at_compiler(sources: [&str; 2]) {
     AT_COMPILER.thread.store(thread, Relaxed);
 }
 
+/// clears at_compiler's mark once a build is over, however it ends: the
+/// driver may do the work when asked how it went or at first use, not only
+/// in the compile and link calls.
+struct Watched;
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        at_compiler(["", ""]);
+    }
+}
+
 /// from a fatal signal's handler: when the crashing thread was in the
 /// driver's compiler, writes what it compiled into the log and its
 /// fingerprint into the list the next runs leave out.
@@ -2224,6 +2235,8 @@ fn compiler_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
 
 fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
     let _compiling = compiler_lock();
+    let _watched = Watched;
+    at_compiler([vertex, fragment]);
     // SAFETY: on the GL thread, the shaders are deleted once linked
     unsafe {
         let program = gl.create_program()?;
@@ -2813,6 +2826,7 @@ fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::P
         return Ok(found);
     }
     let _compiling = compiler_lock();
+    let _watched = Watched;
     let started = std::time::Instant::now();
     let cached = RENDERER_NAME.get().and_then(|name| program_cache_path(name, if stage == glow::VERTEX_SHADER { "separable vertex" } else { "separable fragment" }, source));
     // SAFETY: the context is current on this thread, the pipeline calls
@@ -2834,7 +2848,6 @@ fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::P
                     gl.shader_source(shader, source);
                     at_compiler([source, ""]);
                     gl.compile_shader(shader);
-                    at_compiler(["", ""]);
                     (shader, false)
                 }
             };
@@ -2848,7 +2861,6 @@ fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::P
             gl.program_binary_retrievable_hint(program, true);
             at_compiler([source, ""]);
             gl.link_program(program);
-            at_compiler(["", ""]);
             gl.detach_shader(program, shader);
             if !kept {
                 keep_shader(gl, stage, source, shader);
@@ -4343,6 +4355,7 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
         return build_separable(gl, vertex, fragment);
     }
     let _compiling = compiler_lock();
+    let _watched = Watched;
     // SAFETY: the context is current on this thread, the shaders are deleted
     // once linked into the program
     unsafe {
@@ -4369,12 +4382,12 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
                         gl.shader_source(shader, source);
                         at_compiler([source, ""]);
                         gl.compile_shader(shader);
-                        at_compiler(["", ""]);
                         (shader, false)
                     }
                 });
             }
             for (index, &(shader, kept)) in shaders.iter().enumerate() {
+                at_compiler([sources[index].1, ""]);
                 if !kept && !gl.get_shader_compile_status(shader) {
                     let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
                     for &(shader, kept) in &shaders {
@@ -4394,7 +4407,6 @@ fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Optio
             at_compiler([vertex, fragment]);
             let began = std::time::Instant::now();
             gl.link_program(program);
-            at_compiler(["", ""]);
             for (&(shader, kept), (stage, source)) in shaders.iter().zip(sources) {
                 gl.detach_shader(program, shader);
                 if !kept {
@@ -6006,6 +6018,8 @@ impl Gles {
     fn compute(&self, source: &str) -> Result<glow::Program, String> {
         let gl = &self.gl;
         let _compiling = compiler_lock();
+        let _watched = Watched;
+        at_compiler([source, ""]);
         // SAFETY: the context is current, the shader is deleted once linked
         unsafe {
             let program = gl.create_program()?;
