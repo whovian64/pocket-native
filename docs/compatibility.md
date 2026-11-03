@@ -40,6 +40,7 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 
 | Game | Status | Tried on | Notes |
 |---|---|---|---|
+| Andro Dunos II | Starts | Reported: H700 (muOS), 0.4.6 | Full speed for the half minute its log covers, European version |
 | Animal Crossing: New Leaf | Playable | R36S, PC, reported: RG DS (Android), 0.4.6 | Tuned on the US version. A steady 30 fps on the RG DS, where its own bottom screen used to show the game's bottom screen at half the rate, fixed now. The first visit to town takes a few minutes building shaders. One report of things no longer drawing after a long session on a Mali-G31 handheld is being looked into |
 | Azure Striker Gunvolt: Striker Pack | Playable | Reported: RX6H, 0.2 | Frame skipping in the game select menu, fine in game |
 | Ben 10: Omniverse 2 | Slow | Reported: RG DS (Android), 0.4.6 | Doesn't run well, textures flicker all the time |
