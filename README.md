@@ -55,11 +55,10 @@ by fearkov. On top of them it adds:
 ## Games
 
 Pokémon Omega Ruby and Alpha Sapphire are the showcase and play well,
-and Super Mario 3D Land runs at about full speed on the H700 handhelds.
 Pokémon X and Y, Sun and Moon, Animal Crossing: New Leaf, Mario Kart 7,
 Smash, A Link Between Worlds and both Project X Zones are playable, and
 plenty more get somewhere. It's early days: a game nobody has tried may
-not boot at all.
+not boot at all Or might run at 60fps, we wont know till you try it
 
 The [compatibility list](docs/compatibility.md) has what's known for
 each game. Tried one that isn't on it? Please
