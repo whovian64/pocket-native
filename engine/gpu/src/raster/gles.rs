@@ -4839,6 +4839,12 @@ mod tests {
     }
 
     #[test]
+    fn a_game_program_gets_its_combiners_as_straight_code() {
+        let fragment = fragment_source(&[0u32; FRAGMENT_CONSTANTS], false, &[]);
+        assert!(!fragment.lines().any(|line| line.trim_start().starts_with("combine_stage(")), "the combiner stages went in as calls");
+    }
+
+    #[test]
     fn every_generic_stand_in_builds() {
         let gles = match Gles::new() {
             Ok(gles) => gles,

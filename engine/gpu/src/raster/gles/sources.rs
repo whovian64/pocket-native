@@ -682,8 +682,8 @@ pub(super) fn fragment_source(constants: &[u32; FRAGMENT_CONSTANTS], writes_dept
             out += &format!("const uint {name} = {}u;\n", constants[id.parse::<usize>().unwrap_or(0)]);
         } else if line.contains("noperspective in float in_depth") {
             out += "layout(location = 3) in float in_depth_w;\nlayout(location = 6) in float in_w;\n#define in_depth (in_depth_w / in_w)\n";
-        } else if line.starts_with("    combine_stage(") && constants[29] == 0 {
-            if line.starts_with("    combine_stage(0u") {
+        } else if line.trim_start().starts_with("combine_stage(") && constants[29] == 0 {
+            if line.trim_start().starts_with("combine_stage(0u") {
                 out += &combiner_source(constants);
             }
         } else {
