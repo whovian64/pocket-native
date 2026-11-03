@@ -227,9 +227,11 @@ again, or get the new kit by hand as in step 1.
 **The game isn't under Ports.** The folder is in the wrong place, or
 the frontend hasn't been restarted. The whole `Pocket Native` folder
 goes inside the ports folder. If it still doesn't show, your system may
-only list launchers sitting directly in the ports folder: move the
-`.sh` files and the `pocket-native` folder out of `Pocket Native`,
-side by side into the ports folder itself.
+only list launchers sitting directly in the ports folder. On ArkOS
+that's EmulationStation's **Scan Ports folder on boot** (Start > UI
+Settings), which is off by default: turn it on. Or move the `.sh` files
+and the `pocket-native` folder out of `Pocket Native`, side by side
+into the ports folder itself.
 
 **The game is listed but won't start.** The folder arrived in pieces.
 Delete it from the card and copy the whole folder again.
