@@ -436,10 +436,10 @@ impl Voice {
 
     /// what mixing needs of what the voice played this frame, which takes
     /// its gains' fades.
-    fn to_mix(&mut self) -> Option<VoiceMix> {
+    fn take_mix(&mut self) -> Option<VoiceMix> {
         let from = [0, 1, 2].map(|index| self.ramp[index].take());
         (self.enabled && (from.iter().any(Option::is_some) || self.gain.iter().any(|gains| *gains != [0.0; 4])))
-            .then(|| VoiceMix { frame: self.frame, gains: self.gain, from })
+            .then_some(VoiceMix { frame: self.frame, gains: self.gain, from })
     }
 }
 
@@ -573,7 +573,7 @@ impl Voices {
             if voice.enabled {
                 voice.play_frame(memory);
             }
-            mixing.extend(voice.to_mix());
+            mixing.extend(voice.take_mix());
             write_status(voice, memory, statuses + index as u32 * STATUS_SIZE);
         }
         mixing
@@ -1050,10 +1050,10 @@ mod tests {
         voice.frame = [[1000, 1000]; FRAME_SAMPLES];
         voice.ramp[0] = Some([0.0; 4]);
         voice.gain[0] = [1.0; 4];
-        let [mix, ..] = mix(&[voice.to_mix().unwrap()]);
+        let [mix, ..] = mix(&[voice.take_mix().unwrap()]);
         assert_eq!(mix[0], [0; 4]);
         assert_eq!(mix[FRAME_SAMPLES - 1], [1000; 4]);
-        let [again, ..] = super::mix(&[voice.to_mix().unwrap()]);
+        let [again, ..] = super::mix(&[voice.take_mix().unwrap()]);
         assert_eq!(again[0], [1000; 4], "the fade happens once");
     }
 }

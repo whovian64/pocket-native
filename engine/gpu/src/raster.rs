@@ -696,7 +696,7 @@ fn inspect<M: GpuMemory>(registers: &[u32], memory: &mut M, shaded: &[Vertex], v
     }
     static DUMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if n % 50 == 0 {
+    if n.is_multiple_of(50) {
         let (width, height) = (r(REG_TEXTURE0_DIMENSIONS) >> 16 & 0x7FF, r(REG_TEXTURE0_DIMENSIONS) & 0x7FF);
         let mut bytes = vec![0u8; (width * height * TextureFormat::from_raw(r(REG_TEXTURE0_FORMAT)).bits_per_pixel() / 8) as usize];
         memory.read(memory.translate(r(REG_TEXTURE0_ADDRESS) << 3), &mut bytes);
@@ -2633,6 +2633,18 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     stats.written
 }
 
+/// whether an error is new, to be logged the first time only: a draw that
+/// could not go to the GPU fails the same way every frame.
+pub(crate) fn first_time(error: &str) -> bool {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.len() >= 256 || seen.iter().any(|known| known == error) {
+        return false;
+    }
+    seen.push(error.to_owned());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3272,16 +3284,4 @@ mod tests {
         assert!(differing * 100 < drawn, "{differing} of {drawn} pixels differ");
         assert!(deepest < 1 << 8, "depth differs by {deepest}");
     }
-}
-
-/// whether an error is new, to be logged the first time only: a draw that
-/// could not go to the GPU fails the same way every frame.
-pub(crate) fn first_time(error: &str) -> bool {
-    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let mut seen = SEEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if seen.len() >= 256 || seen.iter().any(|known| known == error) {
-        return false;
-    }
-    seen.push(error.to_owned());
-    true
 }

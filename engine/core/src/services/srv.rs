@@ -2,7 +2,6 @@
 
 use crate::kernel::ipc::{CommandBuffer, Header};
 use crate::kernel::object::{ClientSession, KObject};
-use crate::kernel::sync::ResetType;
 use crate::System;
 
 #[derive(Default)]
@@ -83,7 +82,3 @@ pub fn notify(system: &mut System, id: u32) {
         }
     }
 }
-
-/// unused for now, kept so the reset-type import stays meaningful when
-/// notification events are added.
-pub const _NOTIFICATION_RESET: ResetType = ResetType::OneShot;

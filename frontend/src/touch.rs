@@ -301,7 +301,7 @@ impl Controls {
 
     /// the tools' middles and half widths, along the middle of the screens.
     fn tools(&self, font: &Font) -> Vec<([f32; 2], f32)> {
-        let ((w, h), screens) = self.around.map_or(((640, 480), [None, None]), |around| around);
+        let ((w, h), screens) = self.around.unwrap_or(((640, 480), [None, None]));
         let (w, h) = (w as f32, h as f32);
         let u = w.min(h) * 0.075;
         let y = if h > w { screens.iter().flatten().map(|a| (a[1] + a[3]) as f32).fold(0.0, f32::max) / 2.0 } else { h / 2.0 };

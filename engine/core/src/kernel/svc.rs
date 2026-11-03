@@ -5,7 +5,7 @@ use zakuro_common::result::errors;
 use zakuro_common::VAddr;
 use zakuro_cpu::Bus;
 
-use super::object::{KObject, ObjectId, CURRENT_PROCESS, CURRENT_THREAD};
+use super::object::{KObject, ObjectId, CURRENT_THREAD};
 use super::sync::{self, ArbitrationType, ResetType};
 use super::thread::{nanos_to_ticks, ThreadStatus, WaitResult, WaitSyscall, THREAD_EXIT_MAGIC};
 use crate::memory::{MemoryState, Permission};
@@ -1188,10 +1188,6 @@ impl super::Kernel {
 
 /// the address a thread returns to when its entry point falls off the end.
 pub const THREAD_EXIT_ADDRESS: VAddr = THREAD_EXIT_MAGIC;
-
-/// unused placeholder keeping CURRENT_PROCESS referenced until process
-/// handles are wired up.
-pub const _CURRENT_PROCESS: u32 = CURRENT_PROCESS;
 
 #[cfg(test)]
 mod tests {

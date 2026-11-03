@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use zakuro_common::result::{errors, ResultCode};
 
-use crate::kernel::ipc::{CommandBuffer, Descriptor, Header};
+use crate::kernel::ipc::{CommandBuffer, Header};
 use crate::kernel::thread::nanos_to_ticks;
 use crate::services::host_archive::{self, DirectoryEntry, FormatInfo, HostArchive};
 use crate::kernel::object::{ClientSession, KObject};
@@ -1196,10 +1196,6 @@ fn decode_path(system: &mut System, path_type: u32, path_size: u32, path_ptr: u3
         _ => "<invalid>".into(),
     }
 }
-
-/// kept so the descriptor helper stays in scope for the mapped-buffer replies
-/// above, which build their descriptors by hand.
-pub const _MAPPED_BUFFER_RW: u32 = Descriptor::static_buffer(0, 0);
 
 #[cfg(test)]
 mod tests {

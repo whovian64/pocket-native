@@ -63,16 +63,16 @@ impl Busy {
             let before = self.ticks.insert(tid, (name.clone(), ticks)).map_or(ticks, |(_, before)| before);
             used.push((ticks - before, name));
         }
-        used.sort_by(|a, b| b.0.cmp(&a.0));
+        used.sort_by_key(|&(ticks, _)| std::cmp::Reverse(ticks));
         let mut out: Vec<String> = used.iter().take(4).map(|(ticks, name)| format!("{name} {:.0}%", *ticks as f64 / seconds)).collect();
         let waited = zakuro_core::GPU_WAITED.swap(0, Ordering::Relaxed) as f64 / 1e6;
         out.push(format!("waiting on gpu {:.0}%", waited / seconds * 100.0));
         if let Some((gpu, loads)) = &self.gpu {
             let (sum, count, mhz) = (gpu.0.swap(0, Ordering::Relaxed), gpu.1.swap(0, Ordering::Relaxed), gpu.2.swap(0, Ordering::Relaxed));
-            if count > 0 {
+            if let (Some(load), Some(mhz)) = (sum.checked_div(count), mhz.checked_div(count)) {
                 out.push(if !loads {
-                    format!("GPU at {} MHz", mhz / count)
-                } else if mhz > 0 { format!("GPU {}% at {} MHz", sum / count, mhz / count) } else { format!("GPU {}%", sum / count) });
+                    format!("GPU at {mhz} MHz")
+                } else if mhz > 0 { format!("GPU {load}% at {mhz} MHz") } else { format!("GPU {load}%") });
             }
         }
         // what the game holds of the memory and what the system has left,
@@ -82,7 +82,7 @@ impl Busy {
         if let (Some(pages), Some(kib)) = (resident, available) {
             // SAFETY: a plain query
             let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
-            out.push(format!("memory {} MiB, {} MiB free", pages * page >> 20, kib >> 10));
+            out.push(format!("memory {} MiB, {} MiB free", (pages * page) >> 20, kib >> 10));
         }
         out.join(", ")
     }

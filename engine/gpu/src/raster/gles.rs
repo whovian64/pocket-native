@@ -2179,8 +2179,11 @@ impl Drop for Watched {
 /// from a fatal signal's handler: when the crashing thread was in the
 /// driver's compiler, writes what it compiled into the log and its
 /// fingerprint into the list the next runs leave out.
-/// SAFETY: on the crashing thread in its signal handler, log a file to write
-/// to; nothing here allocates
+///
+/// # Safety
+///
+/// on the crashing thread in its signal handler, log a file to write to;
+/// nothing here allocates
 pub unsafe fn note_compiler_crash(log: libc::c_int) {
     use std::sync::atomic::Ordering::Relaxed;
     if AT_COMPILER.thread.load(Relaxed) != libc::syscall(libc::SYS_gettid) {
@@ -4275,7 +4278,7 @@ fn count_build(vertex: &str, fragment: &str, waited: std::time::Duration, stages
             counts.repeated[index] += 1;
         }
     }
-    if counts.built % 10 == 0 {
+    if counts.built.is_multiple_of(10) {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / counts.built as f64;
         log::info!(
             "programs compiled: {}, on average {:.1} ms before compiling (the lock and looking for a saved copy), {:.1} ms until the vertex shader compiled, {:.1} ms until both had, {:.1} ms linking, slowest {:.0} ms; vertex shaders compiled before {} of {}, fragment shaders {}",
@@ -5247,7 +5250,7 @@ impl Gles {
     /// back first, those alone.
     fn retiled_sources(&self, texture: &DrawnTexture) -> Option<(Vec<(Option<usize>, i64, i64, i64)>, Vec<usize>)> {
         let kind = Kind::Color(ColorFormat::Rgba8);
-        if texture.format != ColorFormat::Rgba8 || texture.width % 8 != 0 || texture.height % 8 != 0 {
+        if texture.format != ColorFormat::Rgba8 || !texture.width.is_multiple_of(8) || !texture.height.is_multiple_of(8) {
             return None;
         }
         let (tile, len) = ((64 * kind.bytes()) as i64, texture.width * texture.height * kind.bytes());

@@ -157,7 +157,7 @@ impl Alsa {
             let recover = *alsa.get::<unsafe extern "C" fn(*mut u8, i32, i32) -> i32>(b"snd_pcm_recover\0").ok()?;
             let delay = *alsa.get::<unsafe extern "C" fn(*mut u8, *mut i64) -> i32>(b"snd_pcm_delay\0").ok()?;
             let mut pcm = std::ptr::null_mut();
-            if open(&mut pcm, b"default\0".as_ptr(), 0, 0) < 0 || set(pcm, 2, 3, 2, AUDIO_SAMPLE_RATE.round() as u32, 1, 150_000) < 0 {
+            if open(&mut pcm, c"default".as_ptr().cast(), 0, 0) < 0 || set(pcm, 2, 3, 2, AUDIO_SAMPLE_RATE.round() as u32, 1, 150_000) < 0 {
                 log::warn!("could not open the sound device, playing without sound");
                 return None;
             }

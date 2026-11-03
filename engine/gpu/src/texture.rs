@@ -496,7 +496,7 @@ mod tests {
     /// channels spread as the packing says, is what decode_texels makes.
     #[test]
     fn packed_texels_read_as_decoded() {
-        let data: Vec<u8> = (0..1024u32).map(|i| (i * 37 + 11 ^ i >> 3) as u8).collect();
+        let data: Vec<u8> = (0..1024u32).map(|i| ((i * 37 + 11) ^ (i >> 3)) as u8).collect();
         use TextureFormat::*;
         for format in [Rgb565, Rgba5551, Rgba4, L8, A8, L4, A4, La8, La4, Hilo8] {
             let size = (16 * 16 * format.bits_per_pixel() / 8) as usize;
@@ -532,7 +532,7 @@ mod tests {
     /// alpha as decoded.
     #[test]
     fn etc1a4_packs_as_etc1_and_its_alpha() {
-        let data: Vec<u8> = (0..16 * 16u32).map(|i| (i * 37 + 11 ^ i >> 3) as u8).collect();
+        let data: Vec<u8> = (0..16 * 16u32).map(|i| ((i * 37 + 11) ^ (i >> 3)) as u8).collect();
         let color: Vec<u8> = data.chunks(16).flat_map(|block| block[8..].to_vec()).collect();
         let (packing, packed) = pack_texels(&data, TextureFormat::Etc1A4, 16, 16).unwrap();
         assert_eq!(packing, Packing::Etc1A4);
