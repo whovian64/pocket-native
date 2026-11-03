@@ -143,6 +143,9 @@ exact_events = false      # exact event timing
 prewarm = true            # shader prewarm
 read_ahead = true         # ROM read-ahead
 background_shaders = true # new shaders compiled in the background
+stand_ins = false         # new things drawn plainly while their shaders build,
+                          # rather than left out
+new3ds = false            # a game with a New 3DS mode run as on a New 3DS
 ```
 
 Only the ones that differ from these need to be listed. A game's
