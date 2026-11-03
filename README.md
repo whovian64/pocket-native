@@ -4,6 +4,7 @@ Nintendo 3DS games on cheap handhelds and Android, rebuilt for them
 instead of emulated.
 
 **[Start here](START_HERE.md)** to play · [Which games work](docs/compatibility.md) ·
+[Handhelds](#handhelds) · [Systems](#systems) ·
 [Latest release](https://github.com/whovian64/pocket-native/releases/latest)
 
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fZ7Q9hmWCd)
@@ -53,10 +54,12 @@ by fearkov. On top of them it adds:
 
 ## Games
 
-Pokémon Omega Ruby and Alpha Sapphire are the showcase and play well.
-Pokémon X and Y, Sun and Moon, Animal Crossing: New Leaf and Mario Kart
-7 are playable, and plenty more get somewhere. It's early days: a game
-nobody has tried may not boot at all.
+Pokémon Omega Ruby and Alpha Sapphire are the showcase and play well,
+and Super Mario 3D Land runs at about full speed on the H700 handhelds.
+Pokémon X and Y, Sun and Moon, Animal Crossing: New Leaf, Mario Kart 7,
+Smash, A Link Between Worlds and both Project X Zones are playable, and
+plenty more get somewhere. It's early days: a game nobody has tried may
+not boot at all.
 
 The [compatibility list](docs/compatibility.md) has what's known for
 each game. Tried one that isn't on it? Please
@@ -65,26 +68,35 @@ working or not.
 
 ## Handhelds
 
-| Handheld | System | State |
-|---|---|---|
-| R36S and its clones | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones | The main target, developed and tested on an R36S with ArkOS |
-| Powkiddy RX6H | dArkOS for clones | Played by testers. No FN button: L3 does its job |
-| Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | Knulli, muOS | Played by testers: Super Mario 3D Land, A Link Between Worlds, Smash, Project X Zone 1 and 2, Shantae and the Pirate's Curse, Dragon Ball Z: Extreme Butoden, Kingdom Hearts 3D. Power's Balanced and Performance raise the GPU's clock too |
-| Miyoo Flip | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
-| Anbernic RG353 and RG503 | ArkOS | Buttons mapped, no tester report yet |
-| Anbernic RG52 Mini | dArkOS | Played by testers |
-| Anbernic RG351P | ArkOS | Buttons not found yet |
-| AYN Thor | Android | Works, both screens |
-| Anbernic RG DS | Android | Works, both screens |
-| Anbernic RG DS | Anbernic's Linux | Not yet: one screen only, buttons not found |
-| Anbernic RG DS | ROCKNIX | Played by a tester on both screens and both touch screens: Pokémon Alpha Sapphire at full speed |
-| Android phones | Android 11 or newer, 64-bit | Works, with touch controls or a gamepad |
-| R36S, RK3566 and H700 handhelds | ROCKNIX | Should start: the launcher hands sway's panel to the game, and pads numbering their buttons the usual way (the R36S's r36s_Gamepad among them) are read, as is the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. No tester report yet on these |
-| AmberELEC | | Not yet |
+| Handheld | Chip | Systems | State |
+|---|---|---|---|
+| R36S and its clones | RK3326, Mali-G31 | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones, ROCKNIX | The main target, developed and tested on an R36S with ArkOS |
+| Powkiddy RX6H | RK3326, Mali-G31 | dArkOS for clones | Played by testers. No FN button: L3 does its job. Its Mali driver crashes while building some games' shaders: from 0.5.0 the game notes the shader and gets past it on its next start |
+| Anbernic RG351P | RK3326, Mali-G31 | ArkOS | Buttons not found yet |
+| Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | H700, Mali-G31 | Knulli, muOS | Played by testers: Super Mario 3D Land, A Link Between Worlds, Smash, Project X Zone 1 and 2, Shantae and the Pirate's Curse, Dragon Ball Z: Extreme Butoden, Kingdom Hearts 3D, Pokémon Omega Ruby, Donkey Kong Country Returns 3D |
+| Anbernic RG353 and RG503 | RK3566, Mali-G52 | ArkOS, ROCKNIX | Buttons mapped, no tester report yet |
+| Miyoo Flip | RK3566, Mali-G52 | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
+| Anbernic RG52 Mini | RK3562 | dArkOS | Played by testers |
+| Anbernic RG DS | RK3568, Mali-G52, two screens | ROCKNIX, Android | Both screens and both touch screens. Played under ROCKNIX: Pokémon Alpha Sapphire at full speed. Anbernic's own Linux not yet: one screen only, buttons not found |
+| AYN Thor | Snapdragon 8 Gen 2, two screens | Android | Works, both screens |
+| Android phones | | Android | Works, with touch controls or a gamepad |
 
 Screens other than the R36S's 640x480 work: the layouts follow the
-panel's shape (16:9, square, 1024x768), and **Display > Rotation** turns
-the picture for a panel mounted sideways.
+panel's shape (16:9, square, 720x480, 1024x768), and **Display >
+Rotation** turns the picture for a panel mounted sideways.
+
+## Systems
+
+| System | State |
+|---|---|
+| ArkOS | The main target. Its EmulationStation lists the `Pocket Native` folder under Ports only with **Scan Ports folder on boot** on (Start > UI Settings) |
+| dArkOS, dArkOSRE, ArkOS and dArkOS for clones | Played by testers on R36S clones, the RX6H and the RG52 Mini |
+| Knulli | Played by testers on H700 handhelds. Ports run as root, with no sudo |
+| muOS | Played by testers on H700 handhelds. The screens go through `/dev/fb0`, muOS having no `libgbm`, and both of muOS's pads are read: its kernel's `muOS-Keys` and the one muOS makes itself. From 0.5.0 **Power**'s Balanced and Performance raise the H700's GPU clock as well as the CPU's |
+| spruceOS 4.2 | Played on the Miyoo Flip |
+| ROCKNIX | Played on the RG DS, with Mali's own driver. The launcher hands sway's panels to the game and back. Pads numbering their buttons the usual way are read (the R36S's `r36s_Gamepad` among them), and from 0.5.0 the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. On the R36S, its Mali driver crashed before the first picture until the 0.4.9 test build, Panfrost worked: not confirmed since |
+| Android 11 or newer, 64-bit | Works on phones, the AYN Thor and the RG DS, with one screen or two. On one RK3566 handheld 0.4.7 drew on the CPU, its driver refusing a kind of buffer: 0.5.0 uses the GPU there |
+| AmberELEC | Not yet |
 
 ### The RG DS under ROCKNIX
 

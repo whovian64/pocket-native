@@ -12,8 +12,9 @@ Essentially: get the kit, drop your games on `Build a game`, then copy
 the `Pocket Native` folder it makes to your handheld's card or add it in
 the Android app.
 
-Before you start, check [which games work](docs/compatibility.md) and
-[which devices](README.md#handhelds).
+Before you start, check [which games work](docs/compatibility.md),
+[which handhelds](README.md#handhelds) and
+[which systems](README.md#systems).
 
 ## What you need
 
@@ -221,6 +222,13 @@ Start it, wait until it says it's running, and build again.
 `aes_keys.txt` next to the game or in the kit's folder and build again,
 or decrypt the dump first (GodMode9: Decrypt file).
 
+**The build stops with "Killed" (`Killed signal terminated program
+cc1`).** The PC, or Docker's share of it, ran out of memory while
+compiling. Each compiler takes about a gigabyte: from 0.5.0 the build
+runs only as many at once as memory has room for. Before that, close
+other programs, or give Docker Desktop more memory or fewer CPUs in
+Settings > Resources, and build again.
+
 **The update can't reach GitHub.** Check the PC's connection and try
 again, or get the new kit by hand as in step 1.
 
@@ -251,6 +259,17 @@ Native, please report it.
 Most compatible** and **Restart game** first. The
 [compatibility list](docs/compatibility.md) says what's known for each
 game.
+
+**A game that ran well is slow now.** An advanced setting may have been
+changed: **Generic lighting** On, for one, makes Pokémon Sun and Moon
+run at a fifth of their speed on an R36S. **Reset to defaults** at the
+bottom of **Advanced settings**, then **Restart game**.
+
+**A game crashes while its shaders build, with `gles-compiler` in
+`log.txt`.** That's the GPU driver's own shader compiler crashing, as
+the RX6H's does on some games. From 0.5.0 the log names the shader and
+the next start leaves it out, so start the game again. Please send
+that first log, it shows what the driver can't take.
 
 ## Reporting a problem
 
