@@ -186,7 +186,12 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
             log::error!("could not open {path}");
             return;
         };
-        let ranges: [Option<(i32, i32)>; 6] = std::array::from_fn(|axis| sticks.and_then(|_| axis_range(&device, axis)));
+        let ranges: [Option<(i32, i32)>; 6] = std::array::from_fn(|axis| axis_range(&device, axis));
+        // InputPlumber's pad, as ROCKNIX gives the RK3566 handhelds from
+        // November 2026, a DualSense with sticks from 0 to 255
+        if sticks.is_none() && ranges.iter().flatten().any(|&(least, _)| least >= 0) {
+            log::info!("axes from 0 up, taken about their middle: {ranges:?}");
+        }
         // ROCKNIX's driver for them (the RG DS's too) gives the right stick
         // ABS_RX and ABS_RY, where ArkOS's gives it ABS_Z and ABS_RZ
         let sticks = if rk3566 && ranges[2].is_none() && ranges[5].is_none() && ranges[3].is_some() && ranges[4].is_some() {
@@ -263,7 +268,12 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
                         };
                     }
                 }
-                (3, None) if (code as usize) < pad.axes.len() => pad.axes[code as usize] = value,
+                (3, None) if (code as usize) < pad.axes.len() => {
+                    pad.axes[code as usize] = match ranges.get(code as usize).copied().flatten() {
+                        Some((least, most)) if least >= 0 => ((2 * value - least - most) as f32 / (most - least) as f32 * STICK) as i32,
+                        _ => value,
+                    }
+                }
                 _ => {}
             }
         }
