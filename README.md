@@ -191,7 +191,8 @@ details. It's off by default.
 | Path | What's in it |
 |---|---|
 | `engine/` | The Zakuro emulator: CPU, GPU, file systems, system services |
-| `engine/gpu/src/raster/gles.rs` | The OpenGL ES renderer |
+| `engine/gpu/src/raster/gles.rs` | The OpenGL ES renderer: surfaces, textures, draws and transfers |
+| `engine/gpu/src/raster/gles/` | Its parts: the GLSL (`sources.rs`), building programs and the compiler threads (`programs.rs`), getting pictures onto the panels (`display.rs`) |
 | `recompiler/` | 3dsrecomp, which turns a game's code into C |
 | `frontend/` | The `pocket-native` program: panel, input, sound, menu, probe |
 | `titles/<title id>/` | Per-game profiles and hand-written code overrides |
