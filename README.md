@@ -10,6 +10,13 @@ instead of emulated.
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fZ7Q9hmWCd)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/whovian64)
 
+## Now on ROCKNIX, and on muOS
+
+From 0.5.0 Pocket Native runs under ROCKNIX, the RG DS on both of its
+screens included. muOS on the H700 handhelds works too: testers have
+played Super Mario 3D Land at about full speed there, Smash, A Link
+Between Worlds, both Project X Zones and more. See [Systems](#systems).
+
 ## Now on Android
 
 Pocket Native now runs on Android too, on one screen or two, thanks to
@@ -58,7 +65,7 @@ Pokémon Omega Ruby and Alpha Sapphire are the showcase and play well,
 Pokémon X and Y, Sun and Moon, Animal Crossing: New Leaf, Mario Kart 7,
 Smash, A Link Between Worlds and both Project X Zones are playable, and
 plenty more get somewhere. It's early days: a game nobody has tried may
-not boot at all Or might run at 60fps, we wont know till you try it
+not boot at all, or it might run at 60 fps, we won't know till you try it.
 
 The [compatibility list](docs/compatibility.md) has what's known for
 each game. Tried one that isn't on it? Please
