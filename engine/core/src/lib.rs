@@ -1542,6 +1542,23 @@ mod tests {
         assert!((due..due + PREEMPT_INTERVAL).contains(&system.cpu.cycles), "replied at {}, due at {due}", system.cpu.cycles);
     }
 
+    /// a request with no other thread ready to run is answered at once, the
+    /// thread running on: an idle core would wait for the GPU.
+    #[test]
+    fn a_request_with_no_thread_below_keeps_running() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        let port = system.kernel.objects.insert(KObject::ClientPort("srv:".into()));
+        let handle = system.kernel.handles.create(&mut system.kernel.objects, port, "srv:");
+        let buffer = system.kernel.thread(id).tls + 0x80;
+        system.memory.write32(buffer, 0x0001_0002);
+        system.memory.write32(buffer + 4, 0x20);
+        system.cpu.regs[0] = handle;
+        kernel::svc::dispatch(&mut system, 0x32);
+        assert_eq!((system.cpu.regs[0], system.memory.read32(buffer + 4)), (0, 0), "answered");
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::Running, "running on");
+    }
+
     /// a timer fires at its tick, not at the next frame, and the thread on
     /// it wakes then. a pulse timer is gone once it woke a waiter, and comes
     /// again a period after it was due.
