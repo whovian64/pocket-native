@@ -70,7 +70,11 @@ Prefer a terminal? In the kit's folder:
 scripts/build.sh path/to/game.3ds path/to/other.cia --keys path/to/aes_keys.txt
 ```
 
-or `scripts\build.ps1` in PowerShell on Windows (`-Keys` for the keys).
+or on Windows, in PowerShell, with your own files' paths:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 C:\path\to\game.3ds -Keys C:\path\to\aes_keys.txt
+```
 
 ## 3. Put the games on your device
 
@@ -214,6 +218,11 @@ It does that for anything from the internet. Click **More info**, then
 manager doesn't run launchers it doesn't trust yet. Allow it when it
 asks, or in the file's properties, or run `scripts/build.sh` from a
 terminal.
+
+**PowerShell says `build.ps1` is not digitally signed.** PowerShell
+won't run scripts from the internet when started straight from it. Use
+`Build a game.bat`, or start the script with `-ExecutionPolicy Bypass`
+as above.
 
 **The Windows build can't reach Docker.** Docker Desktop isn't running.
 Start it, wait until it says it's running, and build again.

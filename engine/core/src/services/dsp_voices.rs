@@ -167,6 +167,9 @@ struct Filters {
 
 impl Filters {
     fn process(&mut self, samples: &mut [[i16; 2]]) {
+        if self.enabled & 3 == 0 {
+            return;
+        }
         for sample in samples {
             for (channel, out) in sample.iter_mut().enumerate() {
                 let mut value = *out as i32;
