@@ -164,7 +164,12 @@ impl Probe {
         // how busy the game keeps the console's CPU, which a lower CPU clock
         // only helps near the top of
         let instructions = (system.interpreted_instructions + system.recompiled_instructions) / ran.max(1);
-        let _ = writeln!(report, "- CPU: {instructions} instructions a frame, {:.0}% of the console's", instructions as f64 / zakuro_core::CYCLES_PER_FRAME as f64 * 100.0);
+        let in_place = system.recompiled.as_ref().map_or(0, |library| library.in_place()) / ran.max(1);
+        let _ = writeln!(
+            report,
+            "- CPU: {instructions} instructions a frame, {:.0}% of the console's, {in_place} svcs a frame run in place",
+            instructions as f64 / zakuro_core::CYCLES_PER_FRAME as f64 * 100.0
+        );
         let _ = writeln!(report, "- {}", stopped.map_or("Still running at the end".to_owned(), |outcome| format!("Stopped at frame {ran}: {outcome:?}")));
         report += "\n## Warnings and errors\n\nNumbers are written as #. Count, the frame it first came at, and the message.\n\n";
         let seen = RECORDER.get().map(|recorder| recorder.seen.lock().unwrap().clone()).unwrap_or_default();

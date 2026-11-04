@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define RECOMP_ABI 5
+#define RECOMP_ABI 6
 
 typedef struct Context Context;
 typedef void (*Code)(Context *);
@@ -24,6 +24,10 @@ typedef struct Host {
     void (*interpret)(Context *, uint32_t address, uint32_t opcode);
     /* the code for an address, bit 0 set for Thumb, or null. */
     Code (*lookup)(Context *, uint32_t address);
+    /* an svc, with r15 after it. the host runs it and the code goes on, or
+       sets exit, EXIT_SVC with svc for the host to run it once the code
+       stopped. */
+    void (*svc)(Context *, uint32_t number);
 } Host;
 
 /* why the code gave control back to the host. */
@@ -624,9 +628,9 @@ static inline void recomp_call(Context *ctx) {
 #define SVC(next, number) do { \
     RECOMP_SYNC_OUT(); \
     ctx->r[15] = (next); \
-    ctx->svc = (number); \
-    ctx->exit = EXIT_SVC; \
-    return; \
+    ctx->host->svc(ctx, (number)); \
+    if (UNLIKELY(ctx->exit)) return; \
+    RECOMP_SYNC_IN(); \
 } while (0)
 
 #define INTERPRET(address, opcode) do { \
