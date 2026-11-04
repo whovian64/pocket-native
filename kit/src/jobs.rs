@@ -225,23 +225,59 @@ pub fn stage_text(stage: &Stage) -> String {
     }
 }
 
-/// whether a container engine is there, and its name.
-pub fn engine() -> Option<&'static str> {
-    ["podman", "docker"].into_iter().find(|name| Command::new(name).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()))
+/// a command run quietly, with no console window of its own on Windows.
+fn quiet(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
 }
 
-/// the newer version out, from update's check, None when this one is the
-/// latest or it could not tell.
-pub fn newer_version(kit: &Path) -> Option<String> {
-    let output = if cfg!(windows) {
-        Command::new("powershell").args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(kit.join("scripts").join("update.ps1")).arg("-Check").current_dir(kit).output()
+/// the container engine the build uses, and whether it is running.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Engine {
+    Missing,
+    Stopped(&'static str),
+    Running(&'static str),
+}
+
+pub fn engine() -> Engine {
+    let order = if cfg!(windows) { ["docker", "podman"] } else { ["podman", "docker"] };
+    let Some(name) = order.into_iter().find(|name| quiet(name).arg("--version").status().is_ok_and(|s| s.success())) else { return Engine::Missing };
+    if quiet(name).arg("info").status().is_ok_and(|s| s.success()) {
+        Engine::Running(name)
     } else {
-        Command::new("bash").arg(kit.join("scripts").join("update.sh")).arg("--check").current_dir(kit).output()
+        Engine::Stopped(name)
     }
-    .ok()?;
+}
+
+/// Docker Desktop installed with winget, in a window of its own to follow.
+pub fn install_docker() -> std::io::Result<()> {
+    Command::new("cmd").args(["/c", "start", "powershell", "-NoExit", "-Command", "winget install -e --id Docker.DockerDesktop; Write-Host 'Start Docker Desktop, then press Check again in Pocket Native.'"]).spawn().map(drop)
+}
+
+/// what update's check says: the newer version out, None when this one is
+/// the latest, or an error when it could not tell.
+pub fn newer_version(kit: &Path) -> Result<Option<String>, ()> {
+    let mut command = if cfg!(windows) {
+        let mut command = quiet("powershell");
+        command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(kit.join("scripts").join("update.ps1")).arg("-Check");
+        command
+    } else {
+        let mut command = quiet("bash");
+        command.arg(kit.join("scripts").join("update.sh")).arg("--check");
+        command
+    };
+    let output = command.stdout(Stdio::piped()).current_dir(kit).output().map_err(drop)?;
+    if !output.status.success() {
+        return Err(());
+    }
     let text = String::from_utf8_lossy(&output.stdout);
-    let line = text.lines().find(|line| line.contains(" is out"))?;
-    line.split_whitespace().skip_while(|word| *word != "Native").nth(1).map(str::to_owned)
+    Ok(text.lines().find(|line| line.contains(" is out")).and_then(|line| line.split_whitespace().skip_while(|word| *word != "Native").nth(1).map(str::to_owned)))
 }
 
 #[cfg(test)]

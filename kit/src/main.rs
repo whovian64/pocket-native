@@ -11,7 +11,7 @@ use std::sync::mpsc::{channel, Receiver};
 
 use eframe::egui;
 use games::Game;
-use jobs::{Job, Kind};
+use jobs::{Engine, Job, Kind};
 
 fn main() -> eframe::Result {
     let kit = jobs::kit_root();
@@ -54,15 +54,16 @@ struct App {
     detecting: Option<Receiver<Game>>,
     job: Option<Job>,
     show_log: bool,
-    engine: Option<&'static str>,
-    newer: Option<Receiver<Option<String>>>,
-    update: Option<String>,
+    engine: Option<Engine>,
+    checking_engine: Option<Receiver<Engine>>,
+    newer: Option<Receiver<Result<Option<String>, ()>>>,
+    update: Option<Result<Option<String>, ()>>,
     message: Option<String>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext, kit: PathBuf) -> App {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         let (send, newer) = channel();
         let checking = kit.clone();
         std::thread::spawn(move || drop(send.send(jobs::newer_version(&checking))));
@@ -75,7 +76,8 @@ impl App {
             detecting: None,
             job: None,
             show_log: false,
-            engine: jobs::engine(),
+            engine: None,
+            checking_engine: Some(check_engine()),
             newer: Some(newer),
             update: None,
             message: None,
@@ -144,17 +146,23 @@ impl eframe::App for App {
         }
         if let Some(newer) = &self.newer {
             if let Ok(found) = newer.try_recv() {
-                self.update = found;
+                self.update = Some(found);
                 self.newer = None;
+            }
+        }
+        if let Some(checking) = &self.checking_engine {
+            if let Ok(engine) = checking.try_recv() {
+                self.engine = Some(engine);
+                self.checking_engine = None;
             }
         }
         if let Some(job) = &mut self.job {
             job.poll();
-            if job.finished.is_some() && job.kind == Kind::Update {
-                self.update = None;
+            if job.finished == Some(true) && job.kind == Kind::Update {
+                self.update = Some(Ok(None));
             }
         }
-        if self.running() || self.detecting.is_some() || self.newer.is_some() {
+        if self.running() || self.detecting.is_some() || self.newer.is_some() || self.checking_engine.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
@@ -164,23 +172,56 @@ impl eframe::App for App {
                 ui.heading("Pocket Native");
                 ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION")).weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match &self.update {
-                        Some(version) => {
+                    let version = match &self.update {
+                        Some(Ok(Some(version))) => Some(version.clone()),
+                        _ => None,
+                    };
+                    match (&self.update, version) {
+                        (_, Some(version)) => {
                             if ui.add_enabled(!self.running(), egui::Button::new(format!("Update to {version}"))).on_hover_text("Downloads the new version into this kit and builds every game in the build folder again").clicked() {
                                 self.start(Kind::Update);
                             }
                         }
-                        None if self.newer.is_some() => {
+                        (None, _) => {
                             ui.label(egui::RichText::new("checking for updates").weak());
                         }
-                        None => {
+                        (Some(Ok(_)), _) => {
                             ui.label(egui::RichText::new("up to date").weak());
                         }
+                        (Some(Err(())), _) => {}
                     }
+                    let warning = egui::Color32::from_rgb(230, 150, 60);
+                    let mut check_again = false;
                     match self.engine {
-                        Some(engine) => ui.label(egui::RichText::new(format!("builds with {engine}")).weak()),
-                        None => ui.colored_label(egui::Color32::from_rgb(230, 150, 60), "No Docker or Podman found: install Docker Desktop to build"),
-                    };
+                        None => {
+                            ui.label(egui::RichText::new("looking for Docker").weak());
+                        }
+                        Some(Engine::Running(engine)) => {
+                            ui.label(egui::RichText::new(format!("builds with {engine}")).weak());
+                        }
+                        Some(Engine::Stopped(engine)) => {
+                            check_again = ui.button("Check again").clicked();
+                            let name = if engine == "docker" { "Docker Desktop" } else { "Podman" };
+                            ui.colored_label(warning, format!("{name} isn't running: start it to build"));
+                        }
+                        Some(Engine::Missing) => {
+                            check_again = ui.button("Check again").clicked();
+                            if cfg!(windows) {
+                                if ui.button("Install Docker Desktop").clicked() {
+                                    if let Err(error) = jobs::install_docker() {
+                                        self.message = Some(format!("Could not start winget: {error}"));
+                                    }
+                                }
+                                ui.colored_label(warning, "The build needs Docker Desktop");
+                            } else {
+                                ui.colored_label(warning, "The build needs podman or Docker: install one with your package manager");
+                            }
+                        }
+                    }
+                    if check_again {
+                        self.engine = None;
+                        self.checking_engine = Some(check_engine());
+                    }
                 });
             });
             ui.add_space(6.0);
@@ -214,7 +255,7 @@ impl eframe::App for App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let selected = self.games.iter().filter(|game| game.selected).count();
-                let can = !self.running() && self.engine.is_some();
+                let can = !self.running() && matches!(self.engine, Some(Engine::Running(_)));
                 let build = egui::Button::new(egui::RichText::new(format!("Build {selected} game{}", if selected == 1 { "" } else { "s" })).size(18.0)).min_size(egui::vec2(160.0, 36.0));
                 if ui.add_enabled(can && selected > 0, build).clicked() {
                     self.start(Kind::Build);
@@ -294,6 +335,16 @@ impl eframe::App for App {
             });
         });
     }
+}
+
+/// the container engine looked for off the window's thread, as docker info
+/// can take a moment.
+fn check_engine() -> Receiver<Engine> {
+    let (send, receive) = channel();
+    std::thread::spawn(move || {
+        let _ = send.send(jobs::engine());
+    });
+    receive
 }
 
 /// the job's overall bar, a bar a game, and its log behind a button.
