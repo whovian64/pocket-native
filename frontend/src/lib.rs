@@ -565,11 +565,12 @@ pub fn run(mut args: Vec<String>) {
                 (last_fps, fps, fps_since) = (fps, 0, Instant::now());
             }
             let said = note.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(said, _)| said);
-            if second || said != status.as_ref().and_then(|status: &Status| status.note) {
+            let saving = zakuro_core::services::host_archive::saving();
+            if second || said != status.as_ref().and_then(|status: &Status| status.note) || saving != status.as_ref().is_some_and(|status| status.saving) {
                 let building = zakuro_gpu::compiling();
                 building_since = if building > 0 { building_since.or(Some(Instant::now())) } else { None };
                 let building = building_since.filter(|since| since.elapsed() >= Duration::from_secs(1)).map(|_| (building, zakuro_gpu::compiling_stand_ins()));
-                let now = Status::now(&settings, last_fps, said, building);
+                let now = Status::now(&settings, last_fps, said, building, saving);
                 if now != status {
                     overlay = now.as_ref().map(|now| {
                         let mut canvas = Canvas::new(&font, PANEL);

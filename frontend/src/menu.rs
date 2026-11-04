@@ -595,11 +595,14 @@ pub struct Status {
     /// how many shaders are still building, at the top left, and how many
     /// of the generic stand-ins of how many, a first run's long build.
     building: Option<(usize, (usize, usize))>,
+    /// the game writing its saves, at the top right, for the power to stay
+    /// on until they reached the card.
+    pub saving: bool,
 }
 
 impl Status {
     /// none when the settings show nothing.
-    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>, building: Option<(usize, (usize, usize))>) -> Option<Status> {
+    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>, building: Option<(usize, (usize, usize))>, saving: bool) -> Option<Status> {
         let read = |path: &str| std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse::<i64>().ok());
         let status = Status {
             fps: settings.show_fps.then(|| match read("/sys/class/thermal/thermal_zone0/temp") {
@@ -610,8 +613,9 @@ impl Status {
             clock: settings.show_clock.then(clock),
             note,
             building,
+            saving,
         };
-        (status.fps.is_some() || status.clock.is_some() || note.is_some() || building.is_some()).then_some(status)
+        (status.fps.is_some() || status.clock.is_some() || note.is_some() || building.is_some() || saving).then_some(status)
     }
 
     pub fn draw(&self, canvas: &mut Canvas, (width, height): (u32, u32)) {
@@ -633,6 +637,10 @@ impl Status {
             };
             canvas.fill([8.0, 8.0, 20.0 + canvas.measure(BIG, &line), 32.0], backing);
             canvas.text(BIG, &line, 14.0, 11.0, rgba(TEXT, 255), false);
+        }
+        if self.saving {
+            canvas.fill([width - 20.0 - canvas.measure(BIG, "Saving"), 8.0, width - 8.0, 32.0], backing);
+            canvas.text(BIG, "Saving", width - 14.0, 11.0, rgba(TEXT, 255), true);
         }
         if let Some(line) = &self.fps {
             canvas.fill([width - 20.0 - canvas.measure(BIG, line), top, width - 8.0, bottom], backing);

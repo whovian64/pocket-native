@@ -82,6 +82,7 @@ impl HostArchive {
     /// creates the archive empty, discarding anything already in it, both
     /// how a title makes its save the first time and how it wipes one.
     pub fn format(&self, info: FormatInfo) -> Result<(), ResultCode> {
+        wrote();
         if self.root.exists() {
             std::fs::remove_dir_all(&self.root).map_err(io_error)?;
         }
@@ -155,6 +156,7 @@ impl HostArchive {
     }
 
     pub fn create_file(&self, path: &str, size: u64) -> Result<(), ResultCode> {
+        wrote();
         let host = self.resolve(path)?;
         if host.exists() {
             return Err(errors::FS_FILE_ALREADY_EXISTS);
@@ -167,6 +169,7 @@ impl HostArchive {
     }
 
     pub fn delete_file(&self, path: &str) -> Result<(), ResultCode> {
+        wrote();
         let host = self.resolve(path)?;
         if !host.is_file() {
             return Err(errors::FS_FILE_NOT_FOUND);
@@ -175,6 +178,7 @@ impl HostArchive {
     }
 
     pub fn rename_file(&self, from: &str, to: &str) -> Result<(), ResultCode> {
+        wrote();
         let (from, to) = (self.resolve(from)?, self.resolve(to)?);
         if !from.is_file() {
             return Err(errors::FS_FILE_NOT_FOUND);
@@ -186,6 +190,7 @@ impl HostArchive {
     }
 
     pub fn create_directory(&self, path: &str) -> Result<(), ResultCode> {
+        wrote();
         let host = self.resolve(path)?;
         if host.exists() {
             return Err(errors::FS_DIRECTORY_ALREADY_EXISTS);
@@ -197,6 +202,7 @@ impl HostArchive {
     }
 
     pub fn delete_directory(&self, path: &str, recursive: bool) -> Result<(), ResultCode> {
+        wrote();
         let host = self.resolve(path)?;
         if !host.is_dir() || host == self.root {
             return Err(errors::FS_PATH_NOT_FOUND);
@@ -211,6 +217,7 @@ impl HostArchive {
     }
 
     pub fn rename_directory(&self, from: &str, to: &str) -> Result<(), ResultCode> {
+        wrote();
         let (from, to) = (self.resolve(from)?, self.resolve(to)?);
         if !from.is_dir() {
             return Err(errors::FS_PATH_NOT_FOUND);
@@ -263,8 +270,22 @@ pub fn read_at(path: &Path, offset: u64, buffer: &mut [u8]) -> usize {
     total
 }
 
+/// when the title last wrote to its saves, for the frontend to say so: the
+/// handheld should keep its power until what was written reached the card.
+static WROTE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn wrote() {
+    *WROTE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+}
+
+/// whether the title changed its saves in the last moment.
+pub fn saving() -> bool {
+    WROTE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1500))
+}
+
 /// writes data at offset, growing the file if needed.
 pub fn write_at(path: &Path, offset: u64, data: &[u8]) -> usize {
+    wrote();
     let result = std::fs::OpenOptions::new()
         .write(true)
         .open(path)
@@ -293,6 +314,7 @@ pub fn size_of(path: &Path) -> u64 {
 }
 
 pub fn set_size(path: &Path, size: u64) -> Result<(), ResultCode> {
+    wrote();
     std::fs::OpenOptions::new()
         .write(true)
         .open(path)
@@ -349,6 +371,7 @@ mod tests {
 
         let host = archive.open_file("/dir/data.bin", false).unwrap();
         assert_eq!(write_at(&host, 2, b"abcd"), 4);
+        assert!(saving(), "a write shows as saving");
         assert_eq!(size_of(&host), 6);
         let mut buffer = [0u8; 8];
         assert_eq!(read_at(&host, 0, &mut buffer), 6);
