@@ -540,6 +540,11 @@ public final class Launcher extends Activity {
             if (font != null) {
                 copy(open(tree, font.id), new File(new File(incoming, "sysdata"), "shared_font.bin"), "system font", font.size, progress);
             }
+            for (Document document : game) {
+                if (document.name.startsWith("vertex/")) {
+                    copy(open(tree, document.id), new File(incoming, document.name), "the game's shader list", document.size, progress);
+                }
+            }
             settle(incoming);
         }
         return found.size();
@@ -553,11 +558,17 @@ public final class Launcher extends Activity {
             code |= "title.so".equals(document.name);
         }
         if (rom && code) {
-            // the system font is in sysdata beside them
+            // the system font is in sysdata beside them, the shaders the
+            // kit found in the game in vertex
             List<Document> files = new ArrayList<>(here);
             for (Document document : here) {
                 if (document.folder && "sysdata".equals(document.name)) {
                     files.addAll(children(tree, document.id));
+                } else if (document.folder && "vertex".equals(document.name)) {
+                    for (Document shader : children(tree, document.id)) {
+                        shader.name = "vertex/" + shader.name;
+                        files.add(shader);
+                    }
                 }
             }
             found.add(files);
@@ -582,7 +593,7 @@ public final class Launcher extends Activity {
 
     /**
      * a pack file: a zip of a game's folder as the kit builds it, game.3ds,
-     * title.so and sysdata/shared_font.bin, in any folder inside it.
+     * title.so, sysdata/shared_font.bin and vertex/, in any folder inside it.
      */
     private int importPack(Uri uri, Progress progress) throws IOException {
         InputStream raw = getContentResolver().openInputStream(uri);
@@ -603,6 +614,8 @@ public final class Launcher extends Activity {
                     code = true;
                 } else if ("shared_font.bin".equals(name)) {
                     copy(zip, new File(new File(incoming, "sysdata"), name), "system font", entry.getSize(), progress);
+                } else if (entry.getName().contains("/vertex/") && !entry.isDirectory()) {
+                    copy(zip, new File(new File(incoming, "vertex"), name), "the game's shader list", entry.getSize(), progress);
                 }
             }
         }

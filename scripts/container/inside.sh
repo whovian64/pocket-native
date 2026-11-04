@@ -66,6 +66,10 @@ overrides=()
 [ -d "titles/$id/overrides" ] && overrides=(--overrides "titles/$id/overrides")
 RECOMP_CFLAGS=-DRECOMP_FASTMEM CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/release/3dsrecomp" build "$game" "/work/recomp/$id" "${overrides[@]}"
 
+echo "== finding the game's shaders"
+rm -rf /work/vertex
+"$CARGO_TARGET_DIR/release/3dsrecomp" shaders "$game" /work/vertex | tail -2 || echo "none found, they get built as the game needs them"
+
 if [ ! -f /work/shared_font.bin ]; then
     echo "== making the system font"
     curl -sSfL "$FONT_URL" -o /work/shared_font.app.romfs.h
@@ -84,6 +88,8 @@ python3 tools/third_party.py "$pn/THIRD_PARTY_LICENSES.txt" >/dev/null
 aarch64-linux-gnu-strip -o "$pn/games/$id/title.so" "/work/recomp/$id/$id.so"
 cp /work/shared_font.bin "$pn/games/$id/sysdata/shared_font.bin"
 cp "$game" "$pn/games/$id/game.3ds"
+rm -rf "${pn:?}/games/${id:?}/vertex"
+[ -f /work/vertex/vertex.txt ] && mkdir -p "$pn/games/$id/vertex" && cp /work/vertex/vertex.txt /work/vertex/*.pica "$pn/games/$id/vertex/"
 rm -f /work/game.*
 # FAT cards and Windows take no colons and a few other characters in a name
 launcher="$top/$(printf %s "${name:-$id}" | sed 's/: / - /g; s/[\\/:*?"<>|]//g').sh"

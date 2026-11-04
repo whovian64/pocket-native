@@ -160,7 +160,7 @@ impl Job {
                 Some(Stage::Tools)
             } else if rest.starts_with("recompiling") {
                 Some(Stage::Recompiling(0, 0))
-            } else if rest.starts_with("putting Pocket Native together") {
+            } else if rest.starts_with("putting Pocket Native together") || rest.starts_with("finding the game's shaders") {
                 Some(Stage::Packing)
             } else if rest.starts_with("done") {
                 Some(Stage::Done)
