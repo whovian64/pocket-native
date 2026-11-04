@@ -720,6 +720,24 @@ struct Screen {
     view_over_w: Vec4,
 }
 
+/// whether the framebuffer is upside down, the window's rows running from
+/// the top of the buffer down: bit 24 of GPUREG_FRAMEBUFFER_DIMENSIONS
+/// clear. titles set it, Star Fox 64 3D clears it for some passes.
+pub(crate) fn upside_down(registers: &[u32]) -> bool {
+    registers[REG_FRAMEBUFFER_DIMENSIONS] & (1 << 24) == 0
+}
+
+/// the buffer's real width and height, which the tile addressing uses. it
+/// is often padded past the viewport, and tiling at the viewport's width
+/// instead reads back as the image repeating down the screen. a viewport
+/// reaching past it makes it that much larger.
+fn buffer_size(registers: &[u32], (x, y, width, height): (f32, f32, f32, f32)) -> (u32, u32) {
+    let dimensions = registers[REG_FRAMEBUFFER_DIMENSIONS];
+    let right = (x + width).round() as i32;
+    let top = (y + height).round() as i32;
+    ((dimensions & 0x7FF).max(right.max(1) as u32), (((dimensions >> 12) & 0x3FF) + 1).max(top.max(1) as u32))
+}
+
 fn to_screen(vertex: Vertex, viewport: (f32, f32, f32, f32)) -> Option<Screen> {
     let (vx, vy, vw, vh) = viewport;
     let w = vertex.clip[3];
@@ -2340,15 +2358,21 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     // the format sits in bits 16-18 of the register, not the low bits, the low
     // half holds how many bytes a pixel takes.
     let target_format = ColorFormat::from_color_buffer((registers[REG_COLOR_BUFFER_FORMAT] >> 16) & 7);
-    // the buffer's real size, which the tile addressing uses, it is often
-    // padded past the viewport, and tiling at the viewport's width instead
-    // reads back as the image repeating down the screen.
-    let dimensions = registers[REG_FRAMEBUFFER_DIMENSIONS];
     let viewport_right = (viewport_x + viewport_width).round() as i32;
     let viewport_top = (viewport_y + viewport_height).round() as i32;
-    let buffer_width = (dimensions & 0x7FF).max(viewport_right.max(1) as u32);
-    let buffer_height = (((dimensions >> 12) & 0x3FF) + 1).max(viewport_top.max(1) as u32);
+    let (buffer_width, buffer_height) = buffer_size(registers, viewport);
     let (target_width, target_height) = (buffer_width, buffer_height);
+    // drawing stays inside the viewport, its rows turned over on a buffer
+    // upside down
+    let flip = upside_down(registers).then_some(buffer_height as f32);
+    if flip.is_some() && first_time("a buffer drawn upside down") {
+        log::info!("a buffer drawn upside down, its dimensions' bit 24 clear, at {:08X}", registers[REG_COLOR_BUFFER_ADDRESS] << 3);
+    }
+    let (bottom, top) = ((viewport_y.round() as i32).max(0), viewport_top.min(buffer_height as i32));
+    let (bottom, top) = match flip {
+        Some(_) => (buffer_height as i32 - top, buffer_height as i32 - bottom),
+        None => (bottom, top),
+    };
 
     // draws are far more frequent than fills or transfers (thousands per
     // second versus dozens), so this stays at trace level to keep debug
@@ -2400,11 +2424,10 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     let state = DrawState {
         target: ColorTarget {
             addr: target_addr,
-            // drawing stays inside the viewport.
             left: (viewport_x.round() as i32).max(0),
-            bottom: (viewport_y.round() as i32).max(0),
+            bottom,
             right: viewport_right.min(buffer_width as i32),
-            top: viewport_top.min(buffer_height as i32),
+            top,
             buffer_width,
             buffer_height,
             format: target_format,
@@ -2525,7 +2548,15 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     let mut triangles = Vec::new();
     for (ia, ib, ic) in triangle_indices {
         let polygon = clip_triangle([shaded[ia], shaded[ib], shaded[ic]]);
-        let screen: Vec<Screen> = polygon.iter().filter_map(|v| to_screen(*v, viewport)).collect();
+        // on a buffer upside down the window's rows run from its top, and the
+        // triangles that turns over cull as they would the right way up
+        let to_window = |vertex: &Vertex| {
+            to_screen(*vertex, viewport).map(|screen| match flip {
+                Some(height) => Screen { y: height - screen.y, ..screen },
+                None => screen,
+            })
+        };
+        let screen: Vec<Screen> = polygon.iter().filter_map(to_window).collect();
         if screen.len() < 3 || screen.len() != polygon.len() {
             clipped_away += 1;
             continue;
@@ -2533,7 +2564,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         if cull_mode != 0 {
             let [p, q, r] = [screen[0], screen[1], screen[2]];
             let counter_clockwise = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x) > 0.0;
-            if counter_clockwise == (cull_mode == 1) {
+            if (counter_clockwise != flip.is_some()) == (cull_mode == 1) {
                 culled += 1;
                 continue;
             }
@@ -2724,7 +2755,7 @@ mod tests {
         registers[REG_COLOR_BUFFER_ADDRESS] = COLOR >> 3;
         registers[REG_DEPTH_BUFFER_ADDRESS] = DEPTH >> 3;
         registers[REG_DEPTH_BUFFER_FORMAT] = 3;
-        registers[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (7 << 12);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (7 << 12) | 1 << 24;
         registers[REG_COLOR_BUFFER_WRITE] = 0xF;
         registers[REG_DEPTH_STENCIL_WRITE] = 0x3;
         registers[REG_DEPTH_COLOR_MASK] = 0xF << 8;
@@ -2753,6 +2784,37 @@ mod tests {
     const RED: Vec4 = [1.0, 0.0, 0.0, 1.0];
     const GREEN: Vec4 = [0.0, 1.0, 0.0, 1.0];
     const BLUE: Vec4 = [0.0, 0.0, 1.0, 1.0];
+
+    /// a buffer upside down, bit 24 of its dimensions clear, gets in its
+    /// first rows what the same draw puts in its last ones, and the same
+    /// triangles cull.
+    #[test]
+    fn a_buffer_upside_down_has_the_drawing_turned_over() {
+        let vertex = |x: f32, y: f32| Vertex { clip: [x, y, -0.5, 1.0], color: RED, texcoords: [[0.0; 2]; 3], quaternion: [0.0, 0.0, 0.0, 1.0], view: [0.0; 4] };
+        // the lower left of the window, wound counter-clockwise
+        let triangle = [vertex(-1.0, -1.0), vertex(0.5, -1.0), vertex(-1.0, 0.25)];
+        // which pixels it covers, row after row of memory
+        let drawn = |flag: u32, cull: u32| {
+            let mut registers = target_registers();
+            registers[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (7 << 12) | flag;
+            registers[REG_FACE_CULLING] = cull;
+            let mut memory = ConsoleMemory::default();
+            rasterize_shaded(&registers, &mut memory, &mut Resources::default(), &triangle);
+            let pixels = pixels(&mut memory);
+            (0..8).map(|row| (0..8).map(|x| pixels[(crate::format::morton_offset(x, row, 8, 4) / 4) as usize] != [0; 4]).collect()).collect::<Vec<Vec<bool>>>()
+        };
+        let upright = drawn(1 << 24, 0);
+        assert!(upright.iter().flatten().filter(|&&on| on).count() > 8, "too little drawn to tell");
+        assert!(upright[7].iter().any(|&on| on) && !upright[0].iter().any(|&on| on), "drawn at the bottom of the window");
+        let turned: Vec<Vec<bool>> = upright.iter().rev().cloned().collect();
+        assert_eq!(drawn(0, 0), turned);
+        // keeping the counter-clockwise ones keeps it either way up, keeping
+        // the clockwise ones drops it
+        assert_eq!(drawn(1 << 24, 2), upright);
+        assert_eq!(drawn(0, 2), turned);
+        assert!(drawn(1 << 24, 1).iter().flatten().all(|&on| !on));
+        assert!(drawn(0, 1).iter().flatten().all(|&on| !on));
+    }
 
     /// titles map depth with a scale of -1, so near is 1, and keep the
     /// nearer surface with a GREATER test against a buffer cleared to 0.
@@ -2844,7 +2906,7 @@ mod tests {
         registers[REG_VIEWPORT_HEIGHT] = float24(128.0);
         registers[REG_COLOR_BUFFER_ADDRESS] = BIG_COLOR >> 3;
         registers[REG_DEPTH_BUFFER_ADDRESS] = BIG_DEPTH >> 3;
-        registers[REG_FRAMEBUFFER_DIMENSIONS] = 256 | (255 << 12);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = 256 | (255 << 12) | 1 << 24;
         let mut memory = ConsoleMemory::default();
         let vertex = |x: f32, y: f32| Vertex { clip: [x, y, -0.5, 1.0], color: RED, texcoords: [[0.0; 2]; 3], quaternion: [0.0, 0.0, 0.0, 1.0], view: [0.0, 0.0, 0.0, 1.0] };
         let quad = [
@@ -3056,7 +3118,7 @@ mod tests {
         let mut registers = target_registers();
         registers[REG_VIEWPORT_WIDTH] = float24(SIZE as f32 / 2.0);
         registers[REG_VIEWPORT_HEIGHT] = float24(SIZE as f32 / 2.0);
-        registers[REG_FRAMEBUFFER_DIMENSIONS] = SIZE | ((SIZE - 1) << 12);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = SIZE | ((SIZE - 1) << 12) | 1 << 24;
 
         let mut seed = 1u32;
         let mut random = move |range: u32| {
@@ -3114,7 +3176,7 @@ mod tests {
         let mut registers = target_registers();
         registers[REG_VIEWPORT_WIDTH] = float24(SIZE as f32 / 2.0);
         registers[REG_VIEWPORT_HEIGHT] = float24(SIZE as f32 / 2.0);
-        registers[REG_FRAMEBUFFER_DIMENSIONS] = SIZE | ((SIZE - 1) << 12);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = SIZE | ((SIZE - 1) << 12) | 1 << 24;
         let corner = |x: f32, y: f32| Vertex {
             clip: [x, y, -0.5, 1.0],
             color: RED,
@@ -3221,7 +3283,7 @@ mod tests {
         registers[REG_VIEWPORT_XY] = 4 | 6 << 16;
         registers[REG_VIEWPORT_WIDTH] = float24(12.0);
         registers[REG_VIEWPORT_HEIGHT] = float24(12.0);
-        registers[REG_FRAMEBUFFER_DIMENSIONS] = SIZE | ((SIZE - 1) << 12);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = SIZE | ((SIZE - 1) << 12) | 1 << 24;
         registers[REG_DEPTH_COLOR_MASK] = 0xF << 8 | 1 | 4 << 4 | 1 << 12;
         registers[REG_VIEWPORT_DEPTH_RANGE] = float24(-1.0);
         registers[REG_DEPTHMAP_ENABLE] = 1;
