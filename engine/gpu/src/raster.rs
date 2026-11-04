@@ -1522,14 +1522,20 @@ struct Stencil {
 }
 
 impl Stencil {
-    fn read(registers: &[u32]) -> Option<Stencil> {
+    /// the stencil test, none when it does nothing. with bit 0 of
+    /// GPUREG_STENCIL_TEST clear it passes always, as the depth test does,
+    /// but its operations still change the buffer where it may be written:
+    /// Star Fox 64 3D counts its shadow volumes into the stencil that way.
+    fn read(registers: &[u32], writable: bool) -> Option<Stencil> {
         let test = registers[REG_STENCIL_TEST];
-        if test & 1 == 0 {
+        let op = registers[REG_STENCIL_OP];
+        let enabled = test & 1 != 0;
+        let changes = writable && (test >> 8) & 0xFF != 0 && op & 0x777 != 0;
+        if !enabled && !changes {
             return None;
         }
-        let op = registers[REG_STENCIL_OP];
         Some(Stencil {
-            function: Compare::from_raw(test >> 4),
+            function: if enabled { Compare::from_raw(test >> 4) } else { Compare::Always },
             write_mask: (test >> 8) as u8,
             reference: (test >> 16) as u8,
             compare_mask: (test >> 24) as u8,
@@ -1572,7 +1578,7 @@ impl DepthStencil {
         let format = registers[REG_DEPTH_BUFFER_FORMAT] & 0x3;
         let test = (mask & 1 != 0).then(|| Compare::from_raw(mask >> 4));
         let write_depth = writable && mask & (1 << 12) != 0;
-        let stencil = if format == 3 { Stencil::read(registers) } else { None };
+        let stencil = if format == 3 { Stencil::read(registers, writable) } else { None };
         if test.is_none() && !write_depth && stencil.is_none() {
             return None;
         }
@@ -2784,6 +2790,34 @@ mod tests {
     const RED: Vec4 = [1.0, 0.0, 0.0, 1.0];
     const GREEN: Vec4 = [0.0, 1.0, 0.0, 1.0];
     const BLUE: Vec4 = [0.0, 0.0, 1.0, 1.0];
+
+    /// with bit 0 of GPUREG_STENCIL_TEST clear the test passes always, but
+    /// its operations still change the stencil, as Star Fox 64 3D's shadow
+    /// volumes need: a draw marks where a later one testing it fills.
+    #[test]
+    fn the_stencil_changes_with_its_test_off() {
+        let vertex = |x: f32, y: f32| Vertex { clip: [x, y, -0.5, 1.0], color: RED, texcoords: [[0.0; 2]; 3], quaternion: [0.0, 0.0, 0.0, 1.0], view: [0.0; 4] };
+        // the lower left, its long edge through no pixel's center
+        let triangle = [vertex(-1.0, -1.0), vertex(1.1, -1.0), vertex(-1.0, 1.1)];
+        let mut alone = ConsoleMemory::default();
+        rasterize_shaded(&target_registers(), &mut alone, &mut Resources::default(), &triangle);
+        let expected = pixels(&mut alone);
+        assert!(expected.contains(&[0; 4]) && expected.contains(&[255, 0, 0, 255]));
+
+        let mut memory = ConsoleMemory::default();
+        // the triangle with no colors and the test off, replacing the
+        // stencil with 1 where it draws
+        let mut marking = target_registers();
+        marking[REG_DEPTH_COLOR_MASK] = 0;
+        marking[REG_STENCIL_TEST] = (1 << 4) | (0xFF << 8) | (1 << 16);
+        marking[REG_STENCIL_OP] = 2 << 8;
+        rasterize_shaded(&marking, &mut memory, &mut Resources::default(), &triangle);
+        // then all of the target where the stencil is 1
+        let mut testing = target_registers();
+        testing[REG_STENCIL_TEST] = 1 | (2 << 4) | (1 << 16) | (0xFF << 24);
+        rasterize_shaded(&testing, &mut memory, &mut Resources::default(), &cover(-0.5, RED));
+        assert_eq!(pixels(&mut memory), expected);
+    }
 
     /// a buffer upside down, bit 24 of its dimensions clear, gets in its
     /// first rows what the same draw puts in its last ones, and the same

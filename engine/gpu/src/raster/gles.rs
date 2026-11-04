@@ -4442,7 +4442,13 @@ impl Gles {
         let writable = r[REG_DEPTH_STENCIL_WRITE] != 0;
         let depth_test = mask & 1 != 0;
         let depth_write = writable && mask & (1 << 12) != 0;
-        let stencil_test = draw.depth.is_some_and(|(_, bytes)| bytes == 4) && r[REG_STENCIL_TEST] & 1 != 0;
+        // the stencil's operations apply with its test's bit clear too, the
+        // test then passing always, see Stencil::read
+        let stencil_test = draw.depth.is_some_and(|(_, bytes)| bytes == 4) && super::Stencil::read(r, writable).is_some();
+        let stencil_compare = match r[REG_STENCIL_TEST] & 1 {
+            0 => r[REG_STENCIL_TEST] & !0x70 | 0x10,
+            _ => r[REG_STENCIL_TEST],
+        };
         let blend = (r[REG_COLOR_OPERATION] & 0x100 != 0).then_some(r[REG_BLEND_FUNC]);
         let mut color_mask = color_mask;
         match LogicOp::read(r) {
@@ -4554,7 +4560,7 @@ impl Gles {
                 None
             },
             depth_mask: depth.is_some() && depth_write,
-            stencil: stencil_test.then(|| (r[REG_STENCIL_TEST], r[REG_STENCIL_OP] & 0x777, writable)),
+            stencil: stencil_test.then(|| (stencil_compare, r[REG_STENCIL_OP] & 0x777, writable)),
             bound,
             uniforms: words,
             vertex_array: self.vertex_array,
