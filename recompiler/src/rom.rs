@@ -286,7 +286,13 @@ impl Title {
         let program_id = u64_at(&header, 0x118);
         let exefs = ncch + u32_at(&header, 0x1A0) as u64 * MEDIA_UNIT;
         let romfs_offset = ncch + u32_at(&header, 0x1B0) as u64 * MEDIA_UNIT;
-        let has_romfs = u32_at(&header, 0x1B4) != 0 && flags[7] & 0x02 == 0;
+        let romfs_size = u32_at(&header, 0x1B4) as u64 * MEDIA_UNIT;
+        let has_romfs = romfs_size != 0 && flags[7] & 0x02 == 0;
+        let need = (ncch + u32_at(&header, 0x104) as u64 * MEDIA_UNIT).min(if has_romfs { romfs_offset + romfs_size } else { exefs + u32_at(&header, 0x1A4) as u64 * MEDIA_UNIT });
+        let have = file.metadata()?.len();
+        if have < need {
+            return error(format!("the dump is cut short, {} of the {} MiB the game needs: dump it again", have >> 20, need.div_ceil(1 << 20)));
+        }
 
         let ex = read(&mut file, ncch + NCCH_HEADER_SIZE, 0x400)?;
         let exheader = ExHeader {

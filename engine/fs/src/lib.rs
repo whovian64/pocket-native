@@ -57,6 +57,9 @@ pub enum FsError {
     #[error("the RomFS can't be read, the dump is still partly encrypted or damaged: {0}")]
     UnreadableRomFs(String),
 
+    #[error("the game file is cut short, {have} of the {need} MiB the game needs: copy it again, or dump it again if it is short on the PC too")]
+    CutShort { have: u64, need: u64 },
+
     #[error("ExeFS has no .code section")]
     NoCode,
 
@@ -143,6 +146,10 @@ impl Title {
 
         if !ncch.is_decrypted() && ncch.crypto_method() != 0 {
             return Err(FsError::Encrypted(ncch.crypto_method()));
+        }
+        let need = ncch_offset + ncch.content_size.min(if ncch.has_romfs() { ncch.romfs_offset + ncch.romfs_size } else { ncch.exefs_offset + ncch.exefs_size });
+        if (data.len() as u64) < need {
+            return Err(FsError::CutShort { have: data.len() as u64 >> 20, need: need.div_ceil(1 << 20) });
         }
 
         let exheader_raw = &ncch_data[NcchHeader::SIZE..NcchHeader::SIZE + ExHeader::HASHED_SIZE];
