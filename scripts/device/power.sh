@@ -13,7 +13,7 @@ set_to() { if [ "$(id -u)" = 0 ]; then echo "$2" > "$1"; else echo "$2" | sudo -
 # ROCKNIX keeps others than ArkOS, - for one a handheld lacks
 saved=/tmp/pocket-native-governors
 governor() { cat "$1/$2" 2>/dev/null || echo -; }
-[ "$1" = normal ] || [ -f "$saved" ] || echo "$(governor "$cpu" scaling_governor) $(governor "$gpu" governor) $(governor "$dmc" governor)" > "$saved"
+[ "$1" = normal ] || [ -f "$saved" ] || echo "$(governor "$cpu" scaling_governor) $(governor "$gpu" governor) $(governor "$dmc" governor) $(governor "$gpu" min_freq)" > "$saved"
 
 case "$1" in
     performance) governors="performance performance performance" ;;
@@ -27,6 +27,13 @@ set -- "$1" $governors
 set_to "$cpu/scaling_max_freq" "$(cat "$cpu/cpuinfo_max_freq")"
 [ "$2" = - ] || set_to "$cpu/scaling_governor" "$2"
 [ -n "$gpu" ] && [ "$3" != - ] && set_to "$gpu/governor" "$3"
+# the GPU's lowest speed raised to its top for the faster settings, which
+# holds it there where its driver gives on demand no load to go by, as the
+# H700's under Knulli stayed at 240 MHz; normal puts the lowest back
+case "$1" in
+    performance|balanced) [ -n "$gpu" ] && set_to "$gpu/min_freq" "$(cat "$gpu/max_freq" 2>/dev/null)" ;;
+    *) [ -n "$gpu" ] && [ "${5:--}" != - ] && set_to "$gpu/min_freq" "$5" ;;
+esac
 [ "$4" = - ] || set_to "$dmc/governor" "$4"
 [ "$1" = saver ] && set_to "$cpu/scaling_max_freq" 1200000
 exit 0
