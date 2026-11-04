@@ -328,11 +328,11 @@ impl Title {
     /// the code, the three segments one after another, decompressed.
     pub fn code(&self) -> Result<Vec<u8>, Error> {
         let raw = self.read(self.code.0, self.code.1 as usize)?;
-        if self.exheader.compress_code {
-            decompress(&raw)
-        } else {
-            Ok(raw)
+        let code = if self.exheader.compress_code { decompress(&raw)? } else { raw };
+        if gba_virtual_console(&code) {
+            return error("a GBA Virtual Console game: the 3DS runs these on its GBA hardware, there is no 3DS code to recompile");
         }
+        Ok(code)
     }
 
     /// up to len bytes of a RomFS file from offset.
@@ -370,6 +370,11 @@ fn read_romfs(
         files: table(file, 0x1C)?,
         data: level3 + u32_at(&header, 0x24) as u64,
     })
+}
+
+/// GBA Virtual Console code ends in ".CAA" and a 1, ahead of the GBA game it hands to the GBA hardware.
+fn gba_virtual_console(code: &[u8]) -> bool {
+    code.len() >= 16 && &code[code.len() - 16..code.len() - 12] == b".CAA" && u32_at(code, code.len() - 12) == 1
 }
 
 /// undoes the backwards LZSS the SDK compresses .code with, which works from
@@ -432,6 +437,17 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gba_virtual_console_code_is_told_apart() {
+        let mut code = vec![0; 64];
+        code[48..52].copy_from_slice(b".CAA");
+        code[52] = 1;
+        assert!(gba_virtual_console(&code));
+        code[52] = 0;
+        assert!(!gba_virtual_console(&code));
+        assert!(!gba_virtual_console(b".CAA"));
+    }
 
     /// a literal and a run, the smallest stream that exercises both.
     #[test]
