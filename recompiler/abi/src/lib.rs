@@ -11,7 +11,11 @@ use std::path::PathBuf;
 pub const HEADER: &str = include_str!("../recomp.h");
 
 /// the interface version, which code has to match to be run.
-pub const ABI: u32 = 5;
+pub const ABI: u32 = 6;
+
+/// the oldest version the host still runs, whose code stops at every svc
+/// and never reaches the host's.
+pub const OLDEST_ABI: u32 = 5;
 
 /// why the code gave control back.
 pub const EXIT_NONE: u32 = 0;
@@ -57,6 +61,7 @@ pub struct Host {
     pub write32: unsafe extern "C" fn(*mut Context, u32, u32),
     pub interpret: unsafe extern "C" fn(*mut Context, u32, u32),
     pub lookup: unsafe extern "C" fn(*mut Context, u32) -> Option<Code>,
+    pub svc: unsafe extern "C" fn(*mut Context, u32),
 }
 
 #[repr(C)]
@@ -204,7 +209,7 @@ impl Library {
 
     /// the code linked into the program.
     pub fn linked(linked: &Linked) -> Result<Library, String> {
-        if linked.abi != ABI {
+        if !(OLDEST_ABI..=ABI).contains(&linked.abi) {
             return Err(format!("it was built for version {} of the interface, this is {ABI}", linked.abi));
         }
         Ok(Library {
@@ -291,7 +296,7 @@ int main(void) {
     AT(Context, user);
     SIZE(Host);
     AT(Host, read8); AT(Host, read16); AT(Host, read32); AT(Host, write8);
-    AT(Host, write16); AT(Host, write32); AT(Host, interpret); AT(Host, lookup);
+    AT(Host, write16); AT(Host, write32); AT(Host, interpret); AT(Host, lookup); AT(Host, svc);
     SIZE(Entry);
     AT(Entry, address); AT(Entry, code);
     SIZE(Module);
@@ -339,7 +344,7 @@ int main(void) {
         let mut lines = Vec::new();
         at!(lines, Context, r, n, z, c, v, q, thumb, ge, exclusive, budget, exit, svc, depth, exclusive_address, tls,
             read_pages, write_pages, vfp, fpscr, host, user);
-        at!(lines, Host, read8, read16, read32, write8, write16, write32, interpret, lookup);
+        at!(lines, Host, read8, read16, read32, write8, write16, write32, interpret, lookup, svc);
         at!(lines, Entry, address, code);
         at!(lines, Module, name, base, size, count, entries);
         lines.push(format!("RECOMP_ABI {ABI}"));

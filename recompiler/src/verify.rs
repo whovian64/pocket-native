@@ -246,7 +246,15 @@ unsafe extern "C" fn lookup(ctx: *mut Context, address: u32) -> Option<Code> {
     unsafe { (*run_of(ctx).library).lookup(address) }
 }
 
-static HOST: Host = Host { read8, read16, read32, write8, write16, write32, interpret, lookup };
+/// an svc stops the code, where the interpreter stops too.
+unsafe extern "C" fn svc(ctx: *mut Context, number: u32) {
+    unsafe {
+        (*ctx).svc = number;
+        (*ctx).exit = abi::EXIT_SVC;
+    }
+}
+
+static HOST: Host = Host { read8, read16, read32, write8, write16, write32, interpret, lookup, svc };
 
 fn load(ctx: &Context, cpu: &mut Cpu) {
     cpu.regs = ctx.r;
