@@ -301,7 +301,10 @@ pub struct Gpu {
     pub skip_draws: bool,
     /// the most pictures the frontend skips in a row, and how many were.
     most_skipped: u32,
-    pictures_skipped: u32,
+    /// for each screen, offscreen, bottom and top, apart: a title drawing
+    /// the bottom screen between two top ones had the kept bottom start
+    /// the count over each time, and the top skipped for good
+    pictures_skipped: [u32; 3],
     /// the frame skips only because the panel will not show it, which
     /// leaves the bottom screen drawn: some titles draw it only in the
     /// frames between their top pictures.
@@ -431,7 +434,7 @@ impl Gpu {
             vertices_drawn: 0,
             skip_draws: false,
             most_skipped: 3,
-            pictures_skipped: 0,
+            pictures_skipped: [0; 3],
             keep_bottom: false,
             top_sent: false,
             top_sent_before: [false; 2],
@@ -1467,8 +1470,8 @@ impl Gpu {
             // whichever of its frames it starts in: a title making one every
             // other frame started each in a skipped one, Pokémon Moon on an
             // H700 showing one picture from then on
-            let skip_draws = self.skip_draws && !(screen == 1 && self.keep_bottom) && self.pictures_skipped < self.most_skipped.max(1);
-            self.pictures_skipped = if skip_draws { self.pictures_skipped + 1 } else { 0 };
+            let skip_draws = self.skip_draws && !(screen == 1 && self.keep_bottom) && self.pictures_skipped[screen as usize] < self.most_skipped.max(1);
+            self.pictures_skipped[screen as usize] = if skip_draws { self.pictures_skipped[screen as usize] + 1 } else { 0 };
             if skip_draws {
                 self.skipped_at = self.transfers;
             }
