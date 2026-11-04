@@ -27,15 +27,18 @@ def rol(x, n):
 
 def load_keys(path):
     k = {}
-    for line in open(path):
+    for line in open(path, encoding="utf-8-sig", errors="replace"):
         if "=" in line:
             name, val = line.strip().split("=", 1)
-            k[name.strip()] = int(val.strip(), 16)
+            k[name.strip().lower()] = int(val.strip(), 16)
     return k
 
 
 def normal_key(keys, slot, key_y):
-    x = keys[f"slot0x{slot:02X}KeyX"]
+    missing = [n for n in (f"slot0x{slot:02X}KeyX", "generator") if n.lower() not in keys]
+    if missing:
+        sys.exit(f"the aes_keys.txt given has no {' or '.join(missing)} line: it needs your console's full aes_keys.txt")
+    x = keys[f"slot0x{slot:02x}keyx"]
     return rol((rol(x, 2) ^ key_y) + keys["generator"] & M128, 87).to_bytes(16, "big")
 
 
