@@ -165,7 +165,7 @@ Every setting has a line of help at the bottom of the menu.
 
 - **Display:** layout (big top, side by side, one screen, original size
   and more), aspect ratio, render resolution, smooth scaling, frame
-  interpolation, fps counter, clock and battery, rotation
+  interpolation, fps counter, clock and battery, shader popup, rotation
 - **Performance:** frame cap (20, 30 or 60) and power (saver, balanced,
   performance)
 - **This game:** options from the game's profile, where it has some
