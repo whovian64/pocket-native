@@ -916,12 +916,14 @@ impl DrawJob {
                             cache.viewport = Some(viewport);
                         }
                         if cache.cull != Some(cull) {
-                            match cull {
+                            // bit 2 a buffer upside down, its triangles wound
+                            // the other way round in the window
+                            match cull & 3 {
                                 0 => gl.disable(glow::CULL_FACE),
-                                cull => {
+                                mode => {
                                     gl.enable(glow::CULL_FACE);
-                                    gl.front_face(glow::CCW);
-                                    gl.cull_face(if cull == 1 { glow::FRONT } else { glow::BACK });
+                                    gl.front_face(if cull & 4 != 0 { glow::CW } else { glow::CCW });
+                                    gl.cull_face(if mode == 1 { glow::FRONT } else { glow::BACK });
                                 }
                             }
                             cache.cull = Some(cull);
@@ -1867,6 +1869,20 @@ impl Gles {
         }
         self.preloading = false;
         log::info!("{count} generic programs for {shaders} vertex shaders from {} to prepare, handed out in {:.1} s", list.display(), started.elapsed().as_secs_f64());
+    }
+
+    /// a vertex program's variant for a buffer upside down, y turned over
+    /// where it leaves the program, under a hash of its own so that the
+    /// programs of buffers the right way up stay as they were.
+    fn flipped(&mut self, vertex: u64) -> u64 {
+        const FROM: &str = "gl_Position = vec4(position.xy,";
+        let flipped = vertex ^ 1 << 63;
+        if !self.vertex_sources.contains_key(&flipped) {
+            let Some(source) = self.vertex_sources.get(&vertex).filter(|source| source.contains(FROM)) else { return vertex };
+            let source = source.replace(FROM, "gl_Position = vec4(position.x, -position.y,");
+            self.vertex_sources.insert(flipped, source);
+        }
+        flipped
     }
 
     pub fn name(&self) -> &str {
@@ -4304,9 +4320,14 @@ impl Gles {
             Geometry::Shaded(shading) => self.vertex_stage(shading.unit, shading.semantics)?,
             Geometry::Triangles(_) => 0,
         };
+        // a buffer upside down: its vertex program's own variant, y turned
+        // over, the viewport mirrored and the winding with it. the CPU placed
+        // its own triangles that way already
+        let flip = matches!(draw.geometry, Geometry::Shaded(_)) && super::upside_down(draw.registers);
+        let vertex = if flip { self.flipped(vertex) } else { vertex };
 
         let (cull, count) = match draw.geometry {
-            Geometry::Shaded(shading) => (shading.cull, shading.indices.len()),
+            Geometry::Shaded(shading) => (shading.cull | (flip as u32) << 2, shading.indices.len()),
             Geometry::Triangles(triangles) => (0, triangles.len() * 3),
         };
         let r = draw.registers;
@@ -4485,7 +4506,13 @@ impl Gles {
         let writable = r[REG_DEPTH_STENCIL_WRITE] != 0;
         let depth_test = mask & 1 != 0;
         let depth_write = writable && mask & (1 << 12) != 0;
-        let stencil_test = draw.depth.is_some_and(|(_, bytes)| bytes == 4) && r[REG_STENCIL_TEST] & 1 != 0;
+        // the stencil's operations apply with its test's bit clear too, the
+        // test then passing always, see Stencil::read
+        let stencil_test = draw.depth.is_some_and(|(_, bytes)| bytes == 4) && super::Stencil::read(r, writable).is_some();
+        let stencil_compare = match r[REG_STENCIL_TEST] & 1 {
+            0 => r[REG_STENCIL_TEST] & !0x70 | 0x10,
+            _ => r[REG_STENCIL_TEST],
+        };
         let blend = (r[REG_COLOR_OPERATION] & 0x100 != 0).then_some(r[REG_BLEND_FUNC]);
         let mut color_mask = color_mask;
         match LogicOp::read(r) {
@@ -4520,6 +4547,7 @@ impl Gles {
             },
             Geometry::Shaded(shading) => {
                 let (x, y, width, height) = shading.viewport;
+                let y = if flip { draw.height as f32 - y - height } else { y };
                 let viewport = [(x * k).round() as i32, ((y + raise as f32) * k).round() as i32, (width * k).round() as i32, (height * k).round() as i32];
                 let shaded = timed(16);
                 let (uniforms, inputs, stride) = Self::shading_bytes(shading, depth_map);
@@ -4577,7 +4605,7 @@ impl Gles {
                     }
                 };
                 drop(shaded);
-                Submit::Shaded { viewport, cull: shading.cull, uniforms, attributes, indices, count: kept as i32, range, resident_indices }
+                Submit::Shaded { viewport, cull, uniforms, attributes, indices, count: kept as i32, range, resident_indices }
             }
         };
         static CULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -4596,7 +4624,7 @@ impl Gles {
                 None
             },
             depth_mask: depth.is_some() && depth_write,
-            stencil: stencil_test.then(|| (r[REG_STENCIL_TEST], r[REG_STENCIL_OP] & 0x777, writable)),
+            stencil: stencil_test.then(|| (stencil_compare, r[REG_STENCIL_OP] & 0x777, writable)),
             bound,
             uniforms: words,
             vertex_array: self.vertex_array,

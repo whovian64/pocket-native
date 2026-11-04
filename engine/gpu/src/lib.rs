@@ -1897,7 +1897,7 @@ mod tests {
         write(REG_VIEWPORT_WIDTH, float24(4.0));
         write(REG_VIEWPORT_HEIGHT, float24(4.0));
         write(REG_COLOR_BUFFER_ADDRESS, COLOR_BUFFER >> 3);
-        write(REG_FRAMEBUFFER_DIMENSIONS, 8 | (7 << 12));
+        write(REG_FRAMEBUFFER_DIMENSIONS, 8 | (7 << 12) | 1 << 24);
         // color writes allowed, all four channels.
         write(REG_COLOR_BUFFER_WRITE, 0xF);
         write(REG_DEPTH_COLOR_MASK, 0xF << 8);
