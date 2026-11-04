@@ -28,6 +28,7 @@ pub mod image;
 pub mod overrides;
 pub mod port;
 pub mod rom;
+pub mod shaders;
 pub mod thumb;
 #[cfg(feature = "verify")]
 pub mod verify;

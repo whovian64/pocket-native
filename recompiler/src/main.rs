@@ -22,6 +22,7 @@ usage, 3dsrecomp analyze <rom>
        3dsrecomp build <rom> [<dir>] [--overrides <file or dir>]
        3dsrecomp port <rom> <dir> [--overrides <file or dir>] [--name <name>] [--zakuro <checkout>]
        3dsrecomp verify <rom> <library> [count]
+       3dsrecomp shaders <rom> [<dir>]
 
 build without a dir works in the cache and installs the library where
 Zakuro finds it on its own.";
@@ -64,6 +65,8 @@ fn main() {
         ["build", rom] => build(rom, None, &options),
         ["build", rom, dir] => build(rom, Some(Path::new(dir)), &options),
         ["port", rom, dir] => port(rom, Path::new(dir), &options),
+        ["shaders", rom] => shaders(rom, None),
+        ["shaders", rom, dir] => shaders(rom, Some(Path::new(dir))),
         #[cfg(feature = "verify")]
         ["verify", rom, library] => check(rom, Path::new(library), 500),
         #[cfg(feature = "verify")]
@@ -443,4 +446,29 @@ impl Totals {
             self.dead_ends
         );
     }
+}
+
+/// the title's shader binaries, and with a folder each one's words written
+/// there with an index, for what a run's shader list holds to be checked
+/// against.
+fn shaders(rom: &str, dir: Option<&Path>) {
+    let title = Title::load(rom).unwrap_or_else(|e| {
+        eprintln!("{rom}: {e}");
+        exit(1);
+    });
+    let found = recomp3ds::shaders::find(&title);
+    let mut index = String::new();
+    for (n, shbin) in found.iter().enumerate() {
+        let entries: Vec<String> = shbin.entries.iter().map(|e| format!("{}{:x}-{:x}", if e.geometry { "g" } else { "v" }, e.main, e.end)).collect();
+        println!("{n:4} {:5} words {:3} descriptors {} {}", shbin.code.len(), shbin.descriptors.len(), entries.join(","), shbin.source);
+        index += &format!("{n}\t{}\t{}\t{}\n", shbin.code.len(), entries.join(","), shbin.source);
+        if let Some(dir) = dir {
+            let words: Vec<u8> = shbin.code.iter().chain(&shbin.descriptors).flat_map(|w| w.to_le_bytes()).collect();
+            let _ = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(format!("{n}.bin")), words));
+        }
+    }
+    if let Some(dir) = dir {
+        let _ = std::fs::write(dir.join("index.tsv"), index);
+    }
+    println!("{} shader binaries, {} shaders", found.len(), found.iter().map(|s| s.entries.len()).sum::<usize>());
 }
