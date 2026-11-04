@@ -1847,9 +1847,13 @@ impl Gles {
             }
             let Ok(vertex) = self.vertex_stage(unit, super::output_semantics(&registers)) else { continue };
             shaders += 1;
+            // lit draws need the surface's orientation, which a shader that
+            // hands out no quaternion cannot have given them
+            let lit = map.iter().filter_map(|word| hex(word)).any(|word| word.to_le_bytes().iter().any(|&semantic| (4..=7).contains(&(semantic & 0x1F))));
             for writes_depth in [false, true] {
                 for unbordered in [0, 0x400] {
-                    for lighting in [0, 1] {
+                    for lighting in if lit { &[0, 1][..] } else { &[0][..] } {
+                        let lighting = *lighting;
                         let mut constants = [0u32; FRAGMENT_CONSTANTS];
                         constants[25] = unbordered;
                         constants[26] = lighting;
