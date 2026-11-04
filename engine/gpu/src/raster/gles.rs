@@ -1672,7 +1672,9 @@ impl Gles {
             };
             gles.prepare_helpers();
             gles.preload();
+            gles.preload_vertex_list();
             gles.prepare_stand_ins();
+            PREPARING.store(compiling(), std::sync::atomic::Ordering::Relaxed);
             Ok(gles)
         }
     }
@@ -1779,7 +1781,13 @@ impl Gles {
                 lighting.pack(&mut packed);
             }
             let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
-            let (constants, lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
+            let (mut constants, mut lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
+            // generic, the draws take the generic program with their vertex
+            // program, not the one their setup would have
+            if self.generic {
+                constants = generic_constants(&constants);
+                lighting.clear();
+            }
             let began = std::time::Instant::now();
             match self.program(&constants, writes_depth, &lighting, vertex, !queue, None) {
                 Ok(_) => count += 1,
@@ -1788,7 +1796,6 @@ impl Gles {
             programs += began.elapsed();
         }
         self.preloading = false;
-        PREPARING.store(if queue { count } else { 0 }, std::sync::atomic::Ordering::Relaxed);
         log::info!(
             "{count} shaders from {} to prepare, handed out in {:.1} s: {:.1} s translating vertex programs, {:.1} s handing out programs",
             path.display(),
@@ -1796,6 +1803,66 @@ impl Gles {
             translating.as_secs_f64(),
             programs.as_secs_f64(),
         );
+    }
+
+    /// generic, the vertex shaders the kit found in the game's files, each
+    /// with every generic program, the list ZAKURO_VERTEX_LIST names
+    /// (3dsrecomp shaders writes it), so that nothing is built in game.
+    fn preload_vertex_list(&mut self) {
+        let Some(list) = std::env::var_os("ZAKURO_VERTEX_LIST").map(std::path::PathBuf::from).filter(|_| self.generic) else { return };
+        let Ok(text) = std::fs::read_to_string(&list) else { return };
+        if text.lines().next() != Some("pocket-native vertex 1") {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let dir = list.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let queue = self.compiler.is_some();
+        let mut units: HashMap<String, Option<ShaderUnit>> = HashMap::new();
+        let (mut shaders, mut count) = (0, 0);
+        self.preloading = true;
+        for line in text.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [file, entry, mask, total, map @ ..] = fields.as_slice() else { continue };
+            let hex = |field: &str| u32::from_str_radix(field, 16).ok();
+            let (Some(entry), Some(mask), Ok(total)) = (hex(entry), hex(mask), total.parse::<u32>()) else { continue };
+            if map.len() != 7 {
+                continue;
+            }
+            let unit = units.entry((*file).to_owned()).or_insert_with(|| {
+                let bytes = std::fs::read(dir.join(format!("{file}.pica"))).ok().filter(|bytes| bytes.len() == (PROGRAM_SIZE + DESCRIPTOR_SIZE) * 4)?;
+                let mut unit = ShaderUnit::new();
+                for (word, chunk) in unit.program.iter_mut().chain(unit.descriptors.iter_mut()).zip(bytes.as_chunks::<4>().0) {
+                    *word = u32::from_le_bytes(*chunk);
+                }
+                unit.prepare();
+                Some(unit)
+            });
+            let Some(unit) = unit else { continue };
+            unit.entry_point = entry;
+            let mut registers = [0u32; 0x300];
+            registers[crate::registers::REG_SHADER_OUTPUT_TOTAL] = total;
+            registers[crate::registers::REG_VS_OUTPUT_MASK] = mask;
+            for (register, word) in map.iter().enumerate() {
+                registers[crate::registers::REG_SHADER_OUTPUT_MAP + register] = hex(word).unwrap_or(0x1F1F_1F1F);
+            }
+            let Ok(vertex) = self.vertex_stage(unit, super::output_semantics(&registers)) else { continue };
+            shaders += 1;
+            for writes_depth in [false, true] {
+                for unbordered in [0, 0x400] {
+                    for lighting in [0, 1] {
+                        let mut constants = [0u32; FRAGMENT_CONSTANTS];
+                        constants[25] = unbordered;
+                        constants[26] = lighting;
+                        constants[28] = if writes_depth { WRITES_DEPTH } else { 0 };
+                        if self.program(&generic_constants(&constants), writes_depth, &[], vertex, !queue, None).is_ok() {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.preloading = false;
+        log::info!("{count} generic programs for {shaders} vertex shaders from {} to prepare, handed out in {:.1} s", list.display(), started.elapsed().as_secs_f64());
     }
 
     pub fn name(&self) -> &str {

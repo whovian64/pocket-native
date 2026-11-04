@@ -469,6 +469,10 @@ fn shaders(rom: &str, dir: Option<&Path>) {
     }
     if let Some(dir) = dir {
         let _ = std::fs::write(dir.join("index.tsv"), index);
+        match recomp3ds::shaders::write_vertex_list(&found, dir) {
+            Ok(count) => println!("{count} vertex shaders listed in {}", dir.join("vertex.txt").display()),
+            Err(error) => eprintln!("could not write the vertex list: {error}"),
+        }
     }
     println!("{} shader binaries, {} shaders", found.len(), found.iter().map(|s| s.entries.len()).sum::<usize>());
 }

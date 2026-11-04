@@ -23,6 +23,64 @@ pub struct Entry {
     pub outputs: Vec<(u16, u16, u32)>,
 }
 
+impl Entry {
+    /// the output map a game sets for the entry, worked out from its table
+    /// as libctru's shader programs do: the output registers used, how many,
+    /// and each one's four semantics, 0x1F where none.
+    pub fn outmap(&self) -> (u32, u32, [u32; 7]) {
+        let mut map = [0x1F1F_1F1Fu32; 7];
+        let mut mask = 0u32;
+        for &(kind, register, components) in &self.outputs {
+            let register = register as usize;
+            if register >= 7 {
+                continue;
+            }
+            mask |= 1 << register;
+            let (mut semantic, mut left) = match kind {
+                0 => (0x00, 4),
+                1 => (0x04, 4),
+                2 => (0x08, 4),
+                3 => (0x0C, 2),
+                4 => (0x10, 1),
+                5 => (0x0E, 2),
+                6 => (0x16, 2),
+                8 => (0x12, 3),
+                _ => continue,
+            };
+            for component in 0..4 {
+                if left > 0 && components & (1 << component) != 0 {
+                    map[register] = (map[register] & !(0xFF << (component * 8))) | semantic << (component * 8);
+                    semantic += 1;
+                    left -= 1;
+                }
+            }
+        }
+        (mask, mask.count_ones(), map)
+    }
+}
+
+/// the vertex shaders found, for the engine to build at a start: each
+/// binary's program and descriptors as the GPU's shader memory holds them,
+/// and a list of where each shader starts and its output map.
+pub fn write_vertex_list(found: &[Shbin], dir: &std::path::Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    let mut list = String::from("pocket-native vertex 1\n");
+    let mut count = 0;
+    for (n, shbin) in found.iter().enumerate() {
+        let mut words = vec![0u32; 4096 + 128];
+        words[..shbin.code.len()].copy_from_slice(&shbin.code);
+        words[4096..4096 + shbin.descriptors.len()].copy_from_slice(&shbin.descriptors);
+        std::fs::write(dir.join(format!("{n}.pica")), words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())?;
+        for entry in shbin.entries.iter().filter(|entry| !entry.geometry) {
+            let (mask, total, map) = entry.outmap();
+            list += &format!("{n} {:x} {mask:x} {total} {}\n", entry.main, map.map(|word| format!("{word:x}")).join(" "));
+            count += 1;
+        }
+    }
+    std::fs::write(dir.join("vertex.txt"), list)?;
+    Ok(count)
+}
+
 /// files up to this size are read whole and searched.
 const LARGEST: u64 = 2 << 30;
 
@@ -332,6 +390,13 @@ fn garc(data: &[u8]) -> Option<Vec<(usize, usize)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_maps_its_outputs_as_libctru_does() {
+        // position in o0, color in o1, texcoord0 in o2's xy
+        let entry = Entry { geometry: false, main: 0, end: 0, outputs: vec![(0, 0, 0xF), (2, 1, 0xF), (3, 2, 0x3)] };
+        assert_eq!(entry.outmap(), (0b111, 3, [0x0302_0100, 0x0B0A_0908, 0x1F1F_0D0C, 0x1F1F_1F1F, 0x1F1F_1F1F, 0x1F1F_1F1F, 0x1F1F_1F1F]));
+    }
 
     #[test]
     fn lz11_unpacks_literals_and_copies() {

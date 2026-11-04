@@ -41,15 +41,15 @@ pub fn compiling() -> usize {
     BUILDING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// the shaders the game's list had the start hand out.
+/// the programs the start handed out: the game's list, the vertex list's
+/// and the stand-ins.
 pub(super) static PREPARING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// the shaders the game's list had the start build and how many of them
-/// are still building, for the frontend to show before the game starts.
+/// the programs the start handed out and how many of them are still
+/// building, for the frontend to show before the game starts.
 pub fn preparing() -> (usize, usize) {
     let total = PREPARING.load(std::sync::atomic::Ordering::Relaxed);
-    let left = BUILDING.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(BUILDING_STAND_INS.load(std::sync::atomic::Ordering::Relaxed));
-    (total, left.min(total))
+    (total, BUILDING.load(std::sync::atomic::Ordering::Relaxed).min(total))
 }
 
 /// the generic stand-ins of those, which a first run, or one after an
