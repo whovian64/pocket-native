@@ -41,6 +41,17 @@ pub fn compiling() -> usize {
     BUILDING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// the shaders the game's list had the start hand out.
+pub(super) static PREPARING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// the shaders the game's list had the start build and how many of them
+/// are still building, for the frontend to show before the game starts.
+pub fn preparing() -> (usize, usize) {
+    let total = PREPARING.load(std::sync::atomic::Ordering::Relaxed);
+    let left = BUILDING.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(BUILDING_STAND_INS.load(std::sync::atomic::Ordering::Relaxed));
+    (total, left.min(total))
+}
+
 /// the generic stand-ins of those, which a first run, or one after an
 /// update, builds once for every game, the slowest programs there are.
 pub(super) static BUILDING_STAND_INS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

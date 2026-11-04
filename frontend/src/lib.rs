@@ -265,6 +265,7 @@ pub fn run(mut args: Vec<String>) {
     let mut logs = 0u32;
     // ZAKURO_SLOW_FRAMES=ms logs every frame that took longer to run
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
+    prepare_shaders(&mut system, &font, &settings);
     loop {
         let began = Instant::now();
         let (mut keys, mut axes, fingers, second_touch, pad_used) = {
@@ -648,6 +649,26 @@ pub fn run(mut args: Vec<String>) {
 
 /// the overlays drawn over the screens, the menu or the status line, then
 /// the touch controls.
+/// waits for the shaders the game's list has the start build, showing how
+/// far along they are when that takes a moment, so none is built in game.
+fn prepare_shaders(system: &mut System, font: &Font, settings: &Settings) {
+    let (total, _) = zakuro_gpu::preparing();
+    if total == 0 {
+        return;
+    }
+    let started = Instant::now();
+    while let (_, left @ 1..) = zakuro_gpu::preparing() {
+        if started.elapsed() >= Duration::from_millis(250) {
+            let mut canvas = Canvas::new(font, PANEL);
+            menu::preparing(&mut canvas, PANEL, total - left, total);
+            let screen = Some(Arc::new(canvas.finish()));
+            system.present_panel(layout::shown(settings), None, overlays(&screen, &None), settings.smooth, false);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    log::info!("prepared {total} shaders in {:.1} s", started.elapsed().as_secs_f64());
+}
+
 fn overlays(overlay: &Option<Arc<Overlay>>, controls: &Option<Arc<Overlay>>) -> Vec<Arc<Overlay>> {
     overlay.iter().chain(controls).cloned().collect()
 }

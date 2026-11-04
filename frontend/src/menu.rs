@@ -583,6 +583,21 @@ impl Menu {
     }
 }
 
+/// the screen a start shows while it builds the shaders the game's list
+/// holds, how many of how many, before the game itself.
+pub fn preparing(canvas: &mut Canvas, (width, height): (u32, u32), done: usize, total: usize) {
+    let (width, height) = (width as f32, height as f32);
+    let title = "Preparing shaders";
+    canvas.text(BIG, title, (width - canvas.measure(BIG, title)) / 2.0, height / 2.0 - 40.0, rgba(TEXT, 255), false);
+    let (left, right, top) = (width * 0.2, width * 0.8, height / 2.0);
+    canvas.fill([left, top, right, top + 10.0], rgba([32, 48, 72], 255));
+    canvas.fill([left, top, left + (right - left) * done as f32 / total.max(1) as f32, top + 10.0], rgba(TEXT, 255));
+    let count = format!("{done} of {total}");
+    canvas.text(SMALL, &count, (width - canvas.measure(SMALL, &count)) / 2.0, top + 22.0, rgba(DIM, 255), false);
+    let note = "Only on a first start, or when the game used new ones last time";
+    canvas.text(SMALL, note, (width - canvas.measure(SMALL, note)) / 2.0, top + 44.0, rgba(DIM, 255), false);
+}
+
 /// what the bottom corners show while the game runs: the frame rate and the
 /// temperature at the right, the battery and the time at the left.
 #[derive(PartialEq)]

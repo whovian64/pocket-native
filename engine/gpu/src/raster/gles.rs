@@ -35,7 +35,7 @@ use display::*;
 use programs::*;
 use sources::*;
 pub use display::{layout_scale, layout_size, panel_timing, second_window, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
-pub use programs::{compiling, compiling_stand_ins, note_compiler_crash};
+pub use programs::{compiling, compiling_stand_ins, note_compiler_crash, preparing};
 pub(crate) use programs::COMPILING;
 
 const VERTEX_SIZE: usize = 24 * 4;
@@ -1732,11 +1732,10 @@ impl Gles {
         }
         let started = std::time::Instant::now();
         self.preloading = true;
-        // with several compiler threads they all take the list, the start
-        // waiting for the last of them, rather than the GL thread building
-        // one program after another
-        let queue = self.compiler.is_some() && compilers() > 1;
-        let built_before = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed);
+        // the compiler threads take the list, the GL thread left free for
+        // the frontend to show them building, which it waits on before the
+        // game starts
+        let queue = self.compiler.is_some();
         let (mut translating, mut programs) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let mut units: HashMap<u64, Option<ShaderUnit>> = HashMap::new();
         let mut count = 0;
@@ -1788,20 +1787,14 @@ impl Gles {
             }
             programs += began.elapsed();
         }
-        let waiting = std::time::Instant::now();
-        while self.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
-            self.take_compiled(true);
-        }
         self.preloading = false;
-        let built = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(built_before) as f64 / 1e6;
+        PREPARING.store(if queue { count } else { 0 }, std::sync::atomic::Ordering::Relaxed);
         log::info!(
-            "prepared {count} shaders from {} in {:.1} s: {:.1} s translating vertex programs, {:.1} s handing out programs, {:.1} s waiting on the compiler threads, {:.1} s building them in all",
+            "{count} shaders from {} to prepare, handed out in {:.1} s: {:.1} s translating vertex programs, {:.1} s handing out programs",
             path.display(),
             started.elapsed().as_secs_f64(),
             translating.as_secs_f64(),
             programs.as_secs_f64(),
-            waiting.elapsed().as_secs_f64(),
-            built
         );
     }
 
@@ -2910,7 +2903,7 @@ impl Gles {
         if let Some(inputs) = inputs {
             self.inputs.insert(key.clone(), inputs());
         }
-        if !wait && (!self.preloading || compilers() > 1) {
+        if !wait {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
