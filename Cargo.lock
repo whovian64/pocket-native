@@ -2455,6 +2455,7 @@ version = "0.5.0"
 dependencies = [
  "eframe",
  "rfd",
+ "winit",
  "zakuro-fs",
 ]
 

@@ -19,6 +19,12 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_title("Pocket Native").with_inner_size([900.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_drag_and_drop(true),
         ..Default::default()
     };
+    // winit takes no dropped files on Wayland: X11 where there is one
+    #[cfg(target_os = "linux")]
+    let options = match std::env::var_os("DISPLAY").filter(|display| !display.is_empty()) {
+        Some(_) => eframe::NativeOptions { event_loop_builder: Some(Box::new(|builder| _ = winit::platform::x11::EventLoopBuilderExtX11::with_x11(builder))), ..options },
+        None => options,
+    };
     eframe::run_native("Pocket Native", options, Box::new(move |cc| Ok(Box::new(App::new(cc, kit)))))
 }
 
