@@ -2563,26 +2563,32 @@ impl Gles {
             let offset = t.input.checked_sub(s.addr).filter(|offset| offset % tile_rows == 0)? / tile_rows * step;
             (offset + first + rows <= s.height).then_some(offset)
         };
-        let Some((addr, input_size, row)) = self
+        let output_len = t.output_width * t.output_height * output_kind.bytes();
+        let Some((addr, input_size, row, drawn_under)) = self
             .surfaces
             .iter()
             .filter(|s| s.kind == input_kind && s.tiled == tiled && s.width == t.input_width)
             .filter_map(|s| Some((s, row_in(s)?)))
             .max_by_key(|(s, _)| (s.dirty.is_some(), s.height))
-            .map(|(s, row)| (s.addr, (s.width, s.height), row))
+            .map(|(s, row)| (s.addr, (s.width, s.height), row, s.dirty_overlaps(t.output, output_len)))
         else {
             return self.transfer_below_memory(memory, t);
         };
         let input_end = addr as u64 + (input_size.0 * input_size.1 * input_kind.bytes()) as u64;
-        let output_end = t.output as u64 + (t.output_width * t.output_height * output_kind.bytes()) as u64;
+        let output_end = t.output as u64 + output_len as u64;
         // a tiled output wider than the copy has its last row of tiles' end
         // left as it was, which may be the input's start: Yo-kai Watch 2
         // copies its 240 wide top screen into a texture 256 wide just before it
         let gap = if t.output_tiled && t.copy.0 < t.output_width && t.copy.1 == t.output_height { ((t.output_width - t.copy.0) * 8 * output_kind.bytes()) as u64 } else { 0 };
-        if (addr as u64) < output_end - gap && (t.output as u64) < input_end {
+        // or the output takes rows of the drawing nothing drew and the copy
+        // doesn't read, as RE:R and MH3U put their bottom screen just
+        // before the rows of the drawing they copy to it
+        let read = (addr as u64 + ((row + first) / step * tile_rows) as u64, addr as u64 + ((row + first + rows).div_ceil(step) * tile_rows) as u64);
+        let beside = !drawn_under && (read.1 <= t.output as u64 || output_end <= read.0);
+        if !beside && (addr as u64) < output_end - gap && (t.output as u64) < input_end {
             return Ok(false);
         }
-        let tail = ((addr as u64) < output_end && (t.output as u64) < input_end).then_some(gap as u32);
+        let tail = (!beside && (addr as u64) < output_end && (t.output as u64) < input_end).then_some(gap as u32);
         self.current()?;
         let (source, target) = loop {
             let source = self.surface_rows(memory, addr, input_size, input_kind, tiled, None)?;
