@@ -299,6 +299,8 @@ thread_local! {
     /// the contexts this thread's shares objects with, the EGL they came
     /// from, which stage programs are kept by.
     pub(super) static SHARE_GROUP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[cfg(test)]
+    static PAIR_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// the GL thread's pipelines, which unlike programs are its context's
     /// own, by the stand-in they are for.
     pub(super) static PIPELINES: std::cell::RefCell<rustc_hash::FxHashMap<glow::Program, u32>> = std::cell::RefCell::new(Default::default());
@@ -413,16 +415,18 @@ pub(super) fn build_separable(gl: &glow::Context, vertex: &str, fragment: &str) 
 /// one's stages through the GL thread's pipeline for them, made the first
 /// time.
 pub(super) fn bind_program(gl: &glow::Context, program: glow::Program) {
-    let stages = if separable() { SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().and_then(|separate| separate.get(&(SHARE_GROUP.get(), program)).cloned()) } else { None };
-    // SAFETY: on the GL thread, the program and stages were made in contexts
-    // sharing its objects, the pipeline in its own
-    unsafe {
-        let Some((vertex, fragment)) = stages else {
-            gl.use_program(Some(program));
-            return;
-        };
-        let pipeline = PIPELINES.with(|pipelines| {
-            *pipelines.borrow_mut().entry(program).or_insert_with(|| {
+    let pipeline = if separable() {
+        // Only this GL thread creates/deletes its pipelines. delete_program
+        // removes the entry before releasing the pair's stage leases, so a
+        // cached pipeline already has all the ownership needed for a bind.
+        let cached = PIPELINES.with(|pipelines| pipelines.borrow().get(&program).copied());
+        cached.or_else(|| {
+            #[cfg(test)]
+            PAIR_LOOKUPS.set(PAIR_LOOKUPS.get() + 1);
+            let (vertex, fragment) = SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref().and_then(|separate| separate.get(&(SHARE_GROUP.get(), program)).cloned())?;
+            // SAFETY: on the GL thread, using linked stages in its share group.
+            let pipeline = unsafe {
                 let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
                 let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
                 let mut pipeline = 0u32;
@@ -430,11 +434,20 @@ pub(super) fn bind_program(gl: &glow::Context, program: glow::Program) {
                 stages_of(pipeline, VERTEX_SHADER_BIT, vertex.program.0.get());
                 stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.program.0.get());
                 pipeline
-            })
-        });
-        let bind: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(4));
-        gl.use_program(None);
-        bind(pipeline);
+            };
+            PIPELINES.with(|pipelines| pipelines.borrow_mut().insert(program, pipeline));
+            Some(pipeline)
+        })
+    } else { None };
+    // SAFETY: on the GL thread, binding its pipeline or a shared program.
+    unsafe {
+        if let Some(pipeline) = pipeline {
+            let bind: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(4));
+            gl.use_program(None);
+            bind(pipeline);
+        } else {
+            gl.use_program(Some(program));
+        }
     }
 }
 
@@ -943,6 +956,45 @@ mod compiler_release_tests {
             assert_eq!(red_pixels(gl, pair), [255, 0, 0, 255].repeat(4).as_slice());
             delete_program(gl, pair);
             drop((vertex, fragment));
+            prune_stages(gl);
+        });
+    }
+
+    #[test]
+    fn cached_pipeline_binds_keep_pixels_and_skip_pair_lookups() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        // Complete the fixture's background prewarm before the test process
+        // can exit and tear down the driver beneath a compiler thread.
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
+        if !separable() { eprintln!("pipeline cache fixture requires separable mode, skipped"); return; }
+        gles.worker.run(|| {
+            let gl = GL_CONTEXT.get().unwrap();
+            let red = [255, 0, 0, 255].repeat(4);
+            let blue = [0, 0, 255, 255].repeat(4);
+            let first = build_separable(gl, BINARY_VERTEX, BINARY_FRAGMENT).unwrap();
+            let fragment = BINARY_FRAGMENT.replace("1.0, 0.0, 0.0", "0.0, 0.0, 1.0");
+            let second = build_separable(gl, BINARY_VERTEX, &fragment).unwrap();
+            let before = PAIR_LOOKUPS.get();
+            assert_eq!(red_pixels(gl, first).as_slice(), red);
+            let pipeline = PIPELINES.with(|pipelines| pipelines.borrow()[&first]);
+            for _ in 0..8 {
+                assert_eq!(red_pixels(gl, second).as_slice(), blue);
+                assert_eq!(red_pixels(gl, first).as_slice(), red);
+            }
+            assert_eq!(PAIR_LOOKUPS.get(), before + 2, "only first use of each pair looks up global stage leases");
+            assert_eq!(PIPELINES.with(|pipelines| pipelines.borrow()[&first]), pipeline);
+            delete_program(gl, first);
+            assert!(!PIPELINES.with(|pipelines| pipelines.borrow().contains_key(&first)));
+            let replacement = build_separable(gl, BINARY_VERTEX, BINARY_FRAGMENT).unwrap();
+            assert_eq!(red_pixels(gl, replacement).as_slice(), red);
+            assert_eq!(PAIR_LOOKUPS.get(), before + 3, "a new pair cannot inherit a retired pipeline");
+            delete_program(gl, replacement);
+            delete_program(gl, second);
             prune_stages(gl);
         });
     }

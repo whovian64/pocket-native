@@ -58,3 +58,19 @@ protocol and rejected timing admission. Genuine same-frame captures stay local;
 no game imagery is included.
 The 18,000-frame fixture above remains cutscene-only; their scene approvals
 must not be interchanged or applied to other titles.
+
+## Separate 6,000-frame Route 1 checkpoint fixture
+
+`ultra-sun-usa-route1.input` loads a retained Route 1 checkpoint and walks
+between the route entrance and the house exterior. Its JSON binds the private
+save hash, actual sampled images and agent scene review. It covers outdoor
+movement only, not battles or interiors. The save, font and images are not
+distributed. Prepare your own checkpoint locally, copy the same seed to both
+variants, and independently establish scene evidence for its hashes; another
+save is not the published fixture merely because its location is Route 1.
+
+Use `--frames 6000 --clock 4000000000000`, the Route 1 input/scene JSON and
+the same fixed-quality serialized-GPU profile on both sides. As with the other
+fixtures, profile-mode seed directories must contain no settings.toml. Do not
+substitute this save into the fresh prologue/bedroom protocols.
+See the [bounded follow-up results](../../../docs/route1-eval-results.md).

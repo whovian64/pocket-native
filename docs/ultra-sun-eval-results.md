@@ -6,6 +6,10 @@ target is **not established**. No RG DS Plus runtime, battery or FPS measurement
 is available. See the [reproduction guide](performance-eval.md) and
 [hardware/deployment limits](rg-ds-plus-feasibility.md).
 
+The later [Route 1 follow-up](route1-eval-results.md) tests four additional
+candidates independently and retains only a small cached-pipeline shortcut.
+It does not establish a game-level speedup.
+
 ## Retained changes
 
 - Avoid repeated PICA fingerprint scans and use the existing integer-key Fx
@@ -69,9 +73,11 @@ shaders/approximate stand-ins, serialized GPU and fresh per-trial homes and appl
 The host page cache is uncontrolled and ROM hashing warms file pages.
 
 Original is revision `178f2b0` plus probe instrumentation, runtime hash
-`e09c0841…`; the frozen candidate is `c15e1adf…`, built from the final public code
+`e09c0841…`; the frozen candidate is `c15e1adf…`, built from the pre-Route-1-follow-up public code
 with Rust 1.99.1, generic x86_64 release, thin LTO and four codegen units.
-No Rust PGO or private native replacements are used. Final documentation and
+No Rust PGO or private native replacements are used. The later cached-pipeline
+shortcut was not present in this historical comparison; its Route 1 checks are
+reported separately. Final documentation and
 portable button fixtures were added after the code/build freeze. Full hashes
 are retained in the linked provenance file.
 
