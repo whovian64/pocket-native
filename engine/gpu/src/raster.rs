@@ -544,6 +544,32 @@ fn fetch_arrays<M: GpuMemory>(
     Some(host::Fetched { arrays, inputs, first })
 }
 
+/// The final semantics result depends only on these nine raw register words.
+#[cfg(feature = "gles")]
+#[derive(Default)]
+struct OutputSemanticsCache {
+    #[cfg(test)]
+    constructions: usize,
+    entry: Option<([u32; 9], [u32; 24])>,
+}
+
+#[cfg(feature = "gles")]
+impl OutputSemanticsCache {
+    fn read(&mut self, registers: &[u32]) -> [u32; 24] {
+        let mut key = [0; 9];
+        key[..8].copy_from_slice(&registers[0x4f..=0x56]);
+        key[8] = registers[REG_VS_OUTPUT_MASK];
+        if let Some((old, semantics)) = &self.entry {
+            if *old == key { return *semantics; }
+        }
+        #[cfg(test)]
+        { self.constructions += 1; }
+        let semantics = output_semantics(registers);
+        self.entry = Some((key, semantics));
+        semantics
+    }
+}
+
 /// where the GPU's vertex shader finds each varying, per semantic
 /// component of position, color, texture coordinates 0, 1 and 2, the
 /// quaternion and the view vector, the output register times four plus
@@ -886,6 +912,8 @@ fn texture_levels(format: TextureFormat, width: u32, height: u32, levels: u32) -
 /// what draws keep from one to the next.
 #[derive(Default)]
 pub struct Resources {
+    #[cfg(feature = "gles")]
+    output_semantics_cache: OutputSemanticsCache,
     pub textures: TextureCache,
     meshes: MeshCache,
     pub light_tables: Tables,
@@ -2771,7 +2799,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
                 unit: vertex_shader,
                 inputs,
                 indices: &indices,
-                semantics: output_semantics(registers),
+                semantics: resources.output_semantics_cache.read(registers),
                 viewport,
                 cull: cull_mode,
                 fetched,
@@ -3704,4 +3732,105 @@ mod tests {
         }
     }
 
+}
+
+#[cfg(all(test, feature = "gles"))]
+mod exact_output_semantics_cache_tests {
+    use super::*;
+    #[test]
+    fn exact_semantics_keys_match_fresh_for_dependencies_and_replacement() {
+        let mut cache = OutputSemanticsCache::default();
+        let mut registers = vec![0; 0x300];
+        assert!(cache.entry.is_none());
+        assert_eq!(cache.read(&registers), output_semantics(&registers));
+        assert!(cache.entry.is_some());
+        assert_eq!(cache.constructions, 1);
+        assert_eq!(cache.read(&registers), output_semantics(&registers));
+        assert_eq!(cache.constructions, 1, "same exact key must reuse the populated value");
+        // A -> B -> A replaces the only entry, even if B changes ignored bits.
+        registers[0x50] = 0x8000_0000;
+        assert_eq!(cache.read(&registers), output_semantics(&registers));
+        assert_eq!(cache.constructions, 2);
+        registers[0x50] = 0;
+        assert_eq!(cache.read(&registers), output_semantics(&registers));
+        assert_eq!(cache.constructions, 3);
+        // Includes mask zero, missing outputs, duplicate map entries, ignored bits.
+        for total in [0, 1, 7] {
+            registers[0x4f] = total;
+            for mask in [0, 1, 0x8000, 0xffff] {
+                registers[REG_VS_OUTPUT_MASK] = mask;
+                for register in (0x4f..=0x56).chain([REG_VS_OUTPUT_MASK]) {
+                    for value in [0, 1, 0x03020100, 0x1f1f1f1f, u32::MAX] {
+                        let original = registers[register];
+                        assert_eq!(cache.read(&registers), output_semantics(&registers));
+                        let constructions = cache.constructions;
+                        registers[register] = value;
+                        let fresh = output_semantics(&registers);
+                        assert_eq!(cache.read(&registers), fresh);
+                        assert_eq!(cache.constructions, constructions + usize::from(value != original), "every raw dependency change must replace the entry");
+                        let populated = cache.constructions;
+                        assert_eq!(cache.read(&registers), fresh);
+                        assert_eq!(cache.constructions, populated);
+                        registers[register] = original;
+                        assert_eq!(cache.read(&registers), output_semantics(&registers));
+                    }
+                }
+            }
+        }
+        let before = cache.read(&registers);
+        let constructions = cache.constructions;
+        for register in [0x200, REG_VERTEX_COUNT, REG_VS_BLOCK + SHADER_INPUT_MAP_LOW] {
+            registers[register] ^= 1;
+            assert_eq!(cache.read(&registers), before);
+            assert_eq!(cache.constructions, constructions, "excluded register must hit");
+        }
+        assert!(OutputSemanticsCache::default().entry.is_none());
+    }
+
+    #[test]
+    fn semantics_cache_dependency_key_stays_bound_to_the_fresh_reader() {
+        // Exercise every register, including excluded ones, so adding a reader
+        // dependency also requires extending the cache key.
+        let mut state = 0x5ec0_17e5u32;
+        for _ in 0..8 {
+            let mut registers: Vec<u32> = (0..0x300).map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state
+            }).collect();
+            let mut cache = OutputSemanticsCache::default();
+            assert_eq!(cache.read(&registers), output_semantics(&registers));
+            for register in 0..registers.len() {
+                let original = registers[register];
+                registers[register] ^= u32::MAX;
+                assert_eq!(cache.read(&registers), output_semantics(&registers), "register {register:#x}");
+                registers[register] = original;
+                assert_eq!(cache.read(&registers), output_semantics(&registers));
+            }
+        }
+    }
+
+    #[test]
+    fn draw_early_return_does_not_eagerly_read_semantics_or_populate_cache() {
+        struct UnusedMemory;
+        impl GpuMemory for UnusedMemory {
+            fn read(&mut self, _: u32, _: &mut [u8]) { panic!("zero-vertex draw must not read memory"); }
+            fn write(&mut self, _: u32, _: &[u8]) { panic!("zero-vertex draw must not write memory"); }
+        }
+        // Deliberately too short to contain the semantics output mask.
+        let registers = vec![0; REG_VERTEX_OFFSET.max(REG_VERTEX_COUNT) + 1];
+        assert!(registers.len() <= REG_VS_OUTPUT_MASK);
+        let mut resources = Resources::default();
+        let shader = ShaderUnit::new();
+        assert_eq!(draw(&registers, &shader, &shader, &[[0.0; 4]; 16], &mut UnusedMemory, &mut resources, false), 0);
+        assert!(resources.output_semantics_cache.entry.is_none());
+        assert_eq!(resources.output_semantics_cache.constructions, 0);
+        // The raster path also retains its viewport early return before hardware shading.
+        let viewport_only = vec![0; REG_VIEWPORT_XY.max(REG_VIEWPORT_WIDTH).max(REG_VIEWPORT_HEIGHT) + 1];
+        assert!(viewport_only.len() <= REG_VS_OUTPUT_MASK);
+        assert_eq!(rasterize(&viewport_only, &mut UnusedMemory, &mut resources, Vertices::Shaded(&[])), 0);
+        assert!(resources.output_semantics_cache.entry.is_none());
+        assert_eq!(resources.output_semantics_cache.constructions, 0);
+    }
 }

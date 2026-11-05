@@ -6,6 +6,11 @@ uniform conversion and a better-distributed index for the existing native
 lookup cache. **No game-level speedup or memory reduction is established.**
 The previous 2× objective was not resumed.
 
+The later [three-game reuse follow-up](three-game-reuse-results.md) tests
+additional candidates against this PR state and retains exact output-semantics
+reuse and borrowed upload rows. Its measurements and final validation are
+reported separately from this historical comparison.
+
 ## Three independent decisions
 
 | Candidate | Evidence and disposition |

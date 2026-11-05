@@ -142,6 +142,14 @@ fn word_bytes(words: &[u32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len() * 4) }
 }
 
+/// Return the vertically inverted, tightly packed staging rows for one upload.
+/// The returned slice borrows staging until the client-memory GL call returns.
+fn upload_staging_rows(staging: &[u8], width: u32, height: u32, (from, to): (u32, u32)) -> (i32, i32, &[u8]) {
+    let (top, count) = ((height - to) as i32, (to - from) as i32);
+    let bytes_per_row = width as usize * 4;
+    (top, count, &staging[(height - to) as usize * bytes_per_row..(height - from) as usize * bytes_per_row])
+}
+
 fn next_version() -> u64 {
     VERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -3575,10 +3583,6 @@ impl Gles {
             None => vec![(0, height)],
         };
         let rows = || ranges.iter().flat_map(|&(from, to)| from..to);
-        let part = |staging: &[u8], (from, to): (u32, u32)| {
-            let (top, count) = ((height - to) as i32, (to - from) as i32);
-            (top, count, staging[(height - to) as usize * width as usize * 4..(height - from) as usize * width as usize * 4].to_vec())
-        };
         disturb();
         let gl = &self.gl;
         match kind {
@@ -3596,8 +3600,8 @@ impl Gles {
                 unsafe {
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                     for &range in &ranges {
-                        let (top, count, rows) = part(&staging, range);
-                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, top, width as i32, count, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&rows)));
+                        let (top, count, rows) = upload_staging_rows(&staging, width, height, range);
+                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, top, width as i32, count, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rows)));
                     }
                 }
             }
@@ -3625,7 +3629,7 @@ impl Gles {
                 unsafe {
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                     for &range in &ranges {
-                        let (top, count, rows) = part(&staging, range);
+                        let (top, count, rows) = upload_staging_rows(&staging, width, height, range);
                         gl.tex_sub_image_2d(
                             glow::TEXTURE_2D,
                             0,
@@ -3635,7 +3639,7 @@ impl Gles {
                             count,
                             glow::DEPTH_STENCIL,
                             glow::UNSIGNED_INT_24_8,
-                            glow::PixelUnpackData::Slice(Some(&rows)),
+                            glow::PixelUnpackData::Slice(Some(rows)),
                         );
                     }
                 }
@@ -4969,6 +4973,108 @@ impl Gles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_upload_rows_match_the_old_owned_range() {
+        for width in [1u32, 3, 8, 24] {
+            for height in [1u32, 2, 7, 16] {
+                let staging: Vec<u8> = (0..width * height * 4).map(|i| (i * 37 + i / 7) as u8).collect();
+                for from in 0..height {
+                    for to in from + 1..=height {
+                        // Independent old implementation, including its owned copy.
+                        let old_top = (height - to) as i32;
+                        let old_count = (to - from) as i32;
+                        let old = staging[(height - to) as usize * width as usize * 4
+                            ..(height - from) as usize * width as usize * 4].to_vec();
+                        let (top, count, rows) = upload_staging_rows(&staging, width, height, (from, to));
+                        assert_eq!((top, count), (old_top, old_count));
+                        assert_eq!(rows, old.as_slice());
+                        assert_eq!(rows.as_ptr(), staging[(height - to) as usize * width as usize * 4..].as_ptr());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_surface_uploads_match_full_reference_on_actual_gl() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        gles.worker.run(|| {
+            // SAFETY: Worker::run keeps the GLES context current here.
+            unsafe {
+                eprintln!("upload fixture renderer: {}; {}", gles.gl.get_parameter_string(glow::RENDERER), gles.gl.get_parameter_string(glow::VERSION));
+            }
+        });
+        let mut memory = Flat(vec![0; 0x10000]);
+        let kinds = [Kind::Color(ColorFormat::Rgba8), Kind::Color(ColorFormat::Rgb8),
+            Kind::Color(ColorFormat::Rgb565), Kind::Color(ColorFormat::Rgb5A1),
+            Kind::Color(ColorFormat::Rgba4), Kind::Depth(2), Kind::Depth(3), Kind::Depth(4)];
+        let (width, height) = (8u32, 8u32);
+        for (case, kind) in kinds.into_iter().enumerate() {
+            for tiled in [false, true] {
+                let slot = case * 2 + usize::from(tiled);
+                let a = 0x1000 + slot as u32 * 0x400;
+                let b = a + 0x200;
+                let bpp = kind.bytes() as usize;
+                let len = (width * height) as usize * bpp;
+                let old: Vec<u8> = (0..len).map(|i| (i * 17 + 31) as u8).collect();
+                let new: Vec<u8> = (0..len).map(|i| (i * 47 + 83) as u8).collect();
+                let mut reference = old.clone();
+                // The dirty middle belongs to the GPU: only outer rows come
+                // from new guest memory. Compose the reference per pixel.
+                for y in [0, 1, 5, 6, 7] {
+                    for x in 0..width {
+                        let offset = match kind {
+                            Kind::Color(_) => pixel_offset(tiled, x, y, width, bpp as u32),
+                            Kind::Depth(_) => morton_offset(x, y, width, bpp as u32) as usize,
+                        };
+                        reference[offset..offset + bpp].copy_from_slice(&new[offset..offset + bpp]);
+                    }
+                }
+                memory.0[a as usize..a as usize + len].copy_from_slice(&old);
+                memory.0[b as usize..b as usize + len].copy_from_slice(&reference);
+                let actual = gles.surface_rows(&mut memory, a, (width, height), kind, tiled, None).unwrap();
+                let expected = gles.surface_rows(&mut memory, b, (width, height), kind, tiled, None).unwrap();
+                let worker = gles.worker.clone();
+                worker.run(|| {
+                    let gl = gles.gl;
+                    // GLES client memory is used only with no unpack buffer,
+                    // and the context retains the default row/skip state.
+                    unsafe {
+                        assert_eq!(gl.get_parameter_i32(glow::PIXEL_UNPACK_BUFFER_BINDING), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_ROW_LENGTH), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_SKIP_ROWS), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_SKIP_PIXELS), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_ALIGNMENT), 1);
+                    }
+                    gles.surfaces[actual].dirty = Some((2, 5));
+                    gles.upload(actual, &new);
+                    let mut read = |index| {
+                        let mut pixels = vec![0; (width * height * 4) as usize];
+                        match kind {
+                            Kind::Color(_) => {
+                                let framebuffer = gles.framebuffer(Some(index), None).unwrap();
+                                unsafe {
+                                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+                                    gl.read_pixels(0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
+                                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                                }
+                            }
+                            Kind::Depth(_) => gles.read_depth(index, None, &mut pixels).unwrap(),
+                        }
+                        pixels
+                    };
+                    assert_eq!(read(actual), read(expected), "{kind:?}, tiled {tiled}");
+                });
+                // Do not leave a synthetic dirty surface for a later case.
+                gles.surfaces[actual].dirty = None;
+            }
+        }
+        gles.stop();
+    }
 
     #[test]
     fn resident_orphan_pruning_preserves_current_and_queued_array_leases() {

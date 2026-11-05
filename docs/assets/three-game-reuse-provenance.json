@@ -1,0 +1,749 @@
+{
+  "schema_version": 1,
+  "control_revision": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+  "native_source_revision": "178f2b0f4f3444ed8d6af49fe5c130fe3094b598",
+  "quality": "same original titleDSO eachside, serializedGPU, noframeskip/generic/standins,native1x,fixedclock/input,freshhomes/caches",
+  "runtime_build": "locked offline genericx86_64 release O3 thinLTO 4codegenunits j1 emptytargetrustflags",
+  "runtimes": {
+    "control": {
+      "head": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+      "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runtime_sha256": "0528d1ac6f5a95faa689ec5cd138fe4f2235f82554ce3a698f72126115f92501",
+      "exit": 0
+    },
+    "upload-runtime": {
+      "head": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+      "source_patch_sha256": "60ec049c1a16e2c3923c72c33e2fc4122d05489a240393de1fb4ba5460fb39fb",
+      "runtime_sha256": "c8ac8ab9e0a117090d13821316e7be81ca2be4a00d8d1d77d16451bfbb3f02b4",
+      "exit": 0
+    },
+    "semantics-runtime": {
+      "head": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+      "source_patch_sha256": "ccce52f384d574007733c69a4a2b32acc9bdf188e94707fc1f31545ea7536e50",
+      "runtime_sha256": "94c7335c140b26b7dc9e1f69c421ce97d634a914e09256027bedf755ca433966",
+      "exit": 0
+    },
+    "lazy-runtime": {
+      "head": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+      "source_patch_sha256": "0a896f5a02fd826867a9c65e0e7d29903b0cef02bb1c60a9f491043510b3ed06",
+      "runtime_sha256": "19203a7bd4c814c3fc16ca2d8dd6bf4817ada23803915a37768e2dab4d2d1333",
+      "exit": 0
+    },
+    "census-runtime": {
+      "head": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+      "source_patch_sha256": "24291c821c0eb6392844e16dac293159276ddacf75b633138657a932df033a4a",
+      "runtime_sha256": "b4602976be50a8c46441e0949a2de82c7d00bbf7cfe8f86257662a3651ccf94a",
+      "exit": 0
+    },
+    "fusion-runtime": {
+      "head": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+      "source_patch_sha256": "6f124eccf12a097a0fdf167d2ddc05773ec95d30b86d587ccc7c15f9f1880efc",
+      "runtime_sha256": "c4c86db3f29b4524dcd003377c74582026d5edaa5f41fcdfc67ea43b99141284",
+      "exit": 0
+    }
+  },
+  "comparisons": [
+    {
+      "candidate": "upload-runtime",
+      "title": "ultra-sun",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "incomparable"
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.13045228218270616,
+      "formal_noise_gate_pass": false,
+      "noise_observations": [
+        0.09425667376632182,
+        0.12142576203777092,
+        0.09851574854284238,
+        0.11927552218851273,
+        0.13045228218270616,
+        0.11574992240047587
+      ]
+    },
+    {
+      "candidate": "upload-runtime",
+      "title": "omega-ruby",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "incomparable"
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.2070696219513464,
+      "formal_noise_gate_pass": false,
+      "noise_observations": [
+        0.12127237073105598,
+        0.2070696219513464,
+        0.12103439467607721,
+        0.0874517031106728,
+        0.09836811878969029,
+        0.09068996052094251
+      ]
+    },
+    {
+      "candidate": "upload-runtime",
+      "title": "pokemon-y",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "incomparable"
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.16755002824294882,
+      "formal_noise_gate_pass": false,
+      "noise_observations": [
+        0.15776498761553012,
+        0.16755002824294882,
+        0.10908258980726666,
+        0.16314081436118863,
+        0.09204876431758763,
+        0.11776869522384603
+      ]
+    },
+    {
+      "candidate": "semantics-runtime",
+      "title": "ultra-sun",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "incomparable"
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.18167447614987756,
+      "formal_noise_gate_pass": false,
+      "noise_observations": [
+        0.13971573294170928,
+        0.15814272553943756,
+        0.18167447614987756,
+        0.10842978029427963,
+        0.12993730100627082,
+        0.1243849945944703
+      ]
+    },
+    {
+      "candidate": "semantics-runtime",
+      "title": "omega-ruby",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "incomparable"
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.19639170217060956,
+      "formal_noise_gate_pass": false,
+      "noise_observations": [
+        0.1657405930946025,
+        0.16899532689439448,
+        0.1613868459573481,
+        0.19603835473826056,
+        0.19639170217060956,
+        0.17283320813458286
+      ]
+    },
+    {
+      "candidate": "semantics-runtime",
+      "title": "pokemon-y",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "comparable",
+        "metrics": {
+          "wall_seconds": {
+            "baseline_median": 14.344423497997923,
+            "candidate_median": 14.081135063999682,
+            "candidate_over_baseline": 0.9816452411604419,
+            "conservative_candidate_over_baseline": 1.0127949360967916,
+            "baseline_range": [
+              13.907621160004055,
+              14.395742199994856
+            ],
+            "candidate_range": [
+              13.935725399001967,
+              14.085568284004694
+            ]
+          },
+          "cpu_seconds": {
+            "baseline_median": 16.748054,
+            "candidate_median": 16.414306,
+            "candidate_over_baseline": 0.9800724311015477,
+            "conservative_candidate_over_baseline": 1.008506009235397,
+            "baseline_range": [
+              16.315054,
+              16.97066
+            ],
+            "candidate_range": [
+              16.357770000000002,
+              16.45383
+            ]
+          },
+          "peak_rss_kib": {
+            "baseline_median": 472816,
+            "candidate_median": 471960,
+            "candidate_over_baseline": 0.9981895705729078,
+            "conservative_candidate_over_baseline": 1.0082485846760765,
+            "baseline_range": [
+              468444,
+              473824
+            ],
+            "candidate_range": [
+              468668,
+              472308
+            ]
+          }
+        }
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.08769667672990498,
+      "observations": [
+        {
+          "kind": "control",
+          "cpu_seconds": 16.97066,
+          "wall_seconds": 14.395742199994856,
+          "peak_rss_kib": 472816
+        },
+        {
+          "kind": "control",
+          "cpu_seconds": 16.315054,
+          "wall_seconds": 13.907621160004055,
+          "peak_rss_kib": 473824
+        },
+        {
+          "kind": "control",
+          "cpu_seconds": 16.748054,
+          "wall_seconds": 14.344423497997923,
+          "peak_rss_kib": 468444
+        },
+        {
+          "kind": "candidate",
+          "cpu_seconds": 16.357770000000002,
+          "wall_seconds": 13.935725399001967,
+          "peak_rss_kib": 471960
+        },
+        {
+          "kind": "candidate",
+          "cpu_seconds": 16.414306,
+          "wall_seconds": 14.081135063999682,
+          "peak_rss_kib": 468668
+        },
+        {
+          "kind": "candidate",
+          "cpu_seconds": 16.45383,
+          "wall_seconds": 14.085568284004694,
+          "peak_rss_kib": 472308
+        }
+      ],
+      "formal_noise_gate_pass": true,
+      "noise_observations": [
+        0.08769667672990498,
+        0.0656337352375605,
+        0.0741226459988719,
+        0.07894381838772371,
+        0.07237384418003925,
+        0.06347884636045276
+      ]
+    },
+    {
+      "candidate": "lazy-runtime",
+      "title": "ultra-sun",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "incomparable"
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.12200117890052013,
+      "formal_noise_gate_pass": false,
+      "noise_observations": [
+        0.0693306101228776,
+        0.12200117890052013,
+        0.11648577084684049,
+        0.0630034263242949,
+        0.11619107779960887,
+        0.07919933372867206
+      ]
+    },
+    {
+      "candidate": "lazy-runtime",
+      "title": "omega-ruby",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "incomparable"
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.20476569820648663,
+      "formal_noise_gate_pass": false,
+      "noise_observations": [
+        0.20476569820648663,
+        0.11409202816198571,
+        0.10033906667033717,
+        0.17393397615333048,
+        0.19275151270102966,
+        0.07523479422874615
+      ]
+    },
+    {
+      "candidate": "lazy-runtime",
+      "title": "pokemon-y",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_work_warnings_images_trace": true,
+      "comparison": {
+        "status": "comparable",
+        "metrics": {
+          "wall_seconds": {
+            "baseline_median": 14.367779922991758,
+            "candidate_median": 14.469094846004737,
+            "candidate_over_baseline": 1.0070515363929573,
+            "conservative_candidate_over_baseline": 1.0823147249162728,
+            "baseline_range": [
+              14.114895958002307,
+              14.998745681994478
+            ],
+            "candidate_range": [
+              13.739077749996795,
+              15.27675973600708
+            ]
+          },
+          "cpu_seconds": {
+            "baseline_median": 16.896261,
+            "candidate_median": 16.83185,
+            "candidate_over_baseline": 0.9961878548159264,
+            "conservative_candidate_over_baseline": 1.0839375215853422,
+            "baseline_range": [
+              16.556374,
+              17.540176
+            ],
+            "candidate_range": [
+              16.043993,
+              17.946075
+            ]
+          },
+          "peak_rss_kib": {
+            "baseline_median": 472280,
+            "candidate_median": 473208,
+            "candidate_over_baseline": 1.0019649360548828,
+            "conservative_candidate_over_baseline": 1.002287243955746,
+            "baseline_range": [
+              472184,
+              472280
+            ],
+            "candidate_range": [
+              469504,
+              473264
+            ]
+          }
+        }
+      },
+      "strict_3pct_pass": false,
+      "max_external_cpu": 0.09963259806411259,
+      "observations": [
+        {
+          "kind": "control",
+          "cpu_seconds": 16.896261,
+          "wall_seconds": 14.367779922991758,
+          "peak_rss_kib": 472184
+        },
+        {
+          "kind": "control",
+          "cpu_seconds": 16.556374,
+          "wall_seconds": 14.114895958002307,
+          "peak_rss_kib": 472280
+        },
+        {
+          "kind": "control",
+          "cpu_seconds": 17.540176,
+          "wall_seconds": 14.998745681994478,
+          "peak_rss_kib": 472280
+        },
+        {
+          "kind": "candidate",
+          "cpu_seconds": 16.83185,
+          "wall_seconds": 14.469094846004737,
+          "peak_rss_kib": 473264
+        },
+        {
+          "kind": "candidate",
+          "cpu_seconds": 16.043993,
+          "wall_seconds": 13.739077749996795,
+          "peak_rss_kib": 469504
+        },
+        {
+          "kind": "candidate",
+          "cpu_seconds": 17.946075,
+          "wall_seconds": 15.27675973600708,
+          "peak_rss_kib": 473208
+        }
+      ],
+      "formal_noise_gate_pass": true,
+      "noise_observations": [
+        0.08819098665844222,
+        0.07210301996048434,
+        0.09963259806411259,
+        0.07506581348451855,
+        0.057527546745281675,
+        0.0882219355275573
+      ]
+    }
+  ],
+  "diagnostic_counts": {
+    "scope": "Complete private instrumented6000frame route replays, counters not speed, all exact to freshcontrol. No instrumentation inproduction source",
+    "source_parent": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+    "observations": [
+      {
+        "title": "ultra-sun",
+        "frames": 6000,
+        "complete_census": true,
+        "next_frame_calls": 6000,
+        "consecutive_metadata": {
+          "layout": {
+            "constructor_calls": 329379,
+            "same_as_previous_key": 2382
+          },
+          "output_semantics": {
+            "constructor_calls": 329379,
+            "same_as_previous_key": 328387
+          },
+          "tev": {
+            "constructor_calls": 329379,
+            "same_as_previous_key": 163035
+          },
+          "lighting": {
+            "constructor_calls": 287739,
+            "same_as_previous_key": 215707
+          }
+        },
+        "command_hash_bytes": {
+          "generated": 690863616,
+          "final_bottom": 19799664,
+          "intermediate_only": 0,
+          "never_observed": 671063952,
+          "pending": 0,
+          "reconciled": true,
+          "discard_fraction": 0.9713407052543349
+        },
+        "surface_uploads": {
+          "calls": 12,
+          "extra_copied_bytes": 3774464
+        },
+        "fusion": {
+          "draws": 329379,
+          "adjacent_pairs": 297463,
+          "cumulative_gate_pairs": [
+            60333,
+            52899,
+            35830,
+            22499,
+            0,
+            0
+          ],
+          "eligible_pairs_by_geometry": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "direct_draws_not_profiled": 0
+        },
+        "observer_limits": {
+          "max_retained_key_bytes": 50331648,
+          "evictions": 7260895,
+          "partial_entry_omits_mutable_state": true,
+          "misses_are_not_total_population_bound": true
+        }
+      },
+      {
+        "title": "omega-ruby",
+        "frames": 6000,
+        "complete_census": true,
+        "next_frame_calls": 6000,
+        "consecutive_metadata": {
+          "layout": {
+            "constructor_calls": 159284,
+            "same_as_previous_key": 40031
+          },
+          "output_semantics": {
+            "constructor_calls": 159703,
+            "same_as_previous_key": 142585
+          },
+          "tev": {
+            "constructor_calls": 159885,
+            "same_as_previous_key": 108790
+          },
+          "lighting": {
+            "constructor_calls": 107462,
+            "same_as_previous_key": 76039
+          }
+        },
+        "command_hash_bytes": {
+          "generated": 484666560,
+          "final_bottom": 97531584,
+          "intermediate_only": 0,
+          "never_observed": 387134944,
+          "pending": 32,
+          "reconciled": true,
+          "discard_fraction": 0.7987655348039692
+        },
+        "surface_uploads": {
+          "calls": 8,
+          "extra_copied_bytes": 3262464
+        },
+        "fusion": {
+          "draws": 159794,
+          "adjacent_pairs": 143054,
+          "cumulative_gate_pairs": [
+            42168,
+            40725,
+            15474,
+            15474,
+            63,
+            63
+          ],
+          "eligible_pairs_by_geometry": [
+            63,
+            0,
+            0,
+            0
+          ],
+          "direct_draws_not_profiled": 0
+        },
+        "observer_limits": {
+          "max_retained_key_bytes": 50331648,
+          "evictions": 3133862,
+          "partial_entry_omits_mutable_state": true,
+          "misses_are_not_total_population_bound": true
+        }
+      },
+      {
+        "title": "pokemon-y",
+        "frames": 6000,
+        "complete_census": true,
+        "next_frame_calls": 6000,
+        "consecutive_metadata": {
+          "layout": {
+            "constructor_calls": 401897,
+            "same_as_previous_key": 35516
+          },
+          "output_semantics": {
+            "constructor_calls": 402165,
+            "same_as_previous_key": 351854
+          },
+          "tev": {
+            "constructor_calls": 402265,
+            "same_as_previous_key": 242488
+          },
+          "lighting": {
+            "constructor_calls": 316637,
+            "same_as_previous_key": 181199
+          }
+        },
+        "command_hash_bytes": {
+          "generated": 1478263248,
+          "final_bottom": 77618160,
+          "intermediate_only": 0,
+          "never_observed": 1400645056,
+          "pending": 32,
+          "reconciled": true,
+          "discard_fraction": 0.9474936604796117
+        },
+        "surface_uploads": {
+          "calls": 6,
+          "extra_copied_bytes": 2430976
+        },
+        "fusion": {
+          "draws": 402215,
+          "adjacent_pairs": 369034,
+          "cumulative_gate_pairs": [
+            95121,
+            95096,
+            5884,
+            5832,
+            0,
+            0
+          ],
+          "eligible_pairs_by_geometry": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "direct_draws_not_profiled": 0
+        },
+        "observer_limits": {
+          "max_retained_key_bytes": 50331648,
+          "evictions": 12185168,
+          "partial_entry_omits_mutable_state": true,
+          "misses_are_not_total_population_bound": true
+        }
+      }
+    ]
+  },
+  "limits": [
+    "timing-ineligible observations are not gain evidence",
+    "three observed ranges are not confidence intervals",
+    "no ARM/handheld/GPU power execution",
+    "short outdoor walking/idle workloads only"
+  ],
+  "validation": {
+    "passed": 426,
+    "ignored": 8,
+    "required_tests": [
+      "borrowed_upload_rows_match_the_old_owned_range",
+      "partial_surface_uploads_match_full_reference_on_actual_gl",
+      "exact_semantics_keys_match_fresh_for_dependencies_and_replacement",
+      "draw_early_return_does_not_eagerly_read_semantics_or_populate_cache",
+      "semantics_cache_dependency_key_stays_bound_to_the_fresh_reader",
+      "passive_single_word_packets_match_scalar_invalidation",
+      "uniform_bursts_match_individual_register_writes",
+      "lookup_cache_preserves_hits_misses_and_colliding_addresses",
+      "cached_pipeline_binds_keep_pixels_and_skip_pair_lookups"
+    ],
+    "aarch64_linux_check": true,
+    "android_release_link": true,
+    "android_elf": {
+      "file_name": "libpocketnative.so",
+      "sha256": "2b97c3e4599b4d70c2967d51771902dd834c1ef3ac753cffa6790efe5cf1c55a",
+      "machine": "AArch64"
+    },
+    "limits": "Compilation/linking and host release tests, not ARM or handheld execution"
+  },
+  "contribution": "root GPT6.1Sol viaT3Code/Codex; nativeCodex children requestedGPT6.1Sol/Terra actualchildvariantnotindependentlyattested; Opus5.5researchviaClaudeCode",
+  "native_guard": {
+    "status": "rejected:12exactgamecomparisons passed10%noise bothtitles, no gainestablished; stricter3%failed",
+    "sites_each": 2,
+    "counter_games_exact": true,
+    "raw_targets_per_observed_site": 1,
+    "abi_oracle_cases_each": 36288,
+    "copy_oracle_cases_each": 72352,
+    "public_generated_artifacts": false,
+    "comparisons": [
+      {
+        "title": "omega-ruby",
+        "exact": true,
+        "formal_noise_gate_pass": true,
+        "strict_3pct_pass": false,
+        "max_external_cpu": 0.090304411620494,
+        "cpu_candidate_over_control_median": 0.9989819807292838,
+        "wall_candidate_over_control_median": 0.999918123094318,
+        "scope": "PRIVATE codegen-only guard; same frozenruntime but different declaredDSOs, no runtimePR performance attribution"
+      },
+      {
+        "title": "pokemon-y",
+        "exact": true,
+        "formal_noise_gate_pass": true,
+        "strict_3pct_pass": false,
+        "max_external_cpu": 0.09698383319899401,
+        "cpu_candidate_over_control_median": 1.0278082650078775,
+        "wall_candidate_over_control_median": 1.0391949471542175,
+        "scope": "PRIVATE codegen-only guard; same frozenruntime but different declaredDSOs, no runtimePR performance attribution"
+      }
+    ]
+  },
+  "accepted": [
+    "exact-one-entry-output-semantics-cache",
+    "borrowed-staging-upload-range"
+  ],
+  "rejected": [
+    "bounded-lazy-picture-hash",
+    "private-main-direct-guard"
+  ],
+  "final_runtime": {
+    "head": "09539fe34d8ff6e9f4babbd52a38488a59d6a1b5",
+    "source_patch_sha256": "144b45462a69194bcd8095a0e112de7d011c6050aa44c5db099ca3ee6d3043ff",
+    "runtime_sha256": "23e2749f96ca957f5871040ea60d488f27e1bd306fbf7ede934e259c521413a6",
+    "exit": 0,
+    "source_changed_during_build": false
+  },
+  "final_source_sha256": {
+    "engine/gpu/src/raster.rs": "fdb492d8ee0af6a35fdbe40571c804cbeae353cce2bc4cdbd6e1dfb098ddf868",
+    "engine/gpu/src/raster/gles.rs": "85fb43d01f30e69831a9258d16dc4edc26ac24c1be1924438326a1eeab0bc288"
+  },
+  "final_replays": [
+    {
+      "title": "ultra-sun",
+      "exact": true,
+      "work": {
+        "completed_frames": 6000,
+        "attempted_frames": 6000,
+        "skipped_frames": 0,
+        "top_pictures": 3036,
+        "bottom_pictures": 554,
+        "interpreted_instructions": 606268,
+        "recompiled_instructions": 5486132020,
+        "stop_reason": "frame_limit"
+      },
+      "trace_sha256": "d7c4b8c538e170c16afb4c6bec73f6b286b48480db1faddeccbfb0f682f42055",
+      "image_sha256": {
+        "frame-00749.bmp": "fcb71f2343d9db0ce07f91c376d93c10e10eed7f5fb163c4760a9e81d829aa9b",
+        "frame-01499.bmp": "09e2e86e29593b8268475aa9c870f55f0bbda2a506c79b33808c971659e89805",
+        "frame-02249.bmp": "80f96fd31d19ce8742a9cf4cde7a33d84327f741e66a8cfe0174a707cce26781",
+        "frame-02999.bmp": "7d232a3479f1e4f056e9a6396c5210610e2ad5e91f33df9547c792c54826ed7e",
+        "frame-03749.bmp": "70bc11d9b56ccc2f673763980cebeefdca65611f0da9d91c146c754c3afb820c",
+        "frame-04499.bmp": "dc775d795edd38ca90b0bbe889313458e2435c07b592e6c8c842b24361a1f854",
+        "frame-05249.bmp": "db981a45083a39959928a029c62c92b0a31ac85d379cb91f65bb97bf5bb33e41",
+        "frame-05999.bmp": "0fd9bc873640ebb03537e67473790adc92272fdc052e15e7e81d987a825c43ff"
+      }
+    },
+    {
+      "title": "omega-ruby",
+      "exact": true,
+      "work": {
+        "completed_frames": 6000,
+        "attempted_frames": 6000,
+        "skipped_frames": 0,
+        "top_pictures": 3011,
+        "bottom_pictures": 702,
+        "interpreted_instructions": 46,
+        "recompiled_instructions": 3019034310,
+        "stop_reason": "frame_limit"
+      },
+      "trace_sha256": "c949e8743a3608d1cb793bf9675841ba305604b38c9ace8035c13d6f2b3f9bc2",
+      "image_sha256": {
+        "frame-00749.bmp": "e14b2fa22e8651e82d65a1c3a62d26497f3ecd631ca9a1d88c13df3e48a067f8",
+        "frame-01499.bmp": "72a0603e7ba89541c4a0ba0877570154f3760033502a17b3b4a43351965b11b9",
+        "frame-02249.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+        "frame-02999.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+        "frame-03749.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+        "frame-04499.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+        "frame-05249.bmp": "acaf9e40b80c39169d8f1b10276f1a7cc9f91348b527fdf234f8561c6757a1ff",
+        "frame-05999.bmp": "13c5ee8048eeb29e958df69eaad1259615a658bca913e3d1f10a85f55ca130fc"
+      }
+    },
+    {
+      "title": "pokemon-y",
+      "exact": true,
+      "work": {
+        "completed_frames": 6000,
+        "attempted_frames": 6000,
+        "skipped_frames": 0,
+        "top_pictures": 3004,
+        "bottom_pictures": 562,
+        "interpreted_instructions": 7054,
+        "recompiled_instructions": 4407185155,
+        "stop_reason": "frame_limit"
+      },
+      "trace_sha256": "e9e10bee7783bf55ebc3ebd493d4eb9cdd616bb6fc12d884ae105304ed6b06bb",
+      "image_sha256": {
+        "frame-00749.bmp": "5ef56b659ca52d51e137b5e703cd1d1dafbb6d5ca8f4c449887e7f2c0081c6ed",
+        "frame-01499.bmp": "de73baf584c53fda34f4e25d90dba97c7a940e66c1728d16882ea47a6fc925da",
+        "frame-02249.bmp": "46cb4813c6d723dfb0a1c991f3745e1357afe9fd1a970c887dd1b431d1c99dd8",
+        "frame-02999.bmp": "eec3d2f94e0c51709be70cdca29a23731c51f7919a5bc206eb1a9cf66404fbcc",
+        "frame-03749.bmp": "657a9b1e9fcd712f03edc593174796ca818ef5f6bc447c9f7ff8c971511b9d68",
+        "frame-04499.bmp": "45a862ae8678eb1c8cf5f30ab80687e5bad69bbe9d66621660321e122b73f20d",
+        "frame-05249.bmp": "05e867bf91284be5ca4edcd61d97fc6123ed7f22a3b1d0e31682cecd01d58a2d",
+        "frame-05999.bmp": "8ec9e95afad9855a52e44a2ed659a01c1cd48e11c74ff7a235e456170bd033bb"
+      }
+    }
+  ]
+}
