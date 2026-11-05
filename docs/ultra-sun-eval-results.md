@@ -137,6 +137,13 @@ and raw receipts remain local; none was rewritten into a passing trial.
   code and generated-C numeric/state oracles passed. No forced-swap execution
   is claimed; unavailable page coverage fails closed.
 
+A final CI-portability follow-up changes only six optional-GLES test setup
+branches: they now follow the repository's convention of skipping unavailable
+contexts. The affected GPU suite passed **149 tests** on the actual GLES
+renderer; all **six forced-unavailable EGL cases** skipped cleanly. The production
+source prefix is byte-identical, so benchmark and manual runtime behavior is
+unchanged. This follow-up is separate from the earlier full workspace pass.
+
 The first final test attempt held on an ambient governor change. Its functional
 continuation exposed a private watchdog ancestry race with a test-owned linker.
 Both holds remain local. The next full suite exposed a lifetime fixture observing
