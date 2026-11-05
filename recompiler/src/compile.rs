@@ -1,10 +1,12 @@
-//! compiling the generated C, one compiler per core, into a shared library
+//! compiling the generated C, one compiler per core as memory allows, into a shared library
 //! a host loads or a static one a program links in.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 /// floating point has to round exactly the way the interpreter does, so
 /// nothing may be fused into a multiply-add.
@@ -59,23 +61,34 @@ pub fn compile(dir: &Path, sources: &[String], library: &Path, progress: Progres
     shared(&objects(dir, sources, progress)?, library)
 }
 
-/// how many files compile at once: one a core, as many as memory has room
-/// for, a file of recompiled code taking gcc up to a gigabyte and Docker on
-/// Windows giving its VM half the PC's.
+/// what gcc takes for a file of recompiled code, about, at most: MK7's
+/// heaviest took 980 MiB.
+const COMPILER_KIB: usize = 1280 * 1024;
+
+/// the memory there is room for in, where Linux says.
+fn available_kib() -> Option<usize> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|info| info.lines().find_map(|line| line.strip_prefix("MemAvailable:"))?.split_whitespace().next()?.parse().ok())
+}
+
+/// how many files compile at once to begin with: one a core, as many as
+/// memory has room for, Docker on Windows giving its VM half the PC's.
 pub fn jobs() -> usize {
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let available = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|info| info.lines().find_map(|line| line.strip_prefix("MemAvailable:"))?.split_whitespace().next()?.parse::<usize>().ok());
-    available.map_or(cores, |kib| cores.min((kib / (1280 * 1024)).max(1)))
+    available_kib().map_or(cores, |kib| cores.min((kib / COMPILER_KIB).max(1)))
 }
 
 /// compiles sources, file names inside dir, each into an object beside it,
-/// stopping when progress says so.
+/// stopping when progress says so. another file starts only while memory
+/// has room for it, and one that fails beside others, gcc killed for
+/// memory, goes again with fewer at once from then on.
 pub fn objects(dir: &Path, sources: &[String], progress: Progress) -> Result<Vec<PathBuf>, String> {
     let compiler = compiler();
     let jobs = jobs();
-    let next = AtomicUsize::new(0);
+    // the files left, how many may compile at once, how many are
+    let queue = Mutex::new((sources.iter().collect::<VecDeque<_>>(), jobs, 0));
+    let changed = Condvar::new();
     let done = AtomicUsize::new(0);
     let stopped = AtomicBool::new(false);
     let failures = Mutex::new(Vec::new());
@@ -100,26 +113,45 @@ pub fn objects(dir: &Path, sources: &[String], progress: Progress) -> Result<Vec
     };
     std::thread::scope(|scope| {
         for _ in 0..jobs {
-            scope.spawn(|| {
-                while let Some(source) = sources.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    if stopped.load(Ordering::Relaxed) {
-                        break;
+            scope.spawn(|| loop {
+                let mut guard = queue.lock().unwrap();
+                let source = loop {
+                    let (left, limit, running) = &mut *guard;
+                    if stopped.load(Ordering::Relaxed) || left.is_empty() && *running == 0 {
+                        return;
                     }
-                    if !compiles(source) {
+                    if !left.is_empty() && *running < *limit && (*running == 0 || available_kib().is_none_or(|kib| kib >= COMPILER_KIB)) {
+                        *running += 1;
+                        break left.pop_front().unwrap();
+                    }
+                    guard = changed.wait_timeout(guard, Duration::from_millis(250)).unwrap().0;
+                };
+                drop(guard);
+                let compiled = compiles(source);
+                let mut guard = queue.lock().unwrap();
+                let (left, limit, running) = &mut *guard;
+                if !compiled && *running > 1 {
+                    *limit = (*running - 1).min(*limit);
+                    left.push_back(source);
+                    eprintln!("{source} failed beside others, most likely out of memory: it goes again, {limit} at a time from here");
+                } else {
+                    if !compiled {
                         failures.lock().unwrap().push(source.clone());
                     }
                     if !progress(done.fetch_add(1, Ordering::Relaxed) + 1, sources.len()) {
                         stopped.store(true, Ordering::Relaxed);
                     }
                 }
+                *running -= 1;
+                drop(guard);
+                changed.notify_all();
             });
         }
     });
     if stopped.into_inner() {
         return Err("stopped".to_owned());
     }
-    // gcc killed for memory beside the others gets it all to itself
-    let failures: Vec<_> = failures.into_inner().unwrap().into_iter().filter(|source| jobs == 1 || !compiles(source)).collect();
+    let failures = failures.into_inner().unwrap();
     if !failures.is_empty() {
         return Err(format!("{} failed to compile, {}", failures.len(), failures.join(" ")));
     }
