@@ -231,6 +231,13 @@ Start it, wait until it says it's running, and build again.
 `aes_keys.txt` next to the game or in the kit's folder and build again,
 or decrypt the dump first (GodMode9: Decrypt file).
 
+**The build stops with `KeyError: 'generator'` or another key's name,
+or says your aes_keys.txt has no line for one.** Your aes_keys.txt is
+missing keys. It needs a `generator=` line and a `slot0x2CKeyX=` line,
+and newer games need `slot0x25KeyX`, `slot0x18KeyX` or `slot0x1BKeyX`
+too. Dump it from your console again, or decrypt the game first
+(GodMode9: Decrypt file) and build it without keys.
+
 **The build stops with "Killed" (`Killed signal terminated program
 cc1`).** The PC, or Docker's share of it, ran out of memory while
 compiling. Each compiler takes about a gigabyte: from 0.5.0 the build
