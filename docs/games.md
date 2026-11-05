@@ -44,7 +44,10 @@ ZAKURO_KMS=1 ZAKURO_RECOMPILED=title.so ZAKURO_DATA=data ../../pocket-native --p
 ```
 
 The number is how many frames to run. 3600 is a minute of the console's
-time. The program exits with 1 if the game faulted. With
+time. A probe exits successfully only after completing the requested frame limit
+without skipped frames. Faults, early game exits and interrupted or incomplete
+runs return 1; see the report's stop reason. Normal interactive play is separate.
+With
 `ZAKURO_PROBE_SPEED=0.6` it skips frames the way a handheld running at 60%
 speed would, which shows up frame skip problems on a fast PC.
 `ZAKURO_INPUT=frame:BUTTON,...` presses buttons on given frames in place of

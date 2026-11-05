@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "Ultra Sun USA prologue",
+  "title_id": "00040000001B5000",
+  "converted_rom_sha256": "b812dc50fdb76cc9f82ed80a3798dae11a2fced1e2fee436db02a8910fde39d1",
+  "frames": 18000,
+  "clock_ms_since_1900": 4000000000000,
+  "resolution": 1.0,
+  "input_file": "ultra-sun-usa-prologue.input",
+  "initial_state": "Fresh seed with only sysdata/shared_font.bin; no save or shader cache. Standard title profile. Serialized GPU and reviewed implementation settings are generated separately for each trial.",
+  "observed_scene": "Intro, valid trainer name through scripted keyboard touches, prologue and bedroom cutscene; the trainer remains lying in bed at frame 17999.",
+  "verified_gameplay": false,
+  "limitations": "Manually inspected cutscene progression, with no verified player-controlled scene. No battle, overworld-control, save-integrity or RG DS Plus proof. Formal paired implementation-profile runs remain separate from diagnostic receipts.",
+  "repeat_validation": "Serialized GPU (gpu_thread=false) repeats match exact sampled BMPs, picture counts and interpreted/recompiled instruction counts. Three fresh original-runtime/library monolithic trials all matched the original canonical reference; their known external CPU fractions were 0.0785852..0.0834633, within the 0.10 gate. Raw receipts remain local and are not included in the PR. Earlier asynchronous GPU repetitions differed and remain rejected. This is still a cutscene/navigation diagnostic, not verified gameplay."
+}

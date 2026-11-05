@@ -409,6 +409,129 @@ mod tests {
 
     const BASE: u32 = 0x0010_0000;
 
+    /// Compile and execute the actual generated C, including its macro exits
+    /// and callbacks. The reference checks state and memory, rather than C
+    /// spelling, in both the paged path and the fastmem/local configurations.
+    #[test]
+    fn generated_state_preserved_at_boundaries() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("recomp-state-boundaries-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut words = vec![0xE12F_FF1Eu32; 28];
+        words[..5].copy_from_slice(&[0xE581_0000, 0xE290_0001, 0xE252_2001, 0x1AFF_FFFB, 0xE12F_FF1E]);
+        words[8..13].copy_from_slice(&[0xE581_0000, 0xEB00_0005, 0xE280_0001, 0xEF00_0005, 0xE12F_FF1E]);
+        words[16..18].copy_from_slice(&[0xE280_0005, 0xE12F_FF1E]);
+        words[24..28].copy_from_slice(&[0xE290_0001, 0xEE10_0F10, 0x0280_0003, 0xEF00_0006]);
+        let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        bytes.resize(128, 0);
+        for half in [0x3001u16, 0x6008, 0x3A01, 0xD1FB, 0x4770] {
+            bytes.extend_from_slice(&half.to_le_bytes());
+        }
+        bytes.resize(160, 0);
+        for word in [0xE290_0001u32, 0xEF00_0007] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let program = Program {
+            text: Segment { base: BASE, bytes },
+            seeds: vec![(BASE, Source::Entry), (BASE + 32, Source::Entry), (BASE + 96, Source::Entry), (BASE + 129, Source::Entry), (BASE + 160, Source::Entry)],
+            slots: None,
+        };
+        let analysis = discover::analyze(&program);
+        let units = [Unit { module: None, program: &program, analysis: &analysis }];
+        let files = generate(&units, &[]);
+        for (name, contents) in &files {
+            std::fs::write(dir.join(name), contents).unwrap();
+        }
+        std::fs::write(dir.join("recomp.h"), HEADER).unwrap();
+        std::fs::write(dir.join("test.c"), r#"
+#include "recomp.h"
+#include "functions.h"
+#include <assert.h>
+static uint8_t memory[8192];
+static uint8_t *pages[2] = {memory, memory + 4096};
+static unsigned callbacks;
+static unsigned force_exit;
+static void interpret(Context *ctx, uint32_t address, uint32_t opcode) {
+    assert(address == 0x100064 && opcode == 0xEE100F10);
+    assert(ctx->r[0] == 11 && ctx->z == 0);
+    ctx->r[0] += 7; ctx->z = 1; callbacks++;
+    if (force_exit) ctx->exit = EXIT_UNWIND;
+}
+static const Host host = {.interpret = interpret};
+static Context fresh(uint32_t entry) {
+    Context ctx = {0};
+    ctx.r[0] = 10; ctx.r[1] = 4096; ctx.r[14] = 0xFFFF0000;
+    ctx.r[15] = entry; ctx.budget = 1000000; ctx.host = &host;
+    ctx.fastmem = memory; ctx.read_pages = pages; ctx.write_pages = pages;
+    return ctx;
+}
+int main(void) {
+    for (unsigned count = 1; count <= 1024; count++) {
+        uint32_t initial = count * 0x9E3779B9u;
+        Context ctx = fresh(0x100000); ctx.r[2] = count; ctx.r[0] = initial;
+        f_00100000(&ctx);
+        uint32_t stored; memcpy(&stored, memory + 4096, 4);
+        assert(ctx.r[0] == initial + count && ctx.r[2] == 0);
+        assert(stored == initial + count - 1 && ctx.r[15] == 0xFFFF0000);
+        assert(ctx.n == 0 && ctx.z == 1 && ctx.c == 1 && ctx.v == 0);
+        assert(ctx.exit == EXIT_NONE);
+    }
+    Context ctx = fresh(0x100000); ctx.r[2] = 10; ctx.budget = 5;
+    f_00100000(&ctx);
+    assert(ctx.exit == EXIT_BUDGET && ctx.r[15] == 0x100000);
+    assert(ctx.r[0] == 11 && ctx.r[2] == 9 && ctx.budget == 0);
+    ctx.budget = 100; ctx.exit = EXIT_NONE; f_00100000(&ctx);
+    assert(ctx.r[0] == 20 && ctx.r[2] == 0 && ctx.r[15] == 0xFFFF0000);
+    ctx = fresh(0x100020); f_00100020(&ctx);
+    assert(ctx.r[0] == 16 && ctx.exit == EXIT_SVC && ctx.svc == 5);
+    assert(ctx.r[15] == 0x100030 && ctx.depth == 0);
+    ctx = fresh(0x100060); f_00100060(&ctx);
+    assert(callbacks == 1 && ctx.r[0] == 21 && ctx.z == 1);
+    assert(ctx.exit == EXIT_SVC && ctx.svc == 6);
+    force_exit = 1; ctx = fresh(0x100060); f_00100060(&ctx);
+    assert(callbacks == 2 && ctx.r[0] == 18 && ctx.z == 1);
+    assert(ctx.exit == EXIT_UNWIND);
+    for (unsigned count = 1; count <= 1024; count++) {
+        uint32_t initial = count * 0x9E3779B9u;
+        ctx = fresh(0x100080); ctx.thumb = 1; ctx.r[2] = count; ctx.r[0] = initial;
+        t_00100080(&ctx);
+        uint32_t stored; memcpy(&stored, memory + 4096, 4);
+        assert(ctx.r[0] == initial + count && ctx.r[2] == 0);
+        assert(stored == initial + count && ctx.r[15] == 0xFFFF0000);
+        assert(ctx.n == 0 && ctx.z == 1 && ctx.c == 1 && ctx.v == 0);
+        assert(ctx.thumb == 0 && ctx.exit == EXIT_NONE);
+    }
+    uint32_t edges[] = {0, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF};
+    for (unsigned i = 0; i < 4; i++) {
+        ctx = fresh(0x1000A0); ctx.r[0] = edges[i]; f_001000A0(&ctx);
+        uint32_t result = edges[i] + 1;
+        assert(ctx.r[0] == result && ctx.n == (result >> 31) && ctx.z == (result == 0));
+        assert(ctx.c == (edges[i] == 0xFFFFFFFF) && ctx.v == (edges[i] == 0x7FFFFFFF));
+        assert(ctx.exit == EXIT_SVC && ctx.svc == 7);
+    }
+    return 0;
+}
+"#).unwrap();
+        for defines in [
+            vec![],
+            vec!["-DRECOMP_FLAG_LOCALS"],
+            vec!["-DRECOMP_FASTMEM"],
+            vec!["-DRECOMP_FASTMEM", "-DRECOMP_FLAG_LOCALS"],
+        ] {
+            let compiler = std::env::var_os("CC").filter(|value| !value.is_empty()).unwrap_or_else(|| "cc".into());
+            let mut compile = Command::new(&compiler);
+            compile.current_dir(&dir).arg("-O2");
+            compile.args(&defines).arg("test.c");
+            for (name, _) in &files {
+                if name.ends_with(".c") { compile.arg(name); }
+            }
+            let result = compile.args(["-o", "test", "-lm"]).output().unwrap();
+            assert!(result.status.success(), "{defines:?}: {}", String::from_utf8_lossy(&result.stderr));
+            assert!(Command::new(dir.join("test")).status().unwrap().success(), "{defines:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// the files for a function that calls another, the callee replaced.
     fn generated(overrides: &[Override]) -> BTreeMap<String, String> {
         // bl BASE + 8, bx lr, bx lr

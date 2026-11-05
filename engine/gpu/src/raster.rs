@@ -471,7 +471,18 @@ fn fetch_arrays<M: GpuMemory>(
         }
     }
     let mut arrays: Vec<host::FetchedArray> = Vec::new();
-    let mut uploaded: Vec<Option<usize>> = vec![None; layout.loaders.len()];
+    // Register layouts contain at most twelve loaders. Keep the transient
+    // upload lookup on the stack; larger hand-built layouts retain a heap
+    // path. Zero means not uploaded, otherwise the byte is array index + 1.
+    // At most count <= 12 inputs can add an array, regardless of loader count.
+    let mut uploaded_inline = [0u8; REG_ATTRIBUTE_LOADER_COUNT];
+    let mut uploaded_heap = Vec::new();
+    let uploaded = if layout.loaders.len() <= uploaded_inline.len() {
+        &mut uploaded_inline[..layout.loaders.len()]
+    } else {
+        uploaded_heap.resize(layout.loaders.len(), 0);
+        uploaded_heap.as_mut_slice()
+    };
     let mut inputs = [host::Input::Constant(shader::ZERO); shader::INPUT_REGISTERS];
     for id in 0..count {
         let register = ((map >> (id * 4)) & 0xF) as usize;
@@ -482,8 +493,7 @@ fn fetch_arrays<M: GpuMemory>(
                     return None;
                 }
                 let array = match uploaded[l] {
-                    Some(array) => array,
-                    None => {
+                    0 => {
                         let start = memory.translate(base + loader.offset + first * loader.stride);
                         let len = ((last - first) * loader.stride + loader.size) as usize;
                         let fast = crate::fast_with(crate::speedup::MESHES);
@@ -519,9 +529,10 @@ fn fetch_arrays<M: GpuMemory>(
                             }
                         };
                         arrays.push(host::FetchedArray { bytes, stride: loader.stride });
-                        uploaded[l] = Some(arrays.len() - 1);
+                        uploaded[l] = arrays.len() as u8;
                         arrays.len() - 1
                     }
+                    ordinal => usize::from(ordinal) - 1,
                 };
                 let field = &loader.fields[f];
                 host::Input::Array { array, offset: field.offset, ty: field.ty, count: field.count }
@@ -542,11 +553,19 @@ fn output_semantics(registers: &[u32]) -> [u32; 24] {
     let map = read_output_map(registers);
     let mask = registers[REG_VS_OUTPUT_MASK] & 0xFFFF;
     // the output register behind each attribute, as pack_outputs packs them
-    let enabled: Vec<usize> = (0..shader::OUTPUT_REGISTERS).filter(|r| mask == 0 || mask & (1 << r) != 0).collect();
+    let mut enabled = [0u8; shader::OUTPUT_REGISTERS];
+    let mut enabled_count = 0;
+    for register in 0..shader::OUTPUT_REGISTERS {
+        if mask == 0 || mask & (1 << register) != 0 {
+            enabled[enabled_count] = register as u8;
+            enabled_count += 1;
+        }
+    }
+    let enabled = &enabled[..enabled_count];
     let slot = |slot: Option<(usize, usize)>| match slot {
         None => host::MISSING,
         Some((attribute, component)) => {
-            enabled.get(attribute).map_or(host::ZERO, |&register| (register * 4 + component) as u32)
+            enabled.get(attribute).map_or(host::ZERO, |&register| (usize::from(register) * 4 + component) as u32)
         }
     };
     let [t0, t1, t2] = map.texcoords;
@@ -899,6 +918,7 @@ struct MeshCache {
     bytes: usize,
     /// meshes found changed, by address, and the list they were found in.
     changed: rustc_hash::FxHashMap<u32, u64>,
+    pruned: u64,
 }
 
 /// the list a mesh was read in, the journal's stamp when it was last
@@ -910,12 +930,29 @@ type Checked = (u64, u64, bool);
 /// one only a flush of everything went over.
 const MESH_TRUSTED_LISTS: u64 = 600;
 const MESH_FLUSHED_LISTS: u64 = 64;
+/// Keep the active working set, but release scenes idle for three complete
+/// revalidation periods. A hot mesh is checked at least once per period;
+/// textures track every actual use independently of revalidation.
+const CACHE_IDLE_LISTS: u64 = 3 * MESH_TRUSTED_LISTS;
 /// how many bytes of meshes are kept before the cache starts over.
 const MESH_BYTES: usize = 32 << 20;
 /// how many command lists a changed mesh stays untrusted.
 const MESH_DOUBTED_LISTS: u64 = 1024;
 
 impl MeshCache {
+    /// A hot mesh is checked again within 600 lists. Old scenes need not
+    /// occupy the cache until the byte limit is reached. Draws already
+    /// queued keep their own Arc leases on all of these allocations.
+    fn prune_idle(&mut self, list: u64) {
+        if list.saturating_sub(self.pruned) < 600 { return; }
+        self.pruned = list;
+        self.indices.retain(|_, entry| list.saturating_sub(entry.0.0) <= CACHE_IDLE_LISTS);
+        self.arrays.retain(|_, entry| list.saturating_sub(entry.0.0) <= CACHE_IDLE_LISTS);
+        self.changed.retain(|_, at| list.saturating_sub(*at) < MESH_DOUBTED_LISTS);
+        self.bytes = self.indices.values().map(|(_, indices, _, rebased, bytes)| indices.len() * 4 + rebased.len() * 4 + bytes.len()).sum::<usize>()
+            + self.arrays.values().map(|(_, bytes)| bytes.len()).sum::<usize>();
+    }
+
     /// the journal's stamp of now when a mesh read in the list and at the
     /// stamp of checked is still what it was: nothing wrote over it since,
     /// it was read in the last few hundred lists and is not one found
@@ -958,7 +995,9 @@ impl MeshCache {
 pub struct TextureCache {
     /// by address, format and size.
     entries: rustc_hash::FxHashMap<TextureKey, Decoded>,
-    texels: usize,
+    bytes: usize,
+    /// access sequence makes recency exact even within one command list.
+    access: u64,
     /// counts command lists.
     list: u64,
     /// where the draws of this list wrote, as address and length. draws
@@ -983,6 +1022,14 @@ struct Decoded {
     /// then, the journal's stamp when it was last checked, and whether a
     /// flush of everything went over it since it was read.
     checked: (u64, usize, u64, bool),
+    /// last access, as command list and access sequence, including trusted hits.
+    last_used: (u64, u64),
+}
+
+impl Decoded {
+    fn byte_size(&self) -> usize {
+        self.texels.len() * 4 + self.packed.as_ref().map_or(0, |(_, bytes)| bytes.len())
+    }
 }
 
 /// set by a renderer whose GPU samples ETC1 itself.
@@ -992,6 +1039,40 @@ pub(crate) static SAMPLES_ETC1A4: std::sync::atomic::AtomicBool = std::sync::ato
 
 /// how many texels the cache holds before it starts over, 256 MiB of them.
 const CACHED_TEXELS: usize = 64 * 1024 * 1024;
+
+fn parse_texture_cache_limit(value: &str) -> Option<usize> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mib = value.parse::<usize>().ok()?;
+    if (1..=256).contains(&mib) { Some(mib * 1024 * 1024) } else { None }
+}
+
+/// Optional process-wide resource cap; defaults retain their existing
+/// normal/SMALL_CACHE budgets when the override is absent or malformed.
+fn texture_cache_limit(default: usize) -> usize {
+    static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    static LOGGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let overridden = OVERRIDE.get_or_init(|| match std::env::var("ZAKURO_TEXTURE_CACHE_MIB") {
+        Ok(value) => match parse_texture_cache_limit(&value) {
+            Some(bytes) => Some(bytes),
+            None => {
+                log::warn!("invalid ZAKURO_TEXTURE_CACHE_MIB: expected decimal 1..256 MiB; using the configured default");
+                None
+            }
+        },
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            log::warn!("invalid ZAKURO_TEXTURE_CACHE_MIB encoding: expected decimal 1..256 MiB; using the configured default");
+            None
+        }
+    });
+    let bytes = overridden.unwrap_or(default);
+    if LOGGED.swap(bytes, std::sync::atomic::Ordering::Relaxed) != bytes {
+        log::info!("decoded texture cache budget: {} MiB ({})", bytes / (1024 * 1024), if overridden.is_some() { "ZAKURO_TEXTURE_CACHE_MIB" } else { "configured default" });
+    }
+    bytes
+}
 
 /// how many command lists fast mode goes without hashing a texture nothing
 /// wrote over, and one only a flush of everything went over.
@@ -1003,6 +1084,29 @@ impl TextureCache {
     pub fn begin_list(&mut self) {
         self.list += 1;
         self.written.clear();
+        if self.list.is_multiple_of(600) {
+            self.entries.retain(|_, decoded| self.list.saturating_sub(decoded.last_used.0) <= CACHE_IDLE_LISTS);
+            self.bytes = self.entries.values().map(Decoded::byte_size).sum();
+            static MEMORY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *MEMORY.get_or_init(|| std::env::var_os("ZAKURO_GPU_MEMORY").is_some()) {
+                let mut seen = std::collections::HashSet::new();
+                let (mut rgba, mut packed, mut old) = (0usize, 0usize, 0usize);
+                for decoded in self.entries.values() {
+                    let pointer = Arc::as_ptr(&decoded.texels) as *const u8 as usize;
+                    if !decoded.texels.is_empty() && seen.insert(pointer) {
+                        rgba += decoded.texels.len() * 4;
+                    }
+                    if let Some((_, bytes)) = &decoded.packed {
+                        let pointer = Arc::as_ptr(bytes) as *const u8 as usize;
+                        if !bytes.is_empty() && seen.insert(pointer) {
+                            packed += bytes.len();
+                        }
+                    }
+                    old += (self.list - decoded.last_used.0 >= TEXTURE_TRUSTED_LISTS) as usize;
+                }
+                log::info!("gpu memory decoded texture cache snapshot: list {}, entries {}, unique reachable CPU bytes RGBA {rgba}, packed {packed}, accounted byte-equivalents {}, entries not accessed in {TEXTURE_TRUSTED_LISTS} lists {old}; buffers may also be held by GLES or queued draws", self.list, self.entries.len(), self.bytes);
+            }
+        }
     }
 
     /// a draw writes to size bytes at addr.
@@ -1037,33 +1141,40 @@ impl TextureCache {
             true => list - checked < lists,
             false => checked == list,
         };
-        trusted.then(|| (decoded.texels.clone(), decoded.packed.clone()))
+        if trusted {
+            self.access = self.access.wrapping_add(1);
+            decoded.last_used = (self.list, self.access);
+            Some((decoded.texels.clone(), decoded.packed.clone()))
+        } else {
+            None
+        }
     }
 
     /// the texture decoded from data, which was read after stamp.
     fn decoded(&mut self, key: TextureKey, data: &[u8], stamp: u64) -> (Arc<[[u8; 4]]>, Option<Packed>) {
+        let limit = if crate::fast_with(crate::speedup::SMALL_CACHE) { CACHED_TEXELS / 4 } else { CACHED_TEXELS };
+        self.decoded_with_limit(key, data, stamp, texture_cache_limit(limit * 4))
+    }
+
+    fn decoded_with_limit(&mut self, key: TextureKey, data: &[u8], stamp: u64, byte_limit: usize) -> (Arc<[[u8; 4]]>, Option<Packed>) {
         let (_, format, width, height, packs, levels) = key;
         let hash = fingerprint(data);
         let checked = (self.list, self.written.len(), stamp, false);
+        self.access = self.access.wrapping_add(1);
+        let last_used = (self.list, self.access);
         let hit = self.entries.get(&key).is_some_and(|decoded| decoded.hash == hash);
         texture_stats(key, data.len(), hit);
         if let Some(decoded) = self.entries.get_mut(&key).filter(|decoded| decoded.hash == hash) {
             decoded.checked = checked;
+            decoded.last_used = last_used;
             return (decoded.texels.clone(), decoded.packed.clone());
-        }
-        let count = texture_levels(format, width, height, levels).map(|(w, h, _)| (w * h) as usize).sum::<usize>();
-        // a handheld in fast mode has little memory to spare, a quarter
-        let limit = if crate::fast_with(crate::speedup::SMALL_CACHE) { CACHED_TEXELS / 4 } else { CACHED_TEXELS };
-        if self.texels + count > limit {
-            self.entries.clear();
-            self.texels = 0;
         }
         // a GPU that samples the PICA's smaller formats gets them as they
         // are, ETC1 compressed, ETC1A4 so with its alpha a byte a texel
         // apart, and the rest at 1 or 2 bytes a texel, where RGBA8 is 2 to 8
         // times the memory, here and on the GPU
         // each size packed or decoded, one after the other
-        let packed = packs
+        let packed: Option<Packed> = packs
             .then(|| {
                 let mut sizes = texture_levels(format, width, height, levels).map(|(w, h, offset)| crate::texture::pack_texels(&data[offset..], format, w, h));
                 let (packing, mut bytes) = sizes.next()??;
@@ -1083,11 +1194,189 @@ impl TextureCache {
             Some(_) => Arc::from([]),
             None => texture_levels(format, width, height, levels).flat_map(|(w, h, offset)| crate::texture::decode_texels(&data[offset..], format, w, h)).collect(),
         };
-        if let Some(old) = self.entries.insert(key, Decoded { hash, texels: texels.clone(), packed: packed.clone(), checked }) {
-            self.texels -= old.texels.len() + old.packed.map_or(0, |(_, bytes)| bytes.len() / 4);
+        // Remove the old allocation before checking the incoming cost. A
+        // same-sized replacement must not evict an unrelated working set.
+        if let Some(old) = self.entries.remove(&key) {
+            self.bytes -= old.byte_size();
         }
-        self.texels += texels.len() + packed.as_ref().map_or(0, |(_, bytes)| bytes.len() / 4);
+        let cost = texels.len() * 4 + packed.as_ref().map_or(0, |(_, bytes)| bytes.len());
+        // Oversized textures still decode correctly but do not flush useful
+        // smaller entries or leave the cache above its byte budget.
+        if cost <= byte_limit {
+            while self.bytes + cost > byte_limit {
+                let oldest = self.entries.iter().max_by_key(|(_, decoded)| self.access.wrapping_sub(decoded.last_used.1)).map(|(&key, _)| key).expect("cached bytes have an entry");
+                let old = self.entries.remove(&oldest).expect("the oldest entry was just found");
+                self.bytes -= old.byte_size();
+            }
+            self.entries.insert(key, Decoded { hash, texels: texels.clone(), packed: packed.clone(), checked, last_used });
+            self.bytes += cost;
+        }
         (texels, packed)
+    }
+}
+
+#[cfg(test)]
+mod texture_lru_tests {
+    use super::*;
+
+    #[test]
+    fn idle_pruning_keeps_boundary_and_refreshes_actual_texture_use() {
+        let mut cache = TextureCache::default();
+        let format = TextureFormat::Rgba8;
+        let old = key(20, format, false);
+        let hot = key(21, format, false);
+        let source = data(format);
+        let held = cache.decoded_with_limit(old, &source, crate::journal::now(), 1024).0;
+        cache.decoded_with_limit(hot, &source, crate::journal::now(), 1024);
+        for _ in 0..1800 { cache.begin_list(); }
+        assert!(cache.entries.contains_key(&old), "the idle boundary is inclusive");
+        cache.decoded_with_limit(hot, &source, crate::journal::now(), 1024);
+        for _ in 0..600 { cache.begin_list(); }
+        assert!(!cache.entries.contains_key(&old));
+        assert!(cache.entries.contains_key(&hot), "a true use refreshes retention");
+        assert_eq!(Arc::strong_count(&held), 1, "queued data outlives the cache entry");
+        assert_eq!(cache.bytes, bytes(&cache));
+    }
+
+    #[test]
+    fn idle_scene_pruning_keeps_live_leases_and_recent_textures() {
+        let mut cache = TextureCache::default();
+        let format = TextureFormat::Rgba8;
+        let old = key(1, format, false);
+        let hot = key(2, format, false);
+        let old_bytes = cache.decoded_with_limit(old, &data(format), crate::journal::now(), 1024).0;
+        cache.list = 6001;
+        cache.decoded_with_limit(hot, &data(format), crate::journal::now(), 1024);
+        cache.list = 6599;
+        cache.begin_list();
+        assert!(!cache.entries.contains_key(&old));
+        assert!(cache.entries.contains_key(&hot));
+        assert_eq!(cache.bytes, bytes(&cache));
+        assert_eq!(old_bytes.len(), 64, "a queued draw retains its decoded data");
+        assert_eq!(Arc::strong_count(&old_bytes), 1);
+    }
+
+    #[test]
+    fn idle_mesh_pruning_counts_retained_allocations_and_preserves_draw_leases() {
+        let mut cache = MeshCache::default();
+        let old: Arc<[u8]> = Arc::from([1, 2, 3, 4]);
+        cache.arrays.insert((0, 4), ((0, 0, false), old.clone()));
+        cache.arrays.insert((4, 4), ((6000, 0, false), Arc::from([5, 6, 7, 8])));
+        cache.indices.insert((8, 2, false), ((6000, 0, false), Arc::from([1, 2]), (1, 2), Arc::from([0, 1]), Arc::from([0, 0, 1, 0])));
+        cache.changed.insert(0, 0);
+        cache.changed.insert(4, 6000);
+        cache.bytes = 999;
+        cache.prune_idle(6600);
+        assert!(!cache.arrays.contains_key(&(0, 4)));
+        assert_eq!(cache.bytes, 4 + 8 + 8 + 4);
+        assert_eq!(Arc::strong_count(&old), 1);
+        assert_eq!(&*old, &[1, 2, 3, 4]);
+        assert!(!cache.changed.contains_key(&0));
+        assert!(cache.changed.contains_key(&4));
+        cache.prune_idle(6601);
+        assert_eq!(cache.pruned, 6600, "sweeping is periodic, not per draw");
+    }
+
+    fn key(address: u32, format: TextureFormat, packs: bool) -> TextureKey {
+        (address, format, 8, 8, packs, 1)
+    }
+
+    fn data(format: TextureFormat) -> Vec<u8> {
+        (0..64 * format.bits_per_pixel() / 8).map(|i| (i * 37 + 11) as u8).collect()
+    }
+
+    fn bytes(cache: &TextureCache) -> usize {
+        cache.entries.values().map(|decoded| decoded.texels.len() * 4 + decoded.packed.as_ref().map_or(0, |(_, bytes)| bytes.len())).sum()
+    }
+
+    #[test]
+    fn explicit_budget_parser_accepts_only_bounded_positive_decimal_mib() {
+        assert_eq!(parse_texture_cache_limit(&usize::MAX.to_string()), None);
+        for mib in [1, 16, 32, 64, 256] {
+            assert_eq!(parse_texture_cache_limit(&mib.to_string()), Some(mib * 1024 * 1024));
+        }
+        for value in ["", "0", "257", "-1", "+16", " 16", "16 ", "16MiB", "1.5", "0x10", "１６", "999999999999999999999999999999999999999"] {
+            assert_eq!(parse_texture_cache_limit(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn incremental_eviction_preserves_the_recent_working_set() {
+        let mut cache = TextureCache::default();
+        let format = TextureFormat::Rgba8;
+        let data = data(format);
+        let keys = [1, 2, 3, 4].map(|address| key(address, format, false));
+        for &key in &keys[..3] { cache.decoded_with_limit(key, &data, crate::journal::now(), 768); }
+        cache.decoded_with_limit(keys[0], &data, crate::journal::now(), 768);
+        cache.decoded_with_limit(keys[3], &data, crate::journal::now(), 768);
+        assert_eq!(cache.entries.len(), 3);
+        assert!(!cache.entries.contains_key(&keys[1]), "only the least recently used entry goes");
+        assert!(cache.entries.contains_key(&keys[0]) && cache.entries.contains_key(&keys[2]) && cache.entries.contains_key(&keys[3]));
+        assert_eq!(bytes(&cache), 768);
+    }
+
+    #[test]
+    fn trusted_hits_refresh_recency_without_rehashing() {
+        let mut cache = TextureCache::default();
+        let format = TextureFormat::Rgba8;
+        let data = data(format);
+        let keys = [11, 12, 13].map(|address| key(address, format, false));
+        for &key in &keys[..2] { cache.decoded_with_limit(key, &data, crate::journal::now(), 512); }
+        assert!(cache.checked(keys[0], data.len() as u32).is_some());
+        cache.decoded_with_limit(keys[2], &data, crate::journal::now(), 512);
+        assert!(cache.entries.contains_key(&keys[0]), "a trusted cache hit protects the active texture");
+        assert!(!cache.entries.contains_key(&keys[1]));
+        assert_eq!(bytes(&cache), 512);
+    }
+
+    #[test]
+    fn replacement_subtracts_the_old_allocation_before_budgeting() {
+        let mut cache = TextureCache::default();
+        let format = TextureFormat::Rgba8;
+        let mut data = data(format);
+        let a = key(21, format, false);
+        let b = key(22, format, false);
+        cache.decoded_with_limit(a, &data, crate::journal::now(), 512);
+        let old_b = cache.decoded_with_limit(b, &data, crate::journal::now(), 512).0;
+        data[0] ^= 0x80;
+        let changed = cache.decoded_with_limit(a, &data, crate::journal::now(), 512).0;
+        assert_eq!(&*changed, &crate::texture::decode_texels(&data, format, 8, 8));
+        assert!(cache.entries.contains_key(&b), "same-sized replacement must not evict unrelated data");
+        assert!(Arc::ptr_eq(&old_b, &cache.entries[&b].texels));
+        assert_eq!(bytes(&cache), 512);
+    }
+
+    #[test]
+    fn packed_formats_use_their_actual_byte_cost() {
+        let mut cache = TextureCache::default();
+        let format = TextureFormat::Rgb565;
+        let data = data(format);
+        for address in [31, 32] {
+            let (texels, packed) = cache.decoded_with_limit(key(address, format, true), &data, crate::journal::now(), 256);
+            assert!(texels.is_empty());
+            let (packing, packed) = packed.unwrap();
+            let expected = crate::texture::pack_texels(&data, format, 8, 8).unwrap();
+            assert_eq!(packing, expected.0);
+            assert_eq!(&*packed, &expected.1);
+        }
+        assert_eq!(cache.entries.len(), 2, "two 128-byte packed textures fit the 256-byte budget");
+        assert_eq!(bytes(&cache), 256);
+    }
+
+    #[test]
+    fn oversized_texture_does_not_flush_or_overfill_the_cache() {
+        let mut cache = TextureCache::default();
+        let format = TextureFormat::Rgba8;
+        let small = key(41, format, false);
+        let data = data(format);
+        cache.decoded_with_limit(small, &data, crate::journal::now(), 256);
+        let large = (42, format, 16, 16, false, 1);
+        let data = data.repeat(4);
+        let output = cache.decoded_with_limit(large, &data, crate::journal::now(), 256).0;
+        assert_eq!(&*output, &crate::texture::decode_texels(&data, format, 16, 16));
+        assert!(cache.entries.contains_key(&small));
+        assert!(!cache.entries.contains_key(&large));
+        assert_eq!(bytes(&cache), 256);
     }
 }
 
@@ -2134,6 +2423,7 @@ pub fn draw<M: GpuMemory>(
     // an index buffer names most vertices several times, fetch and shade
     // each of them once.
     let list = resources.textures.list;
+    resources.meshes.prune_idle(list);
     let key = (index_base, vertex_count, index_short);
     let meshes = &mut resources.meshes;
     let stamp = crate::journal::now();
@@ -3284,4 +3574,134 @@ mod tests {
         assert!(differing * 100 < drawn, "{differing} of {drawn} pixels differ");
         assert!(deepest < 1 << 8, "depth differs by {deepest}");
     }
+
+    #[cfg(feature = "gles")]
+    fn metadata_reference_output_semantics(registers: &[u32]) -> [u32; 24] {
+        let map = read_output_map(registers);
+        let mask = registers[REG_VS_OUTPUT_MASK] & 0xFFFF;
+        // the output register behind each attribute, as pack_outputs packs them
+        let enabled: Vec<usize> = (0..shader::OUTPUT_REGISTERS).filter(|r| mask == 0 || mask & (1 << r) != 0).collect();
+        let slot = |slot: Option<(usize, usize)>| match slot {
+            None => host::MISSING,
+            Some((attribute, component)) => {
+                enabled.get(attribute).map_or(host::ZERO, |&register| (register * 4 + component) as u32)
+            }
+        };
+        let [t0, t1, t2] = map.texcoords;
+        let slots = map
+            .position
+            .map(Some)
+            .into_iter()
+            .chain(map.color)
+            .chain(t0)
+            .chain(t1)
+            .chain(t2)
+            .chain(map.quaternion)
+            .chain(map.view)
+            .chain([map.texcoord0_w]);
+        let mut semantics = [host::MISSING; 24];
+        for (semantic, found) in semantics.iter_mut().zip(slots) {
+            *semantic = slot(found);
+        }
+        semantics
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn inline_output_semantics_preserve_masks_and_missing_outputs() {
+        let mut registers = [0u32; 0x300];
+        // Include duplicate semantics, ignored values, absent position,
+        // attributes beyond the enabled outputs, and the zero-mask fallback.
+        let maps = [
+            [0x0302_0100, 0x0B0A_0908, 0x0D0C_1F1F, 0x0F0E_1F1F, 0x1413_1210, 0x1716_0706, 0x0504_1F1F],
+            [0x1F1F_1F1F; 7],
+            [0x0000_0000; 7],
+            [0x0302_0100; 7],
+        ];
+        for map in maps {
+            registers[REG_SHADER_OUTPUT_MAP..REG_SHADER_OUTPUT_MAP + 7].copy_from_slice(&map);
+            for total in 0..=7 {
+                registers[REG_SHADER_OUTPUT_TOTAL] = total;
+                for mask in (0..=u16::MAX as u32).chain([0xFFFF_0000, 0xFFFF_FFFF]) {
+                    registers[REG_VS_OUTPUT_MASK] = mask;
+                    assert_eq!(output_semantics(&registers), metadata_reference_output_semantics(&registers), "total {total}, mask {mask:08x}");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn inline_fetch_bookkeeping_preserves_aliases_and_large_layout_fallback() {
+        struct Bytes(Vec<u8>);
+        impl GpuMemory for Bytes {
+            fn read(&mut self, address: u32, out: &mut [u8]) {
+                out.copy_from_slice(&self.0[address as usize..address as usize + out.len()]);
+            }
+            fn write(&mut self, address: u32, data: &[u8]) {
+                self.0[address as usize..address as usize + data.len()].copy_from_slice(data);
+            }
+            fn slice(&mut self, address: u32, length: usize) -> Option<&[u8]> {
+                self.0.get(address as usize..address as usize + length)
+            }
+        }
+        let mut registers = [0u32; 0x300];
+        registers[REG_VS_NUM_INPUT_ATTRIBUTES] = 1;
+        registers[REG_VS_BLOCK + SHADER_INPUT_MAP_LOW] = 0x10;
+        let fixed = [shader::ZERO; 16];
+        for count in [1, REG_ATTRIBUTE_LOADER_COUNT, REG_ATTRIBUTE_LOADER_COUNT + 1, 32] {
+            let mut loaders: Vec<LoaderLayout> = (0..count)
+                .map(|_| LoaderLayout { offset: 0, stride: 32, size: 32, fields: Vec::new() }).collect();
+            // Both attributes use one array in the final loader. This tests
+            // the inline last slot and the heap spill slot, plus alias reuse.
+            loaders[count - 1] = LoaderLayout {
+                offset: 64, stride: 32, size: 32,
+                fields: vec![Field { id: 0, offset: 0, ty: 3, count: 4 }, Field { id: 1, offset: 16, ty: 3, count: 4 }],
+            };
+            let layout = VertexLayout { loaders };
+            let mut memory = Bytes((0..=255u8).collect());
+            let mut meshes = MeshCache::default();
+            let fetched = fetch_arrays(&registers, &mut memory, 0, &layout, &fixed, (1, 2), &mut meshes, 0).expect("array bytes are available");
+            assert_eq!(fetched.first, 1);
+            assert_eq!(fetched.arrays.len(), 1, "two attributes share one upload");
+            assert_eq!(fetched.arrays[0].stride, 32);
+            assert_eq!(&*fetched.arrays[0].bytes, &memory.0[96..160]);
+            for (register, expected_offset) in [(0, 0), (1, 16)] {
+                match fetched.inputs[register] {
+                    host::Input::Array { array, offset, ty, count } => assert_eq!((array, offset, ty, count), (0, expected_offset, 3, 4)),
+                    host::Input::Constant(_) => panic!("array input became a constant"),
+                }
+            }
+            assert!(fetch_arrays(&registers, &mut memory, 0, &layout, &fixed, (2, 1), &mut meshes, 0).is_none());
+        }
+        // The masked input count reaches twelve even for a raw count of 16.
+        // Every input below uses a different array, exercising ordinal 12 in
+        // both the register-sized table and an oversized layout's spill.
+        registers[REG_VS_NUM_INPUT_ATTRIBUTES] = 0xF;
+        registers[REG_VS_BLOCK + SHADER_INPUT_MAP_LOW] = 0x7654_3210;
+        registers[REG_VS_BLOCK + SHADER_INPUT_MAP_HIGH] = 0xFEDC_BA98;
+        for count in [REG_ATTRIBUTE_LOADER_COUNT, 32] {
+            let mut loaders: Vec<LoaderLayout> = (0..count)
+                .map(|_| LoaderLayout { offset: 0, stride: 4, size: 4, fields: Vec::new() }).collect();
+            for id in 0..12 {
+                loaders[count - 12 + id] = LoaderLayout {
+                    offset: id as u32 * 8, stride: 4, size: 4,
+                    fields: vec![Field { id, offset: 0, ty: 3, count: 1 }],
+                };
+            }
+            let layout = VertexLayout { loaders };
+            let mut memory = Bytes((0..=255u8).collect());
+            let mut meshes = MeshCache::default();
+            let fetched = fetch_arrays(&registers, &mut memory, 0, &layout, &fixed, (0, 1), &mut meshes, 0).expect("all twelve arrays are available");
+            assert_eq!(fetched.arrays.len(), 12);
+            for id in 0..12 {
+                assert_eq!(&*fetched.arrays[id].bytes, &memory.0[id * 8..id * 8 + 8]);
+                match fetched.inputs[id] {
+                    host::Input::Array { array, offset, ty, count } => assert_eq!((array, offset, ty, count), (id, 0, 3, 1)),
+                    host::Input::Constant(_) => panic!("array input became a constant"),
+                }
+            }
+        }
+    }
+
 }

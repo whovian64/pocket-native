@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "verified_gameplay": true,
+  "scene": "Fresh Ultra Sun USA prologue followed by trainer waking and player-controlled bedroom movement using CLEFT/CDOWN. Standing trainer and changed position/camera are visible at frames20999 and23999.",
+  "reviewed_by": "Codex root visual inspection on 2026-11-05; agent review, not user/human signoff",
+  "rom_sha256": "b812dc50fdb76cc9f82ed80a3798dae11a2fced1e2fee436db02a8910fde39d1",
+  "frames": 24000,
+  "screenshots": {
+    "frame-02999.bmp": "160b87fc697ea10d54c1abc22a4f4443061b688a0bfdcb5fdd21d3c27d324018",
+    "frame-05999.bmp": "df2761dcc65dd3faee94004726110ddad67b7127037ef059a127939b196f82ba",
+    "frame-08999.bmp": "745415868f7faf04a7bec29686658f34e6502d9d3f50cc680016dfa87261e6ea",
+    "frame-11999.bmp": "75c43d3662263769bf00ec1ab8b9face3195e5f1f051e2c96cdff49861449898",
+    "frame-14999.bmp": "4a254c18dad50ff51e03c7a195447c825760e9fae8b50fe527e7048771f1a3d3",
+    "frame-17999.bmp": "bd434fc9fc8518cb28df79f57687b92dccb0f9f557a7013107f1fecfc5293b75",
+    "frame-20999.bmp": "4f58563aa4d629a285689f9b82f25c1b2da3941818bd0f034729cca55d9943c1",
+    "frame-23999.bmp": "712c6683db737ec59530dcaf83a165fbca56436b6343c5c589a67d61e621af22"
+  },
+  "input_sha256": "080f0c9e20fe261437aef33af0f487b24dbda4df99843e97ab2fa7452f1b3376",
+  "limitations": "Bedroom movement only. No battle, outdoor control, save integrity, complete state/audio equivalence or handheld performance proof. The original runtime must match all screenshots and guest-work counters independently.",
+  "name": "Ultra Sun USA prologue and bedroom",
+  "input_file": "ultra-sun-usa-bedroom.input",
+  "resolution": 1.0,
+  "initial_state": "Fresh font-only seed; no prior save or shader cache; serialized GPU; reviewed fixed-quality profiles."
+}

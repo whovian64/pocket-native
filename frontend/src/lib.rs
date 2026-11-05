@@ -522,6 +522,9 @@ pub fn run(mut args: Vec<String>) {
                 break;
             }
         }
+        if let Some(probe) = probe.as_mut() {
+            probe.checkpoint(&system, frame_number);
+        }
         if let Some(request) = system.keyboard_request() {
             let confirm = request.buttons.len().saturating_sub(1);
             system.answer_keyboard("Zakuro", confirm);

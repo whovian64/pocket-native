@@ -9,6 +9,12 @@ use zakuro_cpu::{Bus, Cpu, Exit};
 
 use crate::abi::{self, Code, Context, Host, Library};
 
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+mod fastmem;
+
+/// Whether this host can verify a library built for a flat guest view.
+pub const FASTMEM_SUPPORTED: bool = cfg!(all(target_os = "linux", target_pointer_width = "64"));
+
 const PAGE_SIZE: usize = 0x1000;
 /// the return address functions are called with, which nothing maps.
 const RETURN: u32 = 0xFFFF_FFF0;
@@ -37,6 +43,8 @@ pub struct Memory {
     read_pages: Vec<*mut u8>,
     write_pages: Vec<*mut u8>,
     faults: u64,
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    view: Option<fastmem::View>,
 }
 
 impl Memory {
@@ -53,7 +61,35 @@ impl Memory {
                 }
             }
         }
-        Memory { regions, read_pages, write_pages, faults: 0 }
+        Memory { regions, read_pages, write_pages, faults: 0,
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            view: None,
+        }
+    }
+
+    fn fastmem(&self) -> *mut u8 {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        if let Some(view) = &self.view { return view.base(); }
+        null_mut()
+    }
+
+    fn enable_fastmem(&mut self) {
+        assert!(FASTMEM_SUPPORTED, "fastmem verification requires 64-bit Linux");
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            let mut view = fastmem::View::new().unwrap_or_else(|error| panic!("{error}"));
+            for region in &self.regions {
+                view.initialize(region.base, &region.bytes);
+                for offset in (0..region.bytes.len()).step_by(PAGE_SIZE) {
+                    let index = (region.base as usize + offset) >> 12;
+                    // SAFETY: region ranges fit the live guest view.
+                    let page = unsafe { view.base().add(region.base as usize + offset) };
+                    self.read_pages[index] = page;
+                    if region.writable { self.write_pages[index] = page; }
+                }
+            }
+            self.view = Some(view);
+        }
     }
 
     fn duplicate(&self) -> Memory {
@@ -66,6 +102,16 @@ impl Memory {
     }
 
     fn copy_from(&mut self, other: &Memory) {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        if let Some(view) = &mut self.view {
+            // The pristine source remains Vec-backed. Reset the entire view,
+            // not only writable regions, so unknown writes cannot leak cases.
+            assert!(other.view.is_none());
+            view.reset();
+            for source in &other.regions { view.initialize(source.base, &source.bytes); }
+            self.faults = 0;
+            return;
+        }
         for (region, source) in self.regions.iter_mut().zip(&other.regions) {
             if region.writable {
                 region.bytes.copy_from_slice(&source.bytes);
@@ -74,10 +120,13 @@ impl Memory {
         self.faults = 0;
     }
 
-    /// the first address whose byte differs between two copies.
     /// the first address whose byte differs between two copies, where two
     /// NaNs count as the same whatever their bits.
-    fn first_difference(&self, other: &Memory) -> Option<u32> {
+    fn first_difference(&self, other: &Memory) -> Option<u64> {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        if let Some(view) = &self.view {
+            return view.first_difference(other.view.as_ref().expect("matching verifier memory modes"));
+        }
         self.regions.iter().zip(&other.regions).filter(|(region, _)| region.writable).find_map(|(a, b)| {
             let mut i = 0;
             while i < a.bytes.len() {
@@ -92,7 +141,7 @@ impl Memory {
                 } else if nans(&a.bytes, &b.bytes, word, 4) {
                     i = word + 4;
                 } else {
-                    return Some(a.base + i as u32);
+                    return Some(a.base as u64 + i as u64);
                 }
             }
             None
@@ -123,6 +172,11 @@ fn same_vfp(a: &[u32; 32], b: &[u32; 32]) -> bool {
 
 impl Bus for Memory {
     fn read8(&mut self, address: u32) -> u8 {
+        let view = self.fastmem();
+        if !view.is_null() {
+            // SAFETY: every guest address is within the reserved view.
+            return unsafe { *view.add(address as usize) };
+        }
         let page = self.read_pages[(address >> 12) as usize];
         if page.is_null() {
             self.faults += 1;
@@ -141,6 +195,12 @@ impl Bus for Memory {
     }
 
     fn write8(&mut self, address: u32, value: u8) {
+        let view = self.fastmem();
+        if !view.is_null() {
+            // SAFETY: as in read8; both verifier sides own private views.
+            unsafe { *view.add(address as usize) = value; }
+            return;
+        }
         let page = self.write_pages[(address >> 12) as usize];
         if page.is_null() {
             self.faults += 1;
@@ -446,8 +506,11 @@ impl Report {
 /// runs each function both ways, printing the first few mismatches. the
 /// functions are entries with bit 0 set for Thumb.
 pub fn verify(name: &str, pristine: &Memory, library: &Library, functions: &[u32]) -> Report {
-    let fresh =
-        || Run { memory: pristine.duplicate(), cpu: Cpu::new(), library, pending: None, interpreted: 0, fallbacks: 0 };
+    let fresh = || {
+        let mut memory = pristine.duplicate();
+        if library.needs_fastmem() { memory.enable_fastmem(); }
+        Run { memory, cpu: Cpu::new(), library, pending: None, interpreted: 0, fallbacks: 0 }
+    };
     let mut a = fresh();
     let mut b = fresh();
     let mut report = Report::default();
@@ -509,6 +572,7 @@ pub fn verify(name: &str, pristine: &Memory, library: &Library, functions: &[u32
             fpscr: &mut b.cpu.vfp.fpscr,
             host: &HOST,
             user: &mut b as *mut Run as *mut c_void,
+            fastmem: b.memory.fastmem(),
         };
         store(&cpu, &mut ctx);
 
@@ -563,4 +627,83 @@ pub fn verify(name: &str, pristine: &Memory, library: &Library, functions: &[u32
         }
     }
     report
+}
+
+#[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sparse_views_share_bus_state_compare_unknown_writes_and_reset() {
+        let pristine = Memory::new(vec![Region { base: 0x1000, bytes: vec![0x55; PAGE_SIZE], writable: false }]);
+        let mut a = pristine.duplicate();
+        let mut b = pristine.duplicate();
+        a.enable_fastmem(); b.enable_fastmem();
+        assert_eq!(a.first_difference(&b), None);
+        assert_eq!(a.read32(0x7654_3FFE), 0);
+        a.write32(0x7654_3FFE, 0x1234_5678);
+        // The generated-code view and the interpreter's Bus see one backing.
+        unsafe { std::ptr::copy_nonoverlapping(0x1234_5678u32.to_le_bytes().as_ptr(), b.fastmem().add(0x7654_3FFE), 4); }
+        assert_eq!(b.read32(0x7654_3FFE), 0x1234_5678);
+        assert_eq!(a.first_difference(&b), None);
+        b.write8(0x7654_4001, 0xFF);
+        assert_eq!(a.first_difference(&b), Some(0x7654_4001));
+        a.write8(0x1000, 0xAA);
+        a.copy_from(&pristine); b.copy_from(&pristine);
+        assert_eq!(a.read8(0x1000), 0x55);
+        assert_eq!(a.read32(0x7654_3FFE), 0);
+        assert_eq!(b.read32(0x7654_3FFE), 0);
+        assert_eq!(a.first_difference(&b), None);
+        assert_eq!(a.faults, 0);
+        // Reference accesses wrap at 32 bits. A native crossing access that
+        // fails to wrap must be detected rather than hidden by the harness.
+        a.write32(u32::MAX, 0x1234_5678);
+        unsafe { std::ptr::copy_nonoverlapping(0x1234_5678u32.to_le_bytes().as_ptr(), b.fastmem().add(u32::MAX as usize), 4); }
+        assert_eq!(a.first_difference(&b), Some(0));
+    }
+
+    #[test]
+    fn generated_fastmem_is_checked_against_the_interpreter() {
+        use crate::{codegen, discover::{self, Program, Source}, image::Segment};
+        use std::process::Command;
+        const BASE: u32 = 0x100000;
+        // mov r1,0x40000000; str r0,[r1,4095]; ldr r2,[r1,4095];
+        // adds r0,r2,1; bx lr. The unaligned memory spans two unknown pages.
+        let words = [0xE3A0_1101u32, 0xE581_0FFF, 0xE591_2FFF, 0xE292_0001, 0xE12F_FF1E];
+        let program = Program {
+            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
+            seeds: vec![(BASE, Source::Entry)], slots: None,
+        };
+        let analysis = discover::analyze(&program);
+        let files = codegen::generate(&[codegen::Unit { module: None, program: &program, analysis: &analysis }], &[]);
+        let dir = std::env::temp_dir().join(format!("recomp-fastmem-verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("recomp.h"), codegen::HEADER).unwrap();
+        let pristine = Memory::new(regions((BASE, &program.text.bytes), (0x200000, &[]), (0x300000, &[]), 0));
+        for (variant, flags, corrupt) in [
+            ("paged", vec!["-DRECOMP_FLAG_LOCALS"], false),
+            ("fastmem", vec!["-DRECOMP_FASTMEM"], false),
+            ("fastmem-flags", vec!["-DRECOMP_FASTMEM", "-DRECOMP_FLAG_LOCALS"], false),
+            ("corrupt", vec!["-DRECOMP_FASTMEM", "-DRECOMP_FLAG_LOCALS"], true),
+        ] {
+            for (name, source) in &files {
+                let source = if corrupt { source.replace("mem_write32(ctx, oa, ctx->r[0]);", "mem_write32(ctx, oa, ctx->r[0] + 1);") } else { source.clone() };
+                std::fs::write(dir.join(name), source).unwrap();
+            }
+            let path = dir.join(format!("{variant}.so"));
+            let compiler = std::env::var_os("CC").filter(|value| !value.is_empty()).unwrap_or_else(|| "cc".into());
+            let mut compile = Command::new(&compiler);
+            compile.current_dir(&dir).args(["-O2", "-shared", "-fPIC"]).args(flags);
+            for (name, _) in &files { if name.ends_with(".c") { compile.arg(name); } }
+            let result = compile.arg("-o").arg(&path).arg("-lm").output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            let library = Library::open(&path).unwrap();
+            let report = verify(variant, &pristine, &library, &[BASE]);
+            assert_eq!(report.tested, 1);
+            assert_eq!(report.mismatched, usize::from(corrupt), "{variant}");
+            assert_eq!(report.returned, usize::from(!corrupt), "{variant}");
+            assert_eq!(report.stuck, 0);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

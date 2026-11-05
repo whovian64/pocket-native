@@ -218,6 +218,14 @@ what the panel would show (a `%` in the name saves every frame).
 [docs/games.md](docs/games.md) covers probing a game, writing its
 profile and the advanced settings a profile can set.
 
+For reproducible optimization work, see the
+[performance eval](docs/performance-eval.md) and the
+[RG DS Plus hardware and OS assessment](docs/rg-ds-plus-feasibility.md).
+The eval compares the same fixed workload, records CPU time and peak resident
+memory, and checks sampled screen output before accepting a speedup.
+[Initial Ultra Sun findings](docs/ultra-sun-eval-results.md) retain the measured
+limits and the cases that still need validation.
+
 ## Credits and license
 
 See [CREDITS.md](CREDITS.md). Pocket Native is under the MIT license,

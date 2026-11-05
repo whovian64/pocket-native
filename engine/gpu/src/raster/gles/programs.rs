@@ -24,9 +24,33 @@ pub(super) fn manifest_path() -> Option<std::path::PathBuf> {
 }
 
 pub(super) fn program_cache_path(renderer: &str, vertex: &str, fragment: &str) -> Option<std::path::PathBuf> {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OFF.get_or_init(|| crate::switch("ZAKURO_NO_PROGRAM_BINARY_CACHE", "disk program binaries disabled; manifest and in-process shader reuse remain enabled")) {
+        return None;
+    }
     let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
     let dir = var("XDG_CACHE_HOME").or_else(|| var("HOME").map(|home| home.join(".cache")))?;
     Some(dir.join("zakuro").join("gles").join(format!("{:016x}.bin", fnv(&[renderer, vertex, fragment]))))
+}
+
+#[cfg(test)]
+thread_local! {
+    static BINARY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Read a driver binary only when there is somewhere to retain it. Evaluating
+/// get_program_binary in a tuple with an absent path still performs the costly
+/// driver operation, including on Android installations without HOME.
+fn write_program_binary(gl: &glow::Context, program: glow::Program, cached: Option<&std::path::Path>) {
+    let Some(path) = cached else { return };
+    #[cfg(test)]
+    BINARY_READS.set(BINARY_READS.get() + 1);
+    // SAFETY: the linked program belongs to the current compiler/GL context.
+    if let Some(binary) = unsafe { gl.get_program_binary(program) } {
+        let mut bytes = binary.format.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&binary.buffer);
+        let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, bytes));
+    }
 }
 
 /// what a draw gives back while the program it needs is still compiling, the
@@ -249,8 +273,15 @@ pub(super) const PROGRAM_SEPARABLE: u32 = 0x8258;
 pub(super) const VERTEX_SHADER_BIT: u32 = 0x1;
 pub(super) const FRAGMENT_SHADER_BIT: u32 = 0x2;
 
-pub(super) type StagePrograms = rustc_hash::FxHashMap<(usize, u32, u64), glow::Program>;
-pub(super) type Separate = rustc_hash::FxHashMap<(usize, glow::Program), (glow::Program, glow::Program)>;
+/// Ownership is separate from GL destruction: compiler jobs can reserve a
+/// stage before publishing a pair, and only the GL thread prunes programs.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Stage {
+    pub(super) program: glow::Program,
+}
+
+pub(super) type StagePrograms = rustc_hash::FxHashMap<(usize, u32, u64), Arc<Stage>>;
+pub(super) type Separate = rustc_hash::FxHashMap<(usize, glow::Program), (Arc<Stage>, Arc<Stage>)>;
 
 /// the stage programs built, by the contexts sharing them, stage and
 /// source, shared by every thread that builds programs.
@@ -274,10 +305,10 @@ thread_local! {
 }
 
 /// a stage of a separable program, built or loaded once and kept.
-pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<glow::Program, String> {
+pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Result<Arc<Stage>, String> {
     let key = (SHARE_GROUP.get(), stage, fnv(&[source]));
-    if let Some(&found) = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).get(&key) {
-        return Ok(found);
+    if let Some(found) = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(Default::default).get(&key) {
+        return Ok(found.clone());
     }
     let _compiling = compiler_lock();
     let _watched = Watched;
@@ -312,23 +343,25 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
                 return Err(error);
             }
             gl.attach_shader(program, shader);
-            gl.program_binary_retrievable_hint(program, true);
+            if cached.is_some() {
+                gl.program_binary_retrievable_hint(program, true);
+            }
             at_compiler([source, ""]);
             gl.link_program(program);
             gl.detach_shader(program, shader);
             if !kept {
-                keep_shader(gl, stage, source, shader);
+                // The linked stage is cached by source below. Every later
+                // request reuses that program before looking for a shader,
+                // so retaining its detached shader cannot save any work.
+                // A borrowed shader stays with the cache that owns it.
+                gl.delete_shader(shader);
             }
             if !gl.get_program_link_status(program) {
                 let error = format!("could not link a shader stage, {}", gl.get_program_info_log(program));
                 gl.delete_program(program);
                 return Err(error);
             }
-            if let (Some(path), Some(binary)) = (cached.as_deref(), gl.get_program_binary(program)) {
-                let mut bytes = binary.format.to_le_bytes().to_vec();
-                bytes.extend_from_slice(&binary.buffer);
-                let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, bytes));
-            }
+            write_program_binary(gl, program, cached.as_deref());
         }
         if stage == glow::FRAGMENT_SHADER {
             for unit in 0..3 {
@@ -346,13 +379,14 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
     // another thread may have built the same stage meanwhile, its stays
     let mut stages = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let stages = stages.get_or_insert_with(Default::default);
-    if let Some(&found) = stages.get(&key) {
+    if let Some(found) = stages.get(&key) {
         // SAFETY: the context is current, nothing has used this one
         unsafe { gl.delete_program(program) };
-        return Ok(found);
+        return Ok(found.clone());
     }
-    stages.insert(key, program);
-    Ok(program)
+    let stage = Arc::new(Stage { program });
+    stages.insert(key, stage.clone());
+    Ok(stage)
 }
 
 /// a separable program: its stages, built once each, behind a stand-in
@@ -379,7 +413,7 @@ pub(super) fn build_separable(gl: &glow::Context, vertex: &str, fragment: &str) 
 /// one's stages through the GL thread's pipeline for them, made the first
 /// time.
 pub(super) fn bind_program(gl: &glow::Context, program: glow::Program) {
-    let stages = if separable() { SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().and_then(|separate| separate.get(&(SHARE_GROUP.get(), program)).copied()) } else { None };
+    let stages = if separable() { SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().and_then(|separate| separate.get(&(SHARE_GROUP.get(), program)).cloned()) } else { None };
     // SAFETY: on the GL thread, the program and stages were made in contexts
     // sharing its objects, the pipeline in its own
     unsafe {
@@ -393,8 +427,8 @@ pub(super) fn bind_program(gl: &glow::Context, program: glow::Program) {
                 let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
                 let mut pipeline = 0u32;
                 generate(1, &mut pipeline);
-                stages_of(pipeline, VERTEX_SHADER_BIT, vertex.0.get());
-                stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.0.get());
+                stages_of(pipeline, VERTEX_SHADER_BIT, vertex.program.0.get());
+                stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.program.0.get());
                 pipeline
             })
         });
@@ -407,16 +441,53 @@ pub(super) fn bind_program(gl: &glow::Context, program: glow::Program) {
 /// deletes a program a draw used, a separable one's stand-in and pipeline,
 /// its stages kept for others.
 pub(super) fn delete_program(gl: &glow::Context, program: glow::Program) {
-    let separate = SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_mut().and_then(|separate| separate.remove(&(SHARE_GROUP.get(), program))).is_some();
+    let separate = SEPARATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_mut().and_then(|separate| separate.remove(&(SHARE_GROUP.get(), program)));
     // SAFETY: on the GL thread, after every draw that used it
     unsafe {
-        if separate {
+        if separate.is_some() {
             if let Some(pipeline) = PIPELINES.with(|pipelines| pipelines.borrow_mut().remove(&program)) {
                 let delete: extern "system" fn(i32, *const u32) = std::mem::transmute(pipeline_fn(2));
                 delete(1, &pipeline);
             }
         }
         gl.delete_program(program);
+    }
+    // Pipelines no longer reference the stages before the pair releases its
+    // leases. A compiler may still hold another lease while building a pair.
+    drop(separate);
+}
+
+/// Prunes cache-only stages on their sharing GL thread. No GL work happens
+/// when an Arc drops on a compiler thread. The cache mutex makes reservation
+/// lookup and the last-owner decision atomic with respect to one another.
+pub(super) fn prune_stages(gl: &glow::Context) {
+    let sharing = SHARE_GROUP.get();
+    let mut retired = Vec::new();
+    {
+        let mut stages = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(stages) = stages.as_mut() {
+            stages.retain(|&(group, _, _), stage| {
+                let keep = group != sharing || Arc::strong_count(stage) != 1;
+                if !keep {
+                    retired.push(stage.program);
+                }
+                keep
+            });
+        }
+    }
+    if !retired.is_empty() {
+        // SAFETY: on this share group's GL thread; the removed cache entry
+        // was the only owner. All compiler reservations and pipeline pairs
+        // take their own Arc while holding the cache or pair mutex.
+        unsafe {
+            let bound = gl.get_parameter_i32(glow::CURRENT_PROGRAM) as u32;
+            if retired.iter().any(|program| program.0.get() == bound) {
+                gl.use_program(None);
+            }
+            for program in retired {
+                gl.delete_program(program);
+            }
+        }
     }
 }
 
@@ -524,6 +595,9 @@ pub(super) fn keep_shader(gl: &glow::Context, stage: u32, source: &str, shader: 
             if let Some(old) = shaders.insert((stage, fnv(&[source])), shader) {
                 gl.delete_shader(old);
             }
+            if super::memory::enabled() {
+                log::info!("gpu memory compiler snapshot: thread {:?}, retained shader objects {}; source bytes of newest stage {}; driver shader allocation bytes unknown", thread::current().name(), shaders.len(), source.len());
+            }
         });
     }
 }
@@ -596,7 +670,9 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
             for &(shader, _) in &shaders {
                 gl.attach_shader(program, shader);
             }
-            gl.program_binary_retrievable_hint(program, true);
+            if cached.is_some() {
+                gl.program_binary_retrievable_hint(program, true);
+            }
             at_compiler([vertex, fragment]);
             let began = std::time::Instant::now();
             gl.link_program(program);
@@ -614,11 +690,7 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
                 gl.delete_program(program);
                 return Err(error);
             }
-            if let (Some(path), Some(binary)) = (cached, gl.get_program_binary(program)) {
-                let mut bytes = binary.format.to_le_bytes().to_vec();
-                bytes.extend_from_slice(&binary.buffer);
-                let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, bytes));
-            }
+            write_program_binary(gl, program, cached);
         }
         gl.use_program(Some(program));
         for unit in 0..3 {
@@ -722,7 +794,8 @@ pub(super) struct Compiler {
 
 impl Compiler {
     pub(super) fn start(egl: &'static Egl) -> Option<Compiler> {
-        if crate::switch("ZAKURO_SYNC_SHADERS", "shaders compiled when a draw needs them") {
+        let synchronous = crate::switch("ZAKURO_SYNC_SHADERS", "shaders compiled when a draw needs them");
+        if synchronous {
             return None;
         }
         let received = std::sync::Arc::new(Queue::new());
@@ -780,4 +853,98 @@ impl Compiler {
         let thread = (!threads.is_empty()).then(|| threads.remove(0))?;
         any.then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
     }
+}
+
+#[cfg(test)]
+mod compiler_release_tests {
+    use super::*;
+
+    fn red_pixels(gl: &glow::Context, program: glow::Program) -> [u8; 16] {
+        // SAFETY: called on the GL worker with its current context.
+        unsafe {
+            let image = gl.create_renderbuffer().unwrap();
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(image));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, 2, 2);
+            let framebuffer = gl.create_framebuffer().unwrap();
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(image));
+            assert_eq!(gl.check_framebuffer_status(glow::FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+            let vao = gl.create_vertex_array().unwrap();
+            gl.bind_vertex_array(Some(vao));
+            gl.viewport(0, 0, 2, 2);
+            for cap in [glow::DEPTH_TEST, glow::SCISSOR_TEST, glow::CULL_FACE, glow::BLEND] { gl.disable(cap); }
+            bind_program(gl, program);
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            let mut pixels = [0; 16];
+            gl.read_pixels(0, 0, 2, 2, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
+            gl.use_program(None);
+            gl.delete_vertex_array(vao);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.delete_framebuffer(framebuffer);
+            gl.delete_renderbuffer(image);
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+            pixels
+        }
+    }
+
+    const BINARY_VERTEX: &str = "#version 310 es\nvoid main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+    const BINARY_FRAGMENT: &str = "#version 310 es\nprecision highp float;\nlayout(location=0) out vec4 color;\nvoid main() { color = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+
+    #[test]
+    fn program_binary_none_and_some_paths_preserve_exact_pixels() {
+        if separable() { eprintln!("monolithic binary cache fixture skipped in separable mode"); return; }
+        let gles = Gles::new().expect("actual EGL context required for binary cache lifecycle test");
+        gles.worker.run(|| {
+            let gl = GL_CONTEXT.get().unwrap();
+            let reads = BINARY_READS.get();
+            let none = build_program(gl, BINARY_VERTEX, BINARY_FRAGMENT, None).unwrap();
+            assert_eq!(BINARY_READS.get(), reads, "absent path must not request a binary");
+            // SAFETY: the newly linked program belongs to this current context.
+            unsafe { assert_eq!(gl.get_program_parameter_i32(none, glow::PROGRAM_BINARY_RETRIEVABLE_HINT), 0); }
+            let path = std::env::temp_dir().join(format!("zakuro-binary-cache-{}-{}.bin", std::process::id(), none.0.get()));
+            let _ = std::fs::remove_file(&path);
+            let saved = build_program(gl, BINARY_VERTEX, BINARY_FRAGMENT, Some(&path)).unwrap();
+            assert_eq!(BINARY_READS.get(), reads + 1);
+            assert!(std::fs::read(&path).unwrap().len() > 4, "a usable driver binary is retained");
+            // SAFETY: same live current-context program.
+            unsafe { assert_ne!(gl.get_program_parameter_i32(saved, glow::PROGRAM_BINARY_RETRIEVABLE_HINT), 0); }
+            let loaded = build_program(gl, BINARY_VERTEX, BINARY_FRAGMENT, Some(&path)).unwrap();
+            assert_eq!(BINARY_READS.get(), reads + 1, "loading a good binary does not serialize it again");
+            let expected: [u8; 16] = [255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255];
+            for program in [none, saved, loaded] {
+                assert_eq!(red_pixels(gl, program), expected);
+                // SAFETY: all queued readback work completed above.
+                unsafe { gl.delete_program(program); }
+            }
+            std::fs::remove_file(path).unwrap();
+        });
+    }
+
+    #[test]
+    fn separable_program_binary_none_skips_hint_and_serialization() {
+        if std::env::var_os("ZAKURO_NO_PROGRAM_BINARY_CACHE").is_none() {
+            eprintln!("separable no-binary-path fixture skipped; requires explicit ZAKURO_NO_PROGRAM_BINARY_CACHE=1");
+            return;
+        }
+        assert!(program_cache_path("test", BINARY_VERTEX, BINARY_FRAGMENT).is_none());
+        let gles = Gles::new().expect("actual EGL context required for separable no-path test");
+        gles.worker.run(|| {
+            let gl = GL_CONTEXT.get().unwrap();
+            assert_ne!(pipeline_fn(0), 0, "actual separable program entry points required");
+            let reads = BINARY_READS.get();
+            let vertex = stage_program(gl, glow::VERTEX_SHADER, BINARY_VERTEX).unwrap();
+            let fragment = stage_program(gl, glow::FRAGMENT_SHADER, BINARY_FRAGMENT).unwrap();
+            for stage in [&vertex, &fragment] {
+                // SAFETY: stages are linked programs in this current share group.
+                unsafe { assert_eq!(gl.get_program_parameter_i32(stage.program, glow::PROGRAM_BINARY_RETRIEVABLE_HINT), 0); }
+            }
+            let pair = build_separable(gl, BINARY_VERTEX, BINARY_FRAGMENT).unwrap();
+            assert_eq!(BINARY_READS.get(), reads, "neither stage requests a binary without a path");
+            assert_eq!(red_pixels(gl, pair), [255, 0, 0, 255].repeat(4).as_slice());
+            delete_program(gl, pair);
+            drop((vertex, fragment));
+            prune_stages(gl);
+        });
+    }
+
 }

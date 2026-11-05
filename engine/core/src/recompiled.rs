@@ -28,7 +28,7 @@ pub struct Library {
     /// the code found for addresses lately, each in a slot its address
     /// picks. a jump through a register looks its target up, which is a
     /// search through every function otherwise.
-    found: Box<[Found]>,
+    found: Box<[Found; FOUND]>,
 }
 
 /// a slot of Library::found, an address and the code found for it.
@@ -166,8 +166,11 @@ impl Library {
     }
 
     /// every slot of found empty, an address no code starts at in each.
-    fn nothing_found() -> Box<[Found]> {
-        (0..FOUND).map(|_| Cell::new((u32::MAX, None))).collect()
+    fn nothing_found() -> Box<[Found; FOUND]> {
+        // Allocate on the heap first: the fixed array lets lookup's mask
+        // prove its index is in bounds without a large array on the stack.
+        let slots: Box<[Found]> = (0..FOUND).map(|_| Cell::new((u32::MAX, None))).collect();
+        slots.try_into().unwrap_or_else(|_| unreachable!("lookup cache has exactly FOUND slots"))
     }
 
     /// how many instructions the code has handed to the interpreter.
@@ -277,5 +280,46 @@ impl Library {
         // the budget already has
         machine.cpu.cycles = cycles + ran;
         (ran, stop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn arm_code(_: *mut Context) {}
+    unsafe extern "C" fn thumb_code(_: *mut Context) {}
+
+    #[test]
+    fn lookup_cache_preserves_hits_misses_and_colliding_addresses() {
+        static ENTRIES: [recomp_abi::Entry; 3] = [
+            recomp_abi::Entry { address: 0x1000, code: arm_code },
+            recomp_abi::Entry { address: 0x1001, code: thumb_code },
+            recomp_abi::Entry { address: 0x21000, code: thumb_code },
+        ];
+        // SAFETY: the entry table is static and sorted with the ABI's exact
+        // layout. The empty module table uses an aligned, non-null pointer.
+        let linked = unsafe {
+            Linked::new(
+                0,
+                recomp_abi::ABI,
+                ENTRIES.as_ptr().cast(),
+                ENTRIES.len() as u32,
+                std::ptr::NonNull::<recomp_abi::Module>::dangling().as_ptr().cast(),
+                0,
+            )
+        };
+        let mut library = Library::linked(&linked).unwrap();
+        for _ in 0..2 {
+            for address in [0x1000, 0x1000, 0x1001, 0x21000, 0x21000, 0x41000, 0x1000, u32::MAX] {
+                assert_eq!(
+                    library.lookup(address).map(|code| code as usize),
+                    library.code.lookup(address).map(|code| code as usize),
+                    "address {address:08X}",
+                );
+            }
+            library.found = Library::nothing_found();
+            assert!(library.found.iter().all(|slot| slot.get().0 == u32::MAX && slot.get().1.is_none()));
+        }
     }
 }

@@ -14,6 +14,61 @@ use zakuro_core::kernel::thread::ThreadStatus;
 use zakuro_core::services::hid::PadState;
 use zakuro_core::{FrameOutcome, System};
 
+/// Precise, versioned probe data for external performance comparisons. The
+/// human report deliberately rounds times, which is unsuitable for an eval.
+#[derive(serde::Serialize)]
+struct Metrics<'a> {
+    schema_version: u32,
+    title_id: String,
+    requested_frames: u64,
+    attempted_frames: u64,
+    completed_frames: u64,
+    elapsed_seconds: f64,
+    skipped_frames: u64,
+    top_pictures: u64,
+    bottom_pictures: u64,
+    interpreted_instructions: u64,
+    recompiled_instructions: u64,
+    stop_reason: String,
+    screenshots: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_trace_file: Option<&'static str>,
+}
+
+/// Optional diagnostics sample guest state without waiting for host workers.
+/// Serializing after the run avoids disk writes perturbing each checkpoint.
+#[derive(serde::Serialize)]
+struct GuestCheckpoint {
+    completed_frames: u64,
+    guest_cycles: u64,
+    registers: [u32; 16],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_thread: Option<u32>,
+    interpreted_instructions: u64,
+    recompiled_instructions: u64,
+}
+
+#[derive(serde::Serialize)]
+struct GuestTrace<'a> {
+    schema_version: u32,
+    sampling_interval_frames: u64,
+    dropped_checkpoints: u64,
+    checkpoints: &'a [GuestCheckpoint],
+}
+
+const MAX_GUEST_CHECKPOINTS: usize = 100_000;
+
+fn completion(requested: u64, attempted: u64, stopped: Option<FrameOutcome>) -> (u64, String, bool) {
+    let completed = attempted.saturating_sub(u64::from(stopped.is_some()));
+    let complete = stopped.is_none() && requested > 0 && completed == requested;
+    let reason = match stopped {
+        Some(outcome) => format!("{outcome:?}"),
+        None if complete => "frame_limit".into(),
+        None => "interrupted".into(),
+    };
+    (completed, reason, complete)
+}
+
 /// passes everything on to env_logger and keeps the warnings and errors,
 /// numbers left out so that alike ones count together, with how often and
 /// the frame each first came at.
@@ -70,6 +125,9 @@ pub struct Probe {
     /// times it went black for one look between pictures.
     black: [[bool; 2]; 2],
     flashes: [u64; 2],
+    trace_every: Option<u64>,
+    checkpoints: Vec<GuestCheckpoint>,
+    dropped_checkpoints: u64,
 }
 
 impl Probe {
@@ -77,7 +135,30 @@ impl Probe {
         let out = PathBuf::from(format!("probe-{title_id:016X}"));
         let _ = std::fs::create_dir_all(&out);
         let speed = std::env::var("ZAKURO_PROBE_SPEED").ok().and_then(|speed| speed.parse().ok()).filter(|&speed: &f64| speed > 0.0);
-        Probe { frames, out, started: Instant::now(), shots: Vec::new(), speed, late: 0.0, skipped: 0, black: [[false; 2]; 2], flashes: [0; 2] }
+        let trace_every = std::env::var("ZAKURO_PROBE_TRACE_EVERY").ok().and_then(|value| value.parse().ok()).filter(|&value| value > 0);
+        Probe { frames, out, started: Instant::now(), shots: Vec::new(), speed, late: 0.0, skipped: 0, black: [[false; 2]; 2], flashes: [0; 2], trace_every, checkpoints: Vec::new(), dropped_checkpoints: 0 }
+    }
+
+    /// Called immediately after a completed guest frame, before frontend
+    /// applet responses. In particular, no picture-count getter is used here:
+    /// those wait for the GPU and can change interrupt timing while diagnosing it.
+    pub fn checkpoint(&mut self, system: &System, completed_frames: u64) {
+        let Some(every) = self.trace_every else { return };
+        if !completed_frames.is_multiple_of(every) {
+            return;
+        }
+        if self.checkpoints.len() == MAX_GUEST_CHECKPOINTS {
+            self.dropped_checkpoints += 1;
+            return;
+        }
+        self.checkpoints.push(GuestCheckpoint {
+            completed_frames,
+            guest_cycles: system.cpu.cycles,
+            registers: system.cpu.regs,
+            current_thread: system.kernel.current_thread,
+            interpreted_instructions: system.interpreted_instructions,
+            recompiled_instructions: system.recompiled_instructions,
+        });
     }
 
     /// whether a handheld running at the probe's speed would be behind, as
@@ -150,6 +231,45 @@ impl Probe {
 
     pub fn report(self, system: &mut System, rom: &str, title_id: u64, has_profile: bool, ran: u64, stopped: Option<FrameOutcome>) -> i32 {
         let seconds = self.started.elapsed().as_secs_f64();
+        let (completed, stop_reason, complete) = completion(self.frames, ran, stopped);
+        let trace_written = self.trace_every.is_none_or(|sampling_interval_frames| {
+            let trace = GuestTrace { schema_version: 1, sampling_interval_frames, dropped_checkpoints: self.dropped_checkpoints, checkpoints: &self.checkpoints };
+            let path = self.out.join("guest-trace.toml");
+            match toml::to_string(&trace).map_err(|error| error.to_string()).and_then(|text| std::fs::write(&path, text).map_err(|error| error.to_string())) {
+                Ok(()) => true,
+                Err(error) => { eprintln!("could not write {}: {error}", path.display()); false }
+            }
+        });
+        let metrics = Metrics {
+            schema_version: 1,
+            title_id: format!("{title_id:016X}"),
+            requested_frames: self.frames,
+            attempted_frames: ran,
+            completed_frames: completed,
+            elapsed_seconds: seconds,
+            skipped_frames: self.skipped,
+            top_pictures: system.top_pictures(),
+            bottom_pictures: system.bottom_pictures(),
+            interpreted_instructions: system.interpreted_instructions,
+            recompiled_instructions: system.recompiled_instructions,
+            stop_reason,
+            screenshots: &self.shots,
+            guest_trace_file: self.trace_every.map(|_| "guest-trace.toml"),
+        };
+        let metrics_path = self.out.join("report.toml");
+        let metrics_written = match toml::to_string(&metrics) {
+            Ok(text) => match std::fs::write(&metrics_path, text) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("could not write {}: {error}", metrics_path.display());
+                    false
+                }
+            },
+            Err(error) => {
+                eprintln!("could not serialize probe metrics: {error}");
+                false
+            }
+        };
         let mut report = format!("# Probe of {title_id:016X}\n\n");
         let _ = writeln!(report, "- ROM: {rom}");
         let library = std::env::var("ZAKURO_RECOMPILED").unwrap_or_else(|_| "none, the code was interpreted".into());
@@ -189,10 +309,45 @@ impl Probe {
             let _ = writeln!(report, "- {file}");
         }
         let path = self.out.join("report.md");
-        match std::fs::write(&path, &report) {
-            Ok(()) => println!("{}", path.display()),
-            Err(error) => eprintln!("could not write {}: {error}", path.display()),
-        }
-        if matches!(stopped, Some(FrameOutcome::Faulted)) { 1 } else { 0 }
+        let report_written = match std::fs::write(&path, &report) {
+            Ok(()) => { println!("{}", path.display()); true }
+            Err(error) => { eprintln!("could not write {}: {error}", path.display()); false }
+        };
+        if complete && metrics_written && report_written && trace_written { 0 } else { 1 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_complete_workload_passes() {
+        assert_eq!(completion(60, 60, None), (60, "frame_limit".into(), true));
+        assert_eq!(completion(60, 20, None), (20, "interrupted".into(), false));
+        assert_eq!(completion(60, 60, Some(FrameOutcome::Faulted)), (59, "Faulted".into(), false));
+        assert_eq!(completion(60, 20, Some(FrameOutcome::Exited)), (19, "Exited".into(), false));
+        assert!(!completion(0, 0, None).2);
+    }
+
+    #[test]
+    fn guest_trace_preserves_exact_state_and_an_idle_thread() {
+        let checkpoints = [GuestCheckpoint {
+            completed_frames: 10,
+            guest_cycles: 44_685_309,
+            registers: std::array::from_fn(|index| 0x1234_0000 + index as u32),
+            current_thread: None,
+            interpreted_instructions: 100,
+            recompiled_instructions: 123_456,
+        }];
+        let trace = GuestTrace { schema_version: 1, sampling_interval_frames: 10, dropped_checkpoints: 0, checkpoints: &checkpoints };
+        let serialized = toml::to_string(&trace).unwrap();
+        let value: toml::Value = toml::from_str(&serialized).unwrap();
+        let checkpoint = &value["checkpoints"][0];
+        assert_eq!(checkpoint["guest_cycles"].as_integer(), Some(44_685_309));
+        assert_eq!(checkpoint["registers"].as_array().unwrap().len(), 16);
+        assert_eq!(checkpoint["registers"][15].as_integer(), Some(0x1234_000f));
+        assert!(checkpoint.get("current_thread").is_none());
+        assert_eq!(checkpoint["recompiled_instructions"].as_integer(), Some(123_456));
     }
 }
