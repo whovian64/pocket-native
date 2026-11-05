@@ -240,10 +240,10 @@ too. Dump it from your console again, or decrypt the game first
 
 **The build stops with "Killed" (`Killed signal terminated program
 cc1`).** The PC, or Docker's share of it, ran out of memory while
-compiling. Each compiler takes about a gigabyte: from 0.5.0 the build
-runs only as many at once as memory has room for. Before that, close
-other programs, or give Docker Desktop more memory or fewer CPUs in
-Settings > Resources, and build again.
+compiling. Each compiler takes about a gigabyte: the build runs only as
+many at once as memory has room for, and compiles a file that still ran
+out again on its own. If it stops even so, close other programs, or give
+Docker Desktop more memory in Settings > Resources, and build again.
 
 **The update can't reach GitHub.** Check the PC's connection and try
 again, or get the new kit by hand as in step 1.
