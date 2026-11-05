@@ -83,6 +83,21 @@ pub fn objects(dir: &Path, sources: &[String], progress: Progress) -> Result<Vec
     // that reaches memory through the host's view of all of it
     let extra = std::env::var("RECOMP_CFLAGS").unwrap_or_default();
     let extra = extra.as_str();
+    let compiles = |source: &String| {
+        let path = dir.join(source);
+        Command::new(&compiler)
+            .args(FLAGS)
+            .args(if cfg!(windows) { &[][..] } else { UNIX_FLAGS })
+            .args(extra.split_whitespace())
+            .arg("-I")
+            .arg(dir)
+            .arg("-c")
+            .arg(&path)
+            .arg("-o")
+            .arg(path.with_extension("o"))
+            .status()
+            .is_ok_and(|s| s.success())
+    };
     std::thread::scope(|scope| {
         for _ in 0..jobs {
             scope.spawn(|| {
@@ -90,19 +105,7 @@ pub fn objects(dir: &Path, sources: &[String], progress: Progress) -> Result<Vec
                     if stopped.load(Ordering::Relaxed) {
                         break;
                     }
-                    let path = dir.join(source);
-                    let status = Command::new(&compiler)
-                        .args(FLAGS)
-                        .args(if cfg!(windows) { &[][..] } else { UNIX_FLAGS })
-                        .args(extra.split_whitespace())
-                        .arg("-I")
-                        .arg(dir)
-                        .arg("-c")
-                        .arg(&path)
-                        .arg("-o")
-                        .arg(path.with_extension("o"))
-                        .status();
-                    if !status.is_ok_and(|s| s.success()) {
+                    if !compiles(source) {
                         failures.lock().unwrap().push(source.clone());
                     }
                     if !progress(done.fetch_add(1, Ordering::Relaxed) + 1, sources.len()) {
@@ -115,7 +118,8 @@ pub fn objects(dir: &Path, sources: &[String], progress: Progress) -> Result<Vec
     if stopped.into_inner() {
         return Err("stopped".to_owned());
     }
-    let failures = failures.into_inner().unwrap();
+    // gcc killed for memory beside the others gets it all to itself
+    let failures: Vec<_> = failures.into_inner().unwrap().into_iter().filter(|source| jobs == 1 || !compiles(source)).collect();
     if !failures.is_empty() {
         return Err(format!("{} failed to compile, {}", failures.len(), failures.join(" ")));
     }
