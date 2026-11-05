@@ -7,7 +7,7 @@ mod games;
 mod jobs;
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 
 use eframe::egui;
 use games::Game;
@@ -44,6 +44,13 @@ impl Saved {
     }
 }
 
+/// what a file dialog was opened for, and what it gave.
+enum Picked {
+    Out(PathBuf),
+    Keys(PathBuf),
+    Games(Vec<PathBuf>),
+}
+
 struct App {
     kit: PathBuf,
     saved: Saved,
@@ -59,6 +66,9 @@ struct App {
     newer: Option<Receiver<Result<Option<String>, ()>>>,
     update: Option<Result<Option<String>, ()>>,
     message: Option<String>,
+    /// the file dialog open, on a thread of its own: the window goes on
+    /// reading its events meanwhile, as Wayland drops a window that stops
+    picking: Option<Receiver<Option<Picked>>>,
 }
 
 impl App {
@@ -81,6 +91,7 @@ impl App {
             newer: Some(newer),
             update: None,
             message: None,
+            picking: None,
         };
         // games dropped on the program itself come as its arguments
         let given: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
@@ -125,6 +136,16 @@ impl App {
         }
     }
 
+    fn pick(&mut self, ctx: &egui::Context, dialog: impl FnOnce() -> Option<Picked> + Send + 'static) {
+        let (send, picking) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = send.send(dialog());
+            ctx.request_repaint();
+        });
+        self.picking = Some(picking);
+    }
+
     fn running(&self) -> bool {
         self.job.as_ref().is_some_and(|job| job.finished.is_none())
     }
@@ -144,6 +165,27 @@ impl eframe::App for App {
                 self.games.push(game);
             }
         }
+        let picked = match self.picking.as_ref().map(Receiver::try_recv) {
+            Some(Ok(picked)) => Some(picked),
+            Some(Err(TryRecvError::Disconnected)) => Some(None),
+            _ => None,
+        };
+        if let Some(picked) = picked {
+            self.picking = None;
+            match picked {
+                Some(Picked::Out(folder)) => {
+                    self.saved.out = folder;
+                    self.saved.store(&self.kit);
+                }
+                Some(Picked::Keys(file)) => {
+                    self.saved.keys = Some(file);
+                    self.saved.store(&self.kit);
+                }
+                Some(Picked::Games(paths)) => self.add(paths),
+                None => {}
+            }
+        }
+        let idle = !self.running() && self.picking.is_none();
         if let Some(newer) = &self.newer {
             if let Ok(found) = newer.try_recv() {
                 self.update = Some(found);
@@ -232,11 +274,9 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.label("Build into");
                 ui.monospace(self.saved.out.display().to_string());
-                if ui.add_enabled(!self.running(), egui::Button::new("Change…")).clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().set_directory(&self.saved.out).pick_folder() {
-                        self.saved.out = folder;
-                        self.saved.store(&self.kit);
-                    }
+                if ui.add_enabled(idle, egui::Button::new("Change…")).clicked() {
+                    let out = self.saved.out.clone();
+                    self.pick(&ctx, move || rfd::FileDialog::new().set_directory(out).pick_folder().map(Picked::Out));
                 }
             });
             ui.horizontal(|ui| {
@@ -245,11 +285,8 @@ impl eframe::App for App {
                     Some(keys) => ui.monospace(keys.display().to_string()),
                     None => ui.label(egui::RichText::new("none, needed only for encrypted games and .cia files").weak()),
                 };
-                if ui.add_enabled(!self.running(), egui::Button::new("Choose…")).clicked() {
-                    if let Some(file) = rfd::FileDialog::new().add_filter("aes_keys.txt", &["txt"]).pick_file() {
-                        self.saved.keys = Some(file);
-                        self.saved.store(&self.kit);
-                    }
+                if ui.add_enabled(idle, egui::Button::new("Choose…")).clicked() {
+                    self.pick(&ctx, || rfd::FileDialog::new().add_filter("aes_keys.txt", &["txt"]).pick_file().map(Picked::Keys));
                 }
             });
             ui.add_space(4.0);
@@ -284,15 +321,11 @@ impl eframe::App for App {
                 ui.separator();
             }
             ui.horizontal(|ui| {
-                if ui.add_enabled(!self.running(), egui::Button::new("Add games…")).clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("3DS games", &games::EXTENSIONS).pick_files() {
-                        self.add(files);
-                    }
+                if ui.add_enabled(idle, egui::Button::new("Add games…")).clicked() {
+                    self.pick(&ctx, || rfd::FileDialog::new().add_filter("3DS games", &games::EXTENSIONS).pick_files().map(Picked::Games));
                 }
-                if ui.add_enabled(!self.running(), egui::Button::new("Find games in a folder…")).clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.add(vec![folder]);
-                    }
+                if ui.add_enabled(idle, egui::Button::new("Find games in a folder…")).clicked() {
+                    self.pick(&ctx, || rfd::FileDialog::new().pick_folder().map(|folder| Picked::Games(vec![folder])));
                 }
                 if !self.games.is_empty() && ui.add_enabled(!self.running(), egui::Button::new("Clear")).clicked() {
                     self.games.clear();
