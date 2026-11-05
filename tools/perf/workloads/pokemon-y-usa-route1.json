@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "title": "pokemon-y",
+  "verified_gameplay": true,
+  "scene": "Route 1 northern clear path after Shauna battle, Fennekin; short down/up loops, no battle or transition claim",
+  "reviewed_by": "Codex root actual eight-image inspection plus normal manual navigation",
+  "frames": 6000,
+  "input_sha256": "830a674b14ba442a17829b88a801da8f9d7a1d16a6cd987b37ada08f9a4d4f69",
+  "screenshots": {
+    "frame-00749.bmp": "5ef56b659ca52d51e137b5e703cd1d1dafbb6d5ca8f4c449887e7f2c0081c6ed",
+    "frame-01499.bmp": "de73baf584c53fda34f4e25d90dba97c7a940e66c1728d16882ea47a6fc925da",
+    "frame-02249.bmp": "46cb4813c6d723dfb0a1c991f3745e1357afe9fd1a970c887dd1b431d1c99dd8",
+    "frame-02999.bmp": "eec3d2f94e0c51709be70cdca29a23731c51f7919a5bc206eb1a9cf66404fbcc",
+    "frame-03749.bmp": "657a9b1e9fcd712f03edc593174796ca818ef5f6bc447c9f7ff8c971511b9d68",
+    "frame-04499.bmp": "45a862ae8678eb1c8cf5f30ab80687e5bad69bbe9d66621660321e122b73f20d",
+    "frame-05249.bmp": "05e867bf91284be5ca4edcd61d97fc6123ed7f22a3b1d0e31682cecd01d58a2d",
+    "frame-05999.bmp": "8ec9e95afad9855a52e44a2ed659a01c1cd48e11c74ff7a235e456170bd033bb"
+  },
+  "name": "pokemon-y early-route walking checkpoint",
+  "rom_sha256": "841c8cfe429a8838b29017c62f968eb7f3b59f64e4ad74256e7c3e212b7e63b1",
+  "initial_state": "Private early-route save; identical font/format/save bytes per trial, fresh application caches, fixed clock, native resolution, serialized GPU; unchanged title profile, no frameskip/stand-ins/generic shaders.",
+  "input_file": "pokemon-y-usa-route1.input",
+  "limitations": "Agent-reviewed short clear-path walking with long idle periods; startup included (Omega frame749 is boot fade). No user visual signoff, battle/audio certification or handheld proof. Own matching ROM/private checkpoint required; save is not distributed.",
+  "save_sha256": "113afd26567d6c64b6f76ce6772bc18d0760e699bc35789905bd98f77e559418"
+}

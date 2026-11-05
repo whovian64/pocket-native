@@ -2021,6 +2021,32 @@ mod tests {
     }
 
     #[test]
+    fn passive_single_word_packets_match_scalar_invalidation() {
+        let mut actual = Gpu::new();
+        let mut reference = Gpu::new();
+        let mut memory = FlatMemory(vec![0; 8]);
+        let mut reference_memory = FlatMemory(vec![0; 8]);
+        let mut renderer = SoftwareRenderer::default();
+        let mut reference_renderer = SoftwareRenderer::default();
+        for register in 0..INTERNAL_REGISTER_WORDS {
+            if ACTS[register] {
+                continue;
+            }
+            for mask in 0..16 {
+                for value in [0xA15A_37C8u32, 0xA15A_37C8, 0, u32::MAX] {
+                    memory.0[..4].copy_from_slice(&value.to_le_bytes());
+                    let header = register as u32 | (mask << 16);
+                    memory.0[4..].copy_from_slice(&header.to_le_bytes());
+                    actual.run_command_list(&mut memory, &mut renderer, 0, 8);
+                    reference_register_write(&mut reference, &mut reference_memory,
+                        &mut reference_renderer, register, value, mask);
+                }
+                same_register_effects(&actual, &reference);
+            }
+        }
+    }
+
+    #[test]
     fn consecutive_passive_spans_match_scalar_writes_for_every_mask() {
         let mut actual = Gpu::new();
         let mut reference = Gpu::new();

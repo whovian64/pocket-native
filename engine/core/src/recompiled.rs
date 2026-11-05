@@ -188,7 +188,11 @@ impl Library {
     fn lookup(&self, address: u32) -> Option<Code> {
         // instructions are two bytes apart at least, the low bit is the
         // instruction set
-        let slot = &self.found[(address as usize >> 1) & (FOUND - 1)];
+        // Fold higher address bits into the index so functions separated by
+        // 128 KiB do not all evict each other. Exact tags still distinguish
+        // ARM/Thumb targets and every address sharing a slot.
+        let key = address >> 1;
+        let slot = &self.found[((key ^ (key >> 16)) as usize) & (FOUND - 1)];
         match slot.get() {
             (seen, code) if seen == address => code,
             _ => {
@@ -287,15 +291,15 @@ impl Library {
 mod tests {
     use super::*;
 
-    unsafe extern "C" fn arm_code(_: *mut Context) {}
-    unsafe extern "C" fn thumb_code(_: *mut Context) {}
+    unsafe extern "C" fn arm_code(_: *mut Context) { std::hint::black_box(1u32); }
+    unsafe extern "C" fn thumb_code(_: *mut Context) { std::hint::black_box(2u32); }
 
     #[test]
     fn lookup_cache_preserves_hits_misses_and_colliding_addresses() {
         static ENTRIES: [recomp_abi::Entry; 3] = [
             recomp_abi::Entry { address: 0x1000, code: arm_code },
             recomp_abi::Entry { address: 0x1001, code: thumb_code },
-            recomp_abi::Entry { address: 0x21000, code: thumb_code },
+            recomp_abi::Entry { address: 0x21002, code: thumb_code },
         ];
         // SAFETY: the entry table is static and sorted with the ABI's exact
         // layout. The empty module table uses an aligned, non-null pointer.
@@ -311,7 +315,7 @@ mod tests {
         };
         let mut library = Library::linked(&linked).unwrap();
         for _ in 0..2 {
-            for address in [0x1000, 0x1000, 0x1001, 0x21000, 0x21000, 0x41000, 0x1000, u32::MAX] {
+            for address in [0x1000, 0x1000, 0x1001, 0x21002, 0x21002, 0x41004, 0x1000, u32::MAX] {
                 assert_eq!(
                     library.lookup(address).map(|code| code as usize),
                     library.code.lookup(address).map(|code| code as usize),

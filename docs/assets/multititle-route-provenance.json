@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "control_revision": "138a932c817d6d01f2146be5ac3a24d0cd2c0827",
+  "original_native_source_revision": "178f2b0f4f3444ed8d6af49fe5c130fe3094b598",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "runtime_build": "Locked offline release, opt-level3, thin LTO, 4 codegen units; x86_64-unknown-linux-gnu, target rustflags empty, -j1",
+  "runtimes": {
+    "control": {
+      "head": "138a932c817d6d01f2146be5ac3a24d0cd2c0827",
+      "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runtime_sha256": "1d5aa87bd1f5d95cef26af2e14ddf80955937191d42131b852cab2f31fe9535d",
+      "exit": 0
+    },
+    "passive": {
+      "head": "138a932c817d6d01f2146be5ac3a24d0cd2c0827",
+      "source_patch_sha256": "c2c03172697c079a1d2ba16dc77287df036f481cfcacd998e02a271be108ca1b",
+      "runtime_sha256": "e6181b163b233bd3c227944d1fa13fc020cfe9cdbbc627a4f97643b016a3b1bc",
+      "exit": 0
+    },
+    "uniform": {
+      "head": "138a932c817d6d01f2146be5ac3a24d0cd2c0827",
+      "source_patch_sha256": "5d630d778a09d424f4c0a4f7193f048d97293399d1c1539bcc1e43dc25be4d69",
+      "runtime_sha256": "0d39b5972f213fcd10b1bdc5124533279369fefc3ff71fdc5fd6bb5fee452383",
+      "exit": 0
+    },
+    "folded": {
+      "head": "138a932c817d6d01f2146be5ac3a24d0cd2c0827",
+      "source_patch_sha256": "dca965338766a5685285ee22a5283de899a6329e6e63e5d33dafc043894a3b0c",
+      "runtime_sha256": "5194a6ad7142725a4dd4531ad411e299cca8cf32c32ad46f366a7b9caca977fc",
+      "exit": 0
+    },
+    "final": {
+      "head": "138a932c817d6d01f2146be5ac3a24d0cd2c0827",
+      "source_patch_sha256": "e8b1c068c8925835867a4bdcada198e876058161f913f97abc4d6c5813a7e7cb",
+      "runtime_sha256": "0528d1ac6f5a95faa689ec5cd138fe4f2235f82554ce3a698f72126115f92501",
+      "exit": 0
+    }
+  },
+  "native_libraries": {
+    "omega-ruby": {
+      "title_id": "000400000011C400",
+      "rom_sha256": "542d689ea534a1ab658d156cff1178678010b3dc6d7e00794abe477a3d75fda6",
+      "library_sha256": "7d4617f0f7964205a1941410631e9d204dbb489bfb1c94e3d3b1e9d9852f245f"
+    },
+    "pokemon-y": {
+      "title_id": "0004000000055E00",
+      "rom_sha256": "841c8cfe429a8838b29017c62f968eb7f3b59f64e4ad74256e7c3e212b7e63b1",
+      "library_sha256": "91226273798d1a2d9f7b831d01fe7b758a347273fb49f437f5ae6bd2c8853f61"
+    }
+  },
+  "comparisons": [
+    {
+      "candidate": "passive",
+      "title": "omega-ruby",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_output_and_trace": true,
+      "formal_timing_admitted": false,
+      "strict_3pct_pass": false,
+      "maximum_other_cpu_fraction": 0.12110270095843742
+    },
+    {
+      "candidate": "passive",
+      "title": "pokemon-y",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_output_and_trace": true,
+      "formal_timing_admitted": false,
+      "strict_3pct_pass": false,
+      "maximum_other_cpu_fraction": 0.1356618326720419
+    },
+    {
+      "candidate": "uniform",
+      "title": "omega-ruby",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_output_and_trace": true,
+      "formal_timing_admitted": false,
+      "strict_3pct_pass": false,
+      "maximum_other_cpu_fraction": 0.22732394677323192
+    },
+    {
+      "candidate": "uniform",
+      "title": "pokemon-y",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_output_and_trace": true,
+      "formal_timing_admitted": false,
+      "strict_3pct_pass": false,
+      "maximum_other_cpu_fraction": 0.17094529610282708
+    },
+    {
+      "candidate": "folded",
+      "title": "omega-ruby",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_output_and_trace": true,
+      "formal_timing_admitted": false,
+      "strict_3pct_pass": false,
+      "maximum_other_cpu_fraction": 0.2512892792847636
+    },
+    {
+      "candidate": "folded",
+      "title": "pokemon-y",
+      "trials_each": 3,
+      "frames_each": 6000,
+      "exact_output_and_trace": true,
+      "formal_timing_admitted": false,
+      "strict_3pct_pass": false,
+      "maximum_other_cpu_fraction": 0.13663838745995843
+    }
+  ],
+  "final_source_sha256": {
+    "engine/core/src/recompiled.rs": "1d681c95398ad55213748d4c87af529b781a9cbbf10942d4442b4628e2e147c9",
+    "engine/gpu/src/lib.rs": "d132df068124368b9170d0dfdf226987b58f458db37ece04dc03b21ca5be1de6",
+    "engine/gpu/src/shader/mod.rs": "b903710ecafc38e61f0c66cfa90f26380120ae06e735ed8f01f0f8b6821ac1da"
+  },
+  "validation": {
+    "passed": 421,
+    "ignored": 8,
+    "required_tests": [
+      "passive_single_word_packets_match_scalar_invalidation",
+      "uniform_bursts_match_individual_register_writes",
+      "lookup_cache_preserves_hits_misses_and_colliding_addresses",
+      "cached_pipeline_binds_keep_pixels_and_skip_pair_lookups"
+    ],
+    "aarch64_linux_check": true,
+    "android_release_link": true,
+    "android_elf": {
+      "file_name": "libpocketnative.so",
+      "sha256": "3066df21356c7c8919e2c22b77374e0251fd914beb9424a3ff5cb2e9c977c27d",
+      "machine": "AArch64"
+    },
+    "limits": "Compilation/linking and host release tests, not ARM or handheld execution"
+  },
+  "limits": "No admitted speed/memory improvement; independent ordinary runs and final functional checks use hardware NVIDIA GLES, not handheld or Mali execution. No raw game/code/save/image data included.",
+  "final_combination_replays": [
+    {
+      "title": "omega-ruby",
+      "frames": 6000,
+      "exact": true,
+      "trace_sha256": "c949e8743a3608d1cb793bf9675841ba305604b38c9ace8035c13d6f2b3f9bc2",
+      "purpose": "One final functional replay per title; not a timing comparison"
+    },
+    {
+      "title": "pokemon-y",
+      "frames": 6000,
+      "exact": true,
+      "trace_sha256": "e9e10bee7783bf55ebc3ebd493d4eb9cdd616bb6fc12d884ae105304ed6b06bb",
+      "purpose": "One final functional replay per title; not a timing comparison"
+    },
+    {
+      "title": "ultra-sun",
+      "frames": 6000,
+      "exact": true,
+      "trace_sha256": "d7c4b8c538e170c16afb4c6bec73f6b286b48480db1faddeccbfb0f682f42055",
+      "purpose": "One final functional replay per title; not a timing comparison"
+    }
+  ],
+  "manual_followup": {
+    "binary_sha256": "a6c47fd16b61e086f88d75b6f24b34373736514134a10638bdd50116254888ec",
+    "titles_verified": [
+      "omega-ruby",
+      "pokemon-y"
+    ],
+    "checks": "Normal interactive Continue, movement and in-game menu; actual NVIDIA renderer, original native library, exit0",
+    "timing_eligible": false
+  }
+}

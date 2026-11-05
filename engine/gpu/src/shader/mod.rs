@@ -22,6 +22,7 @@ pub const TEMP_REGISTERS: usize = 16;
 
 /// a float uniform from the words that upload it, four singles, or four
 /// 24-bit floats packed most significant first across three words.
+#[inline]
 fn float_uniform(staged: &[u32], wide: bool) -> Vec4 {
     if wide {
         [f32::from_bits(staged[3]), f32::from_bits(staged[2]), f32::from_bits(staged[1]), f32::from_bits(staged[0])]
@@ -193,7 +194,7 @@ impl ShaderUnit {
         let tail = if self.float_uniform_wide {
             let (vectors, tail) = words.as_chunks::<4>();
             for &staged in vectors {
-                self.finish_float_uniform(staged);
+                self.finish_float_uniform_mode::<true>(staged);
             }
             if let Some(&last) = vectors.last() {
                 self.float_uniform_staging = last;
@@ -202,7 +203,7 @@ impl ShaderUnit {
         } else {
             let (vectors, tail) = words.as_chunks::<3>();
             for &[a, b, c] in vectors {
-                self.finish_float_uniform([a, b, c, self.float_uniform_staging[3]]);
+                self.finish_float_uniform_mode::<false>([a, b, c, self.float_uniform_staging[3]]);
             }
             if let Some(last) = vectors.last() {
                 self.float_uniform_staging[..3].copy_from_slice(last);
@@ -242,7 +243,18 @@ impl ShaderUnit {
     }
 
     fn finish_float_uniform(&mut self, staged: [u32; 4]) {
-        let value = float_uniform(&staged, self.float_uniform_wide);
+        if self.float_uniform_wide {
+            self.finish_float_uniform_mode::<true>(staged);
+        } else {
+            self.finish_float_uniform_mode::<false>(staged);
+        }
+    }
+
+    // The burst loop already knows the format. Keep that knowledge through
+    // conversion instead of reloading and branching for every vector.
+    #[inline]
+    fn finish_float_uniform_mode<const WIDE: bool>(&mut self, staged: [u32; 4]) {
+        let value = float_uniform(&staged, WIDE);
 
         if log::log_enabled!(target: "zakuro_gpu::shader::nan", log::Level::Trace)
             && value.iter().any(|c| c.is_nan())
@@ -252,7 +264,7 @@ impl ShaderUnit {
                 "uniform c{} set to NaN {value:?} from {:08X?} ({} bit)",
                 self.float_uniform_index,
                 staged,
-                if self.float_uniform_wide { 32 } else { 24 },
+                if WIDE { 32 } else { 24 },
             );
         }
         if self.float_uniform_index < FLOAT_UNIFORMS {
@@ -909,6 +921,21 @@ mod tests {
         assert_eq!(a.float_uniform_staging, b.float_uniform_staging);
     }
 
+    // Frozen scalar cursor/conversion path, independent of burst finishing.
+    fn reference_float_uniform(unit: &mut ShaderUnit, word: u32) {
+        unit.float_uniform_staging[unit.float_uniform_component] = word;
+        unit.float_uniform_component += 1;
+        let needed = if unit.float_uniform_wide { 4 } else { 3 };
+        if unit.float_uniform_component == needed {
+            let value = float_uniform(&unit.float_uniform_staging, unit.float_uniform_wide);
+            if let Some(slot) = unit.float_uniforms.get_mut(unit.float_uniform_index) {
+                *slot = value;
+            }
+            unit.float_uniform_index += 1;
+            unit.float_uniform_component = 0;
+        }
+    }
+
     #[test]
     fn uniform_bursts_match_individual_register_writes() {
         // Singles include signed zero, subnormals, infinities and NaN
@@ -937,13 +964,13 @@ mod tests {
                         let mut scalar = burst.clone();
                         burst.upload_float_uniforms(&words[..length]);
                         for &word in &words[..length] {
-                            scalar.upload_float_uniform(word);
+                            reference_float_uniform(&mut scalar, word);
                         }
                         same_uniform_upload(&burst, &scalar);
                         // The next upload can finish a partial vector.
                         burst.upload_float_uniforms(&words);
                         for &word in &words {
-                            scalar.upload_float_uniform(word);
+                            reference_float_uniform(&mut scalar, word);
                         }
                         same_uniform_upload(&burst, &scalar);
                         // Resetting the index discards a partial vector and
@@ -953,7 +980,7 @@ mod tests {
                         scalar.set_float_uniform_index(raw);
                         burst.upload_float_uniforms(&words);
                         for &word in &words {
-                            scalar.upload_float_uniform(word);
+                            reference_float_uniform(&mut scalar, word);
                         }
                         same_uniform_upload(&burst, &scalar);
                     }
