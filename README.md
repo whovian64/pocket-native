@@ -160,11 +160,16 @@ L3 + Y) again to return to normal. The overlay stays visible while it is
 on. It resets to normal when you restart the game. Audio keeps playing:
 **Performance > Fast-forward audio** defaults to **Normal pitch**, which
 shortens the audio without raising voices or notes. **Sped up** lets pitch
-follow the achieved speed too. Both follow game progress; music advances faster with the game,
+follow the achieved speed too. Both follow game progress; music advances
+faster with the game,
 rather than playing at its original tempo and drifting behind. A short tail
-already in the audio device may finish when you switch. The selected frame
-cap still limits screen updates per second, and interpolation pauses while speeding
-up. Game clocks, rendering options and native game code are unchanged.
+already in the audio device may finish when you switch; pending software
+audio is discarded on the transition. Interpolation pauses while speeding
+up. The presentation budget scales with **requested** speed: it reaches the
+selected frame cap at 2×, but visible updates fall proportionally if the
+game is slower. For example, fast-forward at an achieved 1× with a 60 fps
+cap presents up to 30 times a second. Game clocks, rendering options and
+native game code are unchanged.
 
 This is a shared Linux/Android runtime feature for all titles, using the
 existing FN/L3 controls; native game libraries do not need recompiling.

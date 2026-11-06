@@ -21,8 +21,8 @@ trait Device {
         0.1
     }
     /// times the device ran dry so far, where it counts them.
-    fn underruns(&self) -> i32 {
-        0
+    fn underruns(&self) -> Option<i32> {
+        None
     }
     /// past how far behind, in seconds, the oldest sound is left out, and
     /// down to how far.
@@ -86,11 +86,12 @@ pub fn play(samples: mpsc::Receiver<Message>) {
             let behind = pacer.take(device.as_mut(), &input);
             if since_log.elapsed() >= std::time::Duration::from_secs(30) {
                 log::info!(
-                    "sound {:.0} ms behind, stretched {:.2} times, {} ms left out to catch up, {} underruns so far",
+                    "sound {:.0} output ms behind, stretched {:.2} times, {} guest ms left out to catch up, {} guest ms discarded on speed changes, underruns {}",
                     behind / AUDIO_SAMPLE_RATE * 1000.0,
                     pacer.ratio,
                     (std::mem::take(&mut pacer.dropped) as f64 / AUDIO_SAMPLE_RATE * 1000.0) as u64,
-                    device.underruns()
+                    (std::mem::take(&mut pacer.transition_dropped) as f64 / AUDIO_SAMPLE_RATE * 1000.0) as u64,
+                    device.underruns().map_or_else(|| "not measured".into(), |count| count.to_string())
                 );
                 since_log = std::time::Instant::now();
             }
@@ -109,15 +110,20 @@ struct Pacer {
     over: f64,
     to: f64,
     ratio: f64,
+    /// Integral baseline for fast audio only, free to follow achieved
+    /// throughput rather than assuming the requested 2x was reached.
+    nominal: f64,
     chunk: Vec<[i16; 2]>,
-    /// frames left out since the last look.
+    /// Guest frames skipped for catch-up since the last look; transition
+    /// clears are counted separately below.
     dropped: usize,
+    transition_dropped: usize,
 }
 
 impl Pacer {
     fn new(target_seconds: f64, (over, to): (f64, f64)) -> Pacer {
         let frames = |seconds: f64| AUDIO_SAMPLE_RATE * seconds;
-        Pacer { mode: Mode::Normal, stretch: Stretch::default(), target: frames(target_seconds), over: frames(over), to: frames(to), ratio: 1.0, chunk: Vec::new(), dropped: 0 }
+        Pacer { mode: Mode::Normal, stretch: Stretch::default(), target: frames(target_seconds), over: frames(over), to: frames(to), ratio: 1.0, nominal: 1.0, chunk: Vec::new(), dropped: 0, transition_dropped: 0 }
     }
 
     /// Consume transitions in channel order, so no sound from before the
@@ -136,10 +142,12 @@ impl Pacer {
                 Message::Mode(mode) => {
                     self.mode = mode;
                     log::info!("sound playback mode {mode:?}");
+                    self.transition_dropped += input.len() + self.stretch.pending();
                     input.clear();
                     self.stretch = Stretch::default();
                     self.chunk.clear();
                     self.ratio = if mode == Mode::Normal { 1.0 } else { 0.5 };
+                    self.nominal = self.ratio;
                 }
             }
         }
@@ -147,27 +155,53 @@ impl Pacer {
     }
 
     /// takes the title's newest sound to the device, and says how many of
-    /// the title's frames were not yet heard before it went.
+    /// output frames were queued or pending before it went (at normal
+    /// speed, pending input retains the original accounting).
     fn take(&mut self, device: &mut dyn Device, input: &[[i16; 2]]) -> f64 {
         self.stretch.feed(input);
         // the sound not yet heard: in the device, and here, not stretched yet
         // Pending guest samples take fewer output samples during fast
         // playback; count both sides in the device's time units.
         let pending_ratio = if self.mode == Mode::Normal { 1.0 } else { self.ratio };
-        let behind = device.queued() as f64 + self.stretch.pending() as f64 * pending_ratio;
+        let queued = device.queued() as f64;
+        let behind = queued + self.stretch.pending() as f64 * pending_ratio;
         // far behind, after a stall or with a device that holds less than it
         // should, the oldest is left out to catch up at once rather than be
         // stretched away over minutes
         if behind > self.over {
             self.dropped += self.stretch.skip(((behind - self.to) / pending_ratio) as usize);
         }
-        // The normal 0.75 floor cannot consume a 2x stream. Fast-forward
-        // allows shorter output while the queue feedback follows achieved
-        // speed (which may be less than the requested 2x).
-        let minimum = if self.mode == Mode::Normal { 0.75 } else { 0.25 };
-        let nominal = if self.mode == Mode::Normal { 1.0 } else { 0.5 };
-        let wanted = (nominal + (self.target - behind) / self.target).clamp(minimum, 2.5);
-        self.ratio += (wanted - self.ratio) * 0.1;
+        let wanted = if self.mode == Mode::Normal {
+            // Preserve normal-speed control, including its original units.
+            (1.0 + (self.target - behind) / self.target).clamp(0.75, 2.5)
+        } else {
+            // Include input ready to become output, but not the WSOLA
+            // lookahead. Counting lookahead steals the device's margin;
+            // ignoring ready input winds up when a small device blocks.
+            // Re-read pending after any catch-up skip above.
+            let lookahead = if self.mode == Mode::Fast(FastForwardAudio::SpedUp) { 1 } else { SEGMENT + SEEK };
+            let ready = self.stretch.pending().saturating_sub(lookahead) as f64 * self.ratio;
+            // Centre each output burst around the target rather than
+            // letting its mean depth sit half a burst below the target.
+            let burst = if self.mode == Mode::Fast(FastForwardAudio::SpedUp) {
+                input.len() as f64 * self.ratio
+            } else { HOP as f64 };
+            let margin = (burst / 2.0).min(self.target / 2.0);
+            let error = (self.target + margin - queued - ready) / self.target;
+            // Integrate per estimated output second, capped across stalls.
+            // The baseline converges to 1 / achieved_speed, removing the
+            // proportional-only error at every speed. Clamp for anti-windup.
+            let seconds = (input.len() as f64 * self.ratio / AUDIO_SAMPLE_RATE).min(0.1);
+            self.nominal = (self.nominal + error * seconds).clamp(0.25, 2.5);
+            (self.nominal + error).clamp(0.25, 2.5)
+        };
+        let smoothing = if self.mode == Mode::Normal { 0.1 } else {
+            // Respond within the device's safety buffer when achieved
+            // speed drops suddenly, independently of input batch size.
+            let seconds = input.len() as f64 * self.ratio / AUDIO_SAMPLE_RATE;
+            1.0 - (-seconds / 0.025).exp()
+        };
+        self.ratio += (wanted - self.ratio) * smoothing;
         self.chunk.clear();
         match self.mode {
             Mode::Fast(FastForwardAudio::SpedUp) => self.stretch.resample(self.ratio, &mut self.chunk),
@@ -341,8 +375,8 @@ impl Device for AAudio {
         AAUDIO_TARGET
     }
 
-    fn underruns(&self) -> i32 {
-        self.stream.x_run_count()
+    fn underruns(&self) -> Option<i32> {
+        Some(self.stream.x_run_count())
     }
 
     fn idle(&mut self, idle: bool) {
@@ -485,6 +519,7 @@ mod tests {
         pacer.stretch.feed(&vec![[7; 2]; 4000]);
         pacer.stretch.stretch(1.5, &mut pacer.chunk);
         assert!(!pacer.stretch.tail.is_empty());
+        let pending_before = pacer.stretch.pending();
         let input = pacer.collect([
             Message::Samples(vec![[8; 2]; 1000]),
             Message::Mode(Mode::Fast(FastForwardAudio::SpedUp)), // enter fast-forward
@@ -497,6 +532,8 @@ mod tests {
         assert!(pacer.stretch.tail.is_empty());
         assert!(pacer.chunk.is_empty());
         assert_eq!(pacer.ratio, 1.0);
+        assert_eq!(pacer.transition_dropped, pending_before + 1000 + 500);
+        assert_eq!(pacer.dropped, 0);
     }
 
     /// a device that plays at the title's rate in real time and holds at
@@ -507,6 +544,35 @@ mod tests {
         queued: usize,
         /// frames played, which is the clock.
         played: usize,
+        target_seconds: f64,
+        /// Measure actual silence and time-weighted device depth, after startup.
+        warmup: usize,
+        measured: usize,
+        starved: usize,
+        queue_sum: f64,
+        queue_min: usize,
+    }
+
+    impl Simulated {
+        fn new(capacity: usize, target_seconds: f64) -> Self {
+            Self { capacity, queued: 0, played: 0, target_seconds,
+                warmup: (20.0 * AUDIO_SAMPLE_RATE) as usize, measured: 0,
+                starved: 0, queue_sum: 0.0, queue_min: usize::MAX }
+        }
+
+        fn advance(&mut self, frames: usize) {
+            let ignored = self.warmup.saturating_sub(self.played).min(frames);
+            let measured = frames - ignored;
+            let first = self.queued.saturating_sub(ignored);
+            let audible = first.min(measured);
+            self.starved += measured - audible;
+            self.measured += measured;
+            // Queue before each output sample is consumed: n + (n-1) + ...
+            self.queue_sum += audible as f64 * (2.0 * first as f64 - audible as f64 + 1.0) / 2.0;
+            if measured > 0 { self.queue_min = self.queue_min.min(first.saturating_sub(measured)); }
+            self.queued = self.queued.saturating_sub(frames);
+            self.played += frames;
+        }
     }
 
     impl Device for Simulated {
@@ -521,8 +587,7 @@ mod tests {
                 if room == 0 {
                     // full: wait while a burst plays
                     let burst = 96.min(self.queued);
-                    self.queued -= burst;
-                    self.played += burst;
+                    self.advance(burst);
                     continue;
                 }
                 let taken = room.min(left);
@@ -532,7 +597,7 @@ mod tests {
         }
 
         fn target(&self) -> f64 {
-            0.05
+            self.target_seconds
         }
     }
 
@@ -542,7 +607,7 @@ mod tests {
     /// ends, in seconds, counting what waits in the channel, in the pacer and
     /// in the device.
     fn run(capacity: usize, speed: f64, minutes: f64, all_at_once: bool, mode: Mode) -> (f64, usize) {
-        let mut device = Simulated { capacity, queued: 0, played: 0 };
+        let mut device = Simulated::new(capacity, 0.05);
         let mut pacer = Pacer::new(device.target(), device.catch_up());
         pacer.collect(std::iter::once(Message::Mode(mode)));
         let per_frame = (AUDIO_SAMPLE_RATE / 60.0) as usize;
@@ -558,13 +623,17 @@ mod tests {
             }
         };
         let end = (AUDIO_SAMPLE_RATE * 60.0 * minutes) as usize;
+        let mut warmed_up = false;
         while device.played < end {
+            if !warmed_up && device.played >= device.warmup {
+                pacer.dropped = 0;
+                warmed_up = true;
+            }
             catch_up(device.played, &mut channel);
             let Some(first) = channel.pop_front() else {
                 // nothing waiting: the device plays a burst meanwhile
-                let burst = 96.min(device.queued).max(1);
-                device.queued = device.queued.saturating_sub(burst);
-                device.played += burst;
+                // The hardware clock keeps advancing through silence.
+                device.advance(96);
                 continue;
             };
             let mut input = first;
@@ -601,13 +670,117 @@ mod tests {
     }
 
     #[test]
-    fn fast_forward_audio_follows_achieved_speed_without_drifting_or_dropping() {
+    fn fast_forward_audio_has_bounded_lag_and_no_steady_catchup_drops() {
         for audio in [FastForwardAudio::PreservePitch, FastForwardAudio::SpedUp] {
             for speed in [0.75, 1.0, 1.5, 2.0] {
                 for capacity in [192, 4096] {
                     let (behind, dropped) = run(capacity, speed, 5.0, true, Mode::Fast(audio));
                     assert!(behind < 0.3, "{audio:?} at {speed}x: {behind}s behind");
                     assert_eq!(dropped, 0, "{audio:?} at {speed}x left sound out");
+                }
+            }
+        }
+    }
+
+    /// Wall-clock input production continues even while writes block or
+    /// the device runs dry. Each segment changes achieved speed and mode.
+    fn clocked_run(target: f64, capacity_targets: f64, segments: &[(f64, Mode)], seconds: f64) -> (Simulated, usize, f64) {
+        let mut device = Simulated::new((target * capacity_targets * AUDIO_SAMPLE_RATE) as usize, target);
+        let mut pacer = Pacer::new(target, device.catch_up());
+        let per_frame = (AUDIO_SAMPLE_RATE / 60.0) as usize;
+        let tone: Vec<_> = (0..per_frame).map(|i| [((i as f32 * 0.07).sin() * 8000.0) as i16; 2]).collect();
+        let mut made = 0;
+        let mut segment = usize::MAX;
+        // Catch-up counts use the same post-startup window as queue/silence.
+        // Mode-transition discards stay separate and are not treated as gaps.
+        let mut startup_dropped = None;
+        while (device.played as f64) < seconds * segments.len() as f64 * AUDIO_SAMPLE_RATE {
+            if startup_dropped.is_none() && device.played >= device.warmup { startup_dropped = Some(pacer.dropped); }
+            let now = device.played as f64 / AUDIO_SAMPLE_RATE;
+            let index = (now / seconds) as usize;
+            if index >= segments.len() { break; }
+            if index != segment {
+                if segment == usize::MAX || segments[index].1 != segments[segment].1 {
+                    pacer.collect(std::iter::once(Message::Mode(segments[index].1)));
+                }
+                segment = index;
+            }
+            let progress: f64 = segments[..index].iter().map(|(speed, _)| speed * seconds).sum::<f64>()
+                + segments[index].0 * (now - index as f64 * seconds);
+            let due = (progress * AUDIO_SAMPLE_RATE) as usize + per_frame;
+            let mut input = Vec::new();
+            while made + per_frame <= due {
+                input.extend_from_slice(&tone);
+                made += per_frame;
+            }
+            if input.is_empty() { device.advance(96); }
+            else { pacer.take(&mut device, &input); }
+        }
+        (device, pacer.dropped - startup_dropped.unwrap_or(0), pacer.ratio)
+    }
+
+    #[test]
+    fn fast_audio_maintains_device_queue_without_starvation() {
+        let mut failures = Vec::new();
+        for target in [0.05, 0.1, 0.15] {
+            for audio in [FastForwardAudio::PreservePitch, FastForwardAudio::SpedUp] {
+                for speed in [0.75, 1.0, 1.5, 2.0] {
+                    let (device, dropped, ratio) = clocked_run(target, 4.0, &[(speed, Mode::Fast(audio))], 60.0);
+                    let mean = device.queue_sum / device.measured as f64 / AUDIO_SAMPLE_RATE;
+                    eprintln!("target={target} mode={audio:?} speed={speed} starved={} mean={mean:.4}s min={:.4}s catchup_dropped={dropped} ratio={ratio:.3}", device.starved, device.queue_min as f64 / AUDIO_SAMPLE_RATE);
+                    if device.starved != 0 || mean < target * 0.8 || mean > target * 1.5
+                        || device.queue_min as f64 / AUDIO_SAMPLE_RATE < target * 0.5 || dropped != 0 {
+                        failures.push((target, audio, speed, device.starved, mean, dropped));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "starvation or unsafe device queue: {failures:?}");
+    }
+
+    #[test]
+    fn simulated_device_counts_silence_and_time_weighted_queue() {
+        let mut device = Simulated::new(100, 0.1);
+        device.warmup = 5;
+        device.queued = 10;
+        device.advance(20);
+        assert_eq!(device.played, 20);
+        assert_eq!(device.measured, 15);
+        assert_eq!(device.starved, 10);
+        assert_eq!(device.queue_sum, 15.0); // 5 + 4 + 3 + 2 + 1
+        assert_eq!(device.queue_min, 0);
+    }
+
+    #[test]
+    fn fast_audio_tracks_speed_steps_and_mode_changes_without_starvation() {
+        for target in [0.1, 0.15] {
+            for audio in [FastForwardAudio::PreservePitch, FastForwardAudio::SpedUp] {
+                let other = if audio == FastForwardAudio::PreservePitch { FastForwardAudio::SpedUp } else { FastForwardAudio::PreservePitch };
+                let schedule = [(2.0, Mode::Fast(audio)), (0.75, Mode::Fast(audio)),
+                    (1.5, Mode::Fast(audio)), (2.0, Mode::Fast(other)), (1.0, Mode::Normal)];
+                let (device, dropped, _) = clocked_run(target, 4.0, &schedule, 30.0);
+                let mean = device.queue_sum / device.measured as f64 / AUDIO_SAMPLE_RATE;
+                eprintln!("steps target={target} mode={audio:?} starved={} mean={mean:.4}s min={:.4}s catchup_dropped={dropped}", device.starved, device.queue_min as f64 / AUDIO_SAMPLE_RATE);
+                assert_eq!(device.starved, 0, "{target}s, {audio:?}");
+                assert!(mean >= target * 0.8 && mean < target * 1.5);
+                assert_eq!(dropped, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn fast_audio_handles_devices_that_hold_only_the_target() {
+        for target in [0.1, 0.15] {
+            for audio in [FastForwardAudio::PreservePitch, FastForwardAudio::SpedUp] {
+                for speed in [0.75, 1.0, 1.5, 2.0] {
+                    let (device, dropped, _) = clocked_run(target, 1.0, &[(speed, Mode::Fast(audio))], 60.0);
+                    let mean = device.queue_sum / device.measured as f64 / AUDIO_SAMPLE_RATE;
+                    eprintln!("small target={target} mode={audio:?} speed={speed} starved={} mean={mean:.4}s min={:.4}s catchup_dropped={dropped}", device.starved, device.queue_min as f64 / AUDIO_SAMPLE_RATE);
+                    assert_eq!(device.starved, 0);
+                    // One guest frame at 0.75x spans 22ms; a device capped
+                    // at its target necessarily spends part of that lower.
+                    assert!(mean > target - 0.025 && mean <= target);
+                    assert_eq!(dropped, 0);
                 }
             }
         }

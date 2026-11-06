@@ -38,8 +38,9 @@ impl Playback {
         panel_period / self.speed()
     }
 
-    /// Count guest frames between presentations, keeping the selected
-    /// presentation cap in wall time even at twice the guest frame rate.
+    /// Count guest frames at the requested playback rate. The selected
+    /// cap is reached only at that rate; below it, visible updates fall
+    /// proportionally (a 60 cap at requested 2x but achieved 1x gives 30).
     pub fn presentation_stride(&self, cap: f64) -> u64 {
         (60.0 * self.speed() as f64 / cap).ceil().max(1.0) as u64
     }
@@ -77,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn twice_the_guest_frames_with_the_same_presentation_budget() {
+    fn requested_speed_reaches_the_selected_presentation_budget() {
         let panel_period = Duration::from_secs_f64(1.0 / 60.0);
         let mut playback = Playback::default();
         for (fast, frames) in [(false, 60), (true, 120), (false, 60)] {
