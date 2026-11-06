@@ -31,7 +31,13 @@ trait Device {
     fn idle(&mut self, _idle: bool) {}
 }
 
-pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
+pub enum Message {
+    Samples(Vec<[i16; 2]>),
+    /// Drop queued pre-transition audio and the stretcher's history.
+    Reset,
+}
+
+pub fn play(samples: mpsc::Receiver<Message>) {
     std::thread::spawn(move || {
         let Some(mut device) = open() else {
             for _ in samples {}
@@ -58,9 +64,9 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
             };
             // everything waiting, taken at once, so that how far the sound is
             // behind counts it: left in the channel it would pile up unseen
-            let mut input = first;
-            for more in samples.try_iter() {
-                input.extend_from_slice(&more);
+            let input = pacer.collect(std::iter::once(first).chain(samples.try_iter()));
+            if input.is_empty() {
+                continue;
             }
             let behind = pacer.take(device.as_mut(), &input);
             if since_log.elapsed() >= std::time::Duration::from_secs(30) {
@@ -96,6 +102,30 @@ impl Pacer {
     fn new(target_seconds: f64, (over, to): (f64, f64)) -> Pacer {
         let frames = |seconds: f64| AUDIO_SAMPLE_RATE * seconds;
         Pacer { stretch: Stretch::default(), target: frames(target_seconds), over: frames(over), to: frames(to), ratio: 1.0, chunk: Vec::new(), dropped: 0 }
+    }
+
+    /// Consume transitions in channel order, so no sound from before the
+    /// last speed change survives in the batch or the WSOLA crossfade.
+    fn collect(&mut self, messages: impl Iterator<Item = Message>) -> Vec<[i16; 2]> {
+        let mut input = Vec::new();
+        for message in messages {
+            match message {
+                Message::Samples(samples) => {
+                    if input.is_empty() {
+                        input = samples;
+                    } else {
+                        input.extend_from_slice(&samples);
+                    }
+                }
+                Message::Reset => {
+                    input.clear();
+                    self.stretch = Stretch::default();
+                    self.chunk.clear();
+                    self.ratio = 1.0;
+                }
+            }
+        }
+        input
     }
 
     /// takes the title's newest sound to the device, and says how many of
@@ -399,6 +429,25 @@ impl Stretch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speed_changes_discard_old_audio_and_resume_with_only_fresh_samples() {
+        let mut pacer = Pacer::new(0.1, (0.4, 0.1));
+        pacer.stretch.feed(&vec![[7; 2]; 4000]);
+        pacer.stretch.stretch(1.5, &mut pacer.chunk);
+        assert!(!pacer.stretch.tail.is_empty());
+        let input = pacer.collect([
+            Message::Samples(vec![[8; 2]; 1000]),
+            Message::Reset, // enter fast-forward
+            Message::Reset, // leave fast-forward, no accelerated audio sent
+            Message::Samples(vec![[9; 2]; 500]),
+        ].into_iter());
+        assert_eq!(input, vec![[9; 2]; 500]);
+        assert_eq!(pacer.stretch.pending(), 0);
+        assert!(pacer.stretch.tail.is_empty());
+        assert!(pacer.chunk.is_empty());
+        assert_eq!(pacer.ratio, 1.0);
+    }
 
     /// a device that plays at the title's rate in real time and holds at
     /// most capacity frames, its writes waiting for room as a real one's do,

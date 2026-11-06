@@ -5,7 +5,8 @@
 //! ZAKURO_KMS=1 ZAKURO_RECOMPILED=title.so ZAKURO_DATA=dir pocket-native <rom>
 //!
 //! A tap of FN, or L3 and R2 together, opens the menu, FN+Start quits (Select+Start on the RG351P/M), a tap
-//! of L2 or FN+L1 swaps the screens, FN+R1 shows both or one big, FN+Select
+//! of L2 or FN+L1 swaps the screens, FN+R1 shows both or one big, and FN+Y
+//! toggles up to 2x fast-forward (muted). FN+Select
 //! turns the d-pad into the circle pad or the touch cursor, L3 doing for FN
 //! in these, the right stick moves the touch cursor and R2 touches, or tilts
 //! the console with L2 held, and R3 makes it the C-stick with L2 and R2 as
@@ -21,6 +22,7 @@ mod font;
 pub mod input;
 mod layout;
 mod menu;
+mod playback;
 mod probe;
 mod profile;
 mod profiler;
@@ -39,7 +41,7 @@ use zakuro_core::{loader, Config, FrameOutcome, System};
 use zakuro_gpu::Overlay;
 
 use crate::font::{Canvas, Font};
-use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, SELECT, START};
+use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, SELECT, START, Y};
 use crate::menu::{Action, Menu, Status};
 use crate::profile::Profile;
 use crate::settings::{Advanced, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings};
@@ -205,12 +207,14 @@ pub fn run(mut args: Vec<String>) {
     // what the screen says for a moment after a hotkey, and since when
     let mut note: Option<(&str, Instant)> = None;
     let mut fn_alone = false;
+    let mut playback = playback::Playback::default();
     let mut exit_code = 0;
 
-    let mut frame = Duration::from_secs_f64(1.0 / 60.0);
+    let mut panel_period = Duration::from_secs_f64(1.0 / 60.0);
+    let mut frame = panel_period;
     let mut next = Instant::now();
     // ZAKURO_FPS_CAP=n shows the screens at most n times a second whatever
-    // the menu says, counted in the title's 60 frames
+    // the menu says, in wall time at either playback speed
     let fixed_cap: Option<f64> = std::env::var("ZAKURO_FPS_CAP").ok().and_then(|v| v.parse().ok()).filter(|&n: &f64| n > 0.0);
     let mut presented = 0u64;
     let mut cursor = (160.0f32, 120.0f32);
@@ -285,7 +289,7 @@ pub fn run(mut args: Vec<String>) {
         // when the renderer lets go of a window that went
         if input::PAUSED.load(std::sync::atomic::Ordering::Relaxed) {
             system.present_panel(layout::shown(&settings), None, Vec::new(), settings.smooth, false);
-            std::thread::sleep(frame);
+            std::thread::sleep(panel_period);
             next = Instant::now();
             continue;
         }
@@ -303,7 +307,7 @@ pub fn run(mut args: Vec<String>) {
                 system.present_panel(layout::shown(&settings), None, vec![edited], settings.smooth, false);
             }
             held = keys;
-            std::thread::sleep(frame);
+            std::thread::sleep(panel_period);
             continue;
         }
         // the touch controls hold keys and the circle pad as the gamepad
@@ -328,7 +332,7 @@ pub fn run(mut args: Vec<String>) {
         if fn_pressed {
             fn_alone = true;
         }
-        if keys.contains(&FN) && keys.iter().any(|key| *key != FN && !held.contains(key)) {
+        if keys.contains(&FN) && (keys.contains(&Y) || keys.iter().any(|key| *key != FN && !held.contains(key))) {
             fn_alone = false;
         }
         let tapped = fn_alone && held.contains(&FN) && !keys.contains(&FN);
@@ -385,9 +389,20 @@ pub fn run(mut args: Vec<String>) {
                     system.present_panel(layout::shown(&settings), None, overlays(&overlay, &controls_overlay), settings.smooth, false);
                     (menu_drawn, menu_controls) = (true, drawn_controls);
                 }
-                std::thread::sleep(frame);
+                std::thread::sleep(panel_period);
                 continue;
             }
+        }
+
+        if probe.is_none() && playback.input(&keys) {
+            // Start a fresh deadline in either mode; never catch up the
+            // old schedule. No accelerated audio enters the output queue.
+            next = Instant::now();
+            frame = playback.interval(panel_period);
+            skipped = 0;
+            let _ = sound.send(sound::Message::Reset);
+            note = Some((if playback.fast_forward { "Fast-forward: up to 2x (muted)" } else { "Normal speed" }, Instant::now()));
+            log::info!("playback target {}x", playback.speed());
         }
 
         // L3 stands in for FN on handhelds with no FN
@@ -433,6 +448,7 @@ pub fn run(mut args: Vec<String>) {
             (settings.right_stick, note) = (right_stick, Some((said, Instant::now())));
         }
         held = keys.clone();
+        playback.filter_game_keys(&mut keys);
 
         let behind = match probe.as_mut() {
             Some(probe) => probe.behind(),
@@ -443,11 +459,12 @@ pub fn run(mut args: Vec<String>) {
         if skip {
             last_skip = frame_number;
         }
-        let interpolating = settings.interpolate_to > 0 && frame_number > last_skip + 60;
+        let interpolating = !playback.fast_forward && settings.interpolate_to > 0 && frame_number > last_skip + 60;
         // a frame the panel will not show, which a title making a picture
         // every frame need not draw
         let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
-        let unshown = shown_only && as_played && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
+        let every = if interpolating { 60 / settings.interpolate_to as u64 } else { playback.presentation_stride(cap) };
+        let unshown = shown_only && as_played && (settings.interpolate_to == 0 || playback.fast_forward) && frame_number + 1 < presented + every;
         system.skip_frames(skip, unshown, most_skipped);
         let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
         let (c_stick_x, c_stick_y) = if c_stick && !hotkey { (input::stick(axes[3]), -input::stick(axes[4])) } else { (0.0, 0.0) };
@@ -529,8 +546,8 @@ pub fn run(mut args: Vec<String>) {
             system.answer_keyboard("Zakuro", confirm);
         }
         let audio = system.take_audio();
-        if !audio.is_empty() && probe.is_none() {
-            let _ = sound.send(audio);
+        if !audio.is_empty() && probe.is_none() && !playback.fast_forward {
+            let _ = sound.send(sound::Message::Samples(audio));
         }
 
         counted += 1;
@@ -558,7 +575,6 @@ pub fn run(mut args: Vec<String>) {
         if !skip {
             rendered += 1;
         }
-        let every = if interpolating { 60 / settings.interpolate_to as u64 } else { (60.0 / cap).ceil().max(1.0) as u64 };
         if !skip && frame_number >= presented + every {
             presented = frame_number;
             fps += 1;
@@ -566,7 +582,8 @@ pub fn run(mut args: Vec<String>) {
             if second {
                 (last_fps, fps, fps_since) = (fps, 0, Instant::now());
             }
-            let said = note.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(said, _)| said);
+            let said = note.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(said, _)| said)
+                .or(playback.fast_forward.then_some("Fast-forward: up to 2x (muted)"));
             let saving = zakuro_core::services::host_archive::saving();
             if second || said != status.as_ref().and_then(|status: &Status| status.note) || saving != status.as_ref().is_some_and(|status| status.saving) {
                 let building = zakuro_gpu::compiling();
@@ -592,7 +609,7 @@ pub fn run(mut args: Vec<String>) {
                 Cursor::Auto => !two_screens || cursor_moved.is_some_and(|moved| moved.elapsed() < Duration::from_secs(2)),
             };
             let pointer = areas[1].filter(|_| cursor_shown).map(|[x, y, width, height]| (x + (cursor.0 * width as f32 / 320.0) as i32, y + (cursor.1 * height as f32 / 240.0) as i32));
-            system.present_panel(areas, pointer, overlays(&overlay, &controls_overlay), settings.smooth, interpolating);
+            system.present_panel_at_speed(areas, pointer, overlays(&overlay, &controls_overlay), settings.smooth, interpolating, playback.speed());
         }
 
         if let Some(limit) = slow {
@@ -608,12 +625,14 @@ pub fn run(mut args: Vec<String>) {
         if probe.is_some() {
             continue;
         }
-        // a frame lasts as long as the panel's refresh, and the frames move
+        // at normal speed a frame lasts as long as the panel's refresh;
+        // fast-forward halves that interval. Only normal frames move
         // to hand the panel its pictures halfway between two refreshes, where
         // a little late or early does not hold one up a refresh longer
         if let Some((period, slack)) = zakuro_gpu::panel_timing() {
-            frame = period;
-            if let Some(slack) = slack.filter(|_| !behind) {
+            panel_period = period;
+            frame = playback.interval(panel_period);
+            if let Some(slack) = slack.filter(|_| !behind && !playback.fast_forward) {
                 let error = slack.as_secs_f64() - period.as_secs_f64() / 2.0;
                 let nudge = Duration::from_secs_f64((error.abs() / 4.0).min(0.001));
                 next = if error > 0.0 { next + nudge } else { next - nudge };

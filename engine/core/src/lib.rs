@@ -1125,6 +1125,13 @@ impl System {
     /// filtered when smooth. the GPU thread shows them once it drew them,
     /// the title going on with the next frame meanwhile.
     pub fn present_panel(&mut self, areas: [Option<[i32; 4]>; 2], cursor: Option<(i32, i32)>, overlays: Vec<std::sync::Arc<zakuro_gpu::Overlay>>, smooth: bool, interpolate: bool) {
+        self.present_panel_at_speed(areas, cursor, overlays, smooth, interpolate, 1);
+    }
+
+    /// Like `present_panel`, at `speed` guest frames per panel refresh
+    /// (1 normally, 2 for fast-forward). KMS holds pictures for the scaled
+    /// duration rather than imposing normal-speed pacing on faster play.
+    pub fn present_panel_at_speed(&mut self, areas: [Option<[i32; 4]>; 2], cursor: Option<(i32, i32)>, overlays: Vec<std::sync::Arc<zakuro_gpu::Overlay>>, smooth: bool, interpolate: bool, speed: u32) {
         let black = self.lcd_force_black;
         // the screens go up again when a picture reached one, the buffers
         // shown, the layout or the overlay changed, and every sixth time
@@ -1156,7 +1163,7 @@ impl System {
             }
             gpu.presented = state;
             gpu.shown += 1;
-            let frames = frame.saturating_sub(std::mem::replace(&mut gpu.presented_frame, frame)).min(2) as u32;
+            let frames = panel_refreshes(frame.saturating_sub(std::mem::replace(&mut gpu.presented_frame, frame)), speed);
             let mut shown = [None, None];
             for (index, screen) in [zakuro_common::Screen::Top, zakuro_common::Screen::Bottom].into_iter().enumerate() {
                 let Some(area) = areas[index] else { continue };
@@ -1301,6 +1308,12 @@ fn grow(pixels: &[u8], width: u32, scale: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Preserve even presentation pacing without putting a normal-speed hold
+/// on accelerated pictures. Round up so short gaps never become zero.
+fn panel_refreshes(guest_frames: u64, speed: u32) -> u32 {
+    guest_frames.div_ceil(speed.max(1) as u64).min(2) as u32
 }
 
 /// the picture the host's GPU drew for a screen, when it is still what the
@@ -1467,6 +1480,15 @@ unsafe impl<T> Send for Shared<T> {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panel_holds_follow_playback_speed_and_keep_the_two_refresh_limit() {
+        for (guest_frames, normal, fast) in [(0, 0, 0), (1, 1, 1), (2, 2, 1), (3, 2, 2), (4, 2, 2), (60, 2, 2)] {
+            assert_eq!(super::panel_refreshes(guest_frames, 1), normal);
+            assert_eq!(super::panel_refreshes(guest_frames, 2), fast);
+            assert_eq!(super::panel_refreshes(guest_frames, 0), normal);
+        }
+    }
+
     use super::*;
     use kernel::object::KObject;
     use kernel::thread::ThreadStatus;
