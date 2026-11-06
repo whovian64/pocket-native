@@ -150,9 +150,25 @@ report.
 | FN + Start | Quits |
 | Tap L2, or FN + L1 | Swaps the screens |
 | FN + R1 | Switches between both screens and one big screen |
+| FN + Y | Toggles fast-forward (up to 2×, muted) |
 | FN + Select | Switches the D-pad between D-pad, circle pad and touch cursor |
 
 On a handheld with no FN button, L3 does what FN does.
+
+**Fast-forward** requests twice the normal game speed; press FN + Y (or
+L3 + Y) again to return to normal. The overlay stays visible while it is
+on. It resets to normal when you restart the game. Audio is muted during
+fast-forward and resumes afterwards; a short tail already in the audio
+device may finish playing when you switch. The selected frame cap still
+limits screen updates per second, and interpolation pauses while speeding
+up. Game clocks, rendering options and native game code are unchanged.
+
+This is a shared Linux/Android runtime feature for all titles, using the
+existing FN/L3 controls; native game libraries do not need recompiling.
+The actual speed depends on spare CPU/GPU capacity in each scene:
+a game already below full speed may gain little or nothing. A 2× target is
+not a measured 2× result on that handheld; check performance, battery use
+and temperatures on your device.
 
 On Android, the touch controls cover all of this, with a Menu button in
 place of FN, and hide while you use a gamepad. **Controls > Edit touch
