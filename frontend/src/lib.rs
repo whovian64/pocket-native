@@ -267,6 +267,7 @@ pub fn run(mut args: Vec<String>) {
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
     loop {
         let began = Instant::now();
+        if let Some(probe) = probe.as_mut() { probe.begin_batch(); }
         let (mut keys, mut axes, fingers, second_touch, pad_used) = {
             let mut pad = pad.lock().unwrap();
             let keys: HashSet<u16> = pad.keys.union(&pad.let_go).copied().collect();
@@ -514,6 +515,7 @@ pub fn run(mut args: Vec<String>) {
         }
         frame_number += 1;
 
+        if let Some(probe) = probe.as_mut() { probe.begin_frame(); }
         match system.run_frame() {
             FrameOutcome::Completed => {}
             outcome => {
@@ -539,6 +541,9 @@ pub fn run(mut args: Vec<String>) {
             let speed = 300.0 / 60.0 / since.elapsed().as_secs_f64() * 100.0;
             let (transfers, top, bottom, shown) = (system.transfers(), system.top_pictures(), system.bottom_pictures(), system.shown());
             let (read_us, read_bytes) = zakuro_core::services::fs::rom_reads();
+            if log::log_enabled!(log::Level::Info) {
+                if let Some(probe) = probe.as_mut() { probe.before_wait_reset(); }
+            }
             log::info!(
                 "speed {speed:.0}%, rendered {rendered} of 300 frames, {} transfers, {} top pictures, {} bottom, rom {}ms/{}KiB, {} shown, {}",
                 transfers - counted_transfers,
@@ -595,6 +600,7 @@ pub fn run(mut args: Vec<String>) {
             system.present_panel(areas, pointer, overlays(&overlay, &controls_overlay), settings.smooth, interpolating);
         }
 
+        if let Some(probe) = probe.as_mut() { probe.finish_batch(); }
         if let Some(limit) = slow {
             let took = began.elapsed().as_secs_f64() * 1000.0;
             if took > limit {

@@ -4,7 +4,9 @@ Saved, player-controlled checkpoints now let these titles exercise ordinary
 outdoor work. This follow-up retains two small changes: format-specialized
 uniform conversion and a better-distributed index for the existing native
 lookup cache. **No game-level speedup or memory reduction is established.**
-The previous 2× objective was not resumed.
+
+For the latest comparison with the actual original revision, see the
+[Original/Current evaluation results](consistent-eval-results.md).
 
 The later [three-game reuse follow-up](three-game-reuse-results.md) tests
 additional candidates against this PR state and retains exact output-semantics

@@ -27,12 +27,16 @@ import tomllib
 _PROFILE_SPEC = importlib.util.spec_from_file_location("implementation_profiles", Path(__file__).with_name("implementation_profiles.py"))
 profile_rules = importlib.util.module_from_spec(_PROFILE_SPEC)
 _PROFILE_SPEC.loader.exec_module(profile_rules)
+_BATCH_SPEC = importlib.util.spec_from_file_location("batch_metrics", Path(__file__).with_name("batch_metrics.py"))
+batch_metrics = importlib.util.module_from_spec(_BATCH_SPEC)
+_BATCH_SPEC.loader.exec_module(batch_metrics)
 
 SCHEMA = 1
 BUTTONS = set("A B X Y L R START SELECT UP DOWN LEFT RIGHT CUP CDOWN CLEFT CRIGHT".split())
 RENDERER_ENV = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH",
                 "LIBGL_DRIVERS_PATH", "VK_ICD_FILENAMES", "VK_DRIVER_FILES", "DRI_PRIME",
-                "EGL_PLATFORM", "LIBGL_ALWAYS_SOFTWARE", "MESA_LOADER_DRIVER_OVERRIDE", "GALLIUM_DRIVER")
+                "EGL_PLATFORM", "LIBGL_ALWAYS_SOFTWARE", "MESA_LOADER_DRIVER_OVERRIDE", "GALLIUM_DRIVER",
+                "__EGL_VENDOR_LIBRARY_FILENAMES")
 CGROUP_DEFAULTS = {
     "cpu.max": "max", "cpu.max.burst": "0", "cpu.weight": "100", "cpu.idle": "0",
     "cpu.uclamp.min": "0.00", "cpu.uclamp.max": "max",
@@ -468,6 +472,10 @@ def run(args: argparse.Namespace) -> int:
     if not math.isfinite(args.resolution) or args.resolution <= 0 or not 0 <= args.clock < 2**64:
         raise ValueError("resolution must be finite and positive, clock must be nonnegative")
     validate_input(args.input)
+    if args.batch_telemetry and not 0 <= args.measure_start < (args.measure_end or args.frames) <= args.frames <= 100000:
+        raise ValueError("batch telemetry requires 0 <= start < end <= frames <= 100000")
+    if not args.batch_telemetry and (args.measure_start != 0 or args.measure_end is not None):
+        raise ValueError("measurement ranges require --batch-telemetry")
     implementation = None
     implementation_source = None
     allocator_before = None
@@ -492,7 +500,7 @@ def run(args: argparse.Namespace) -> int:
     if any(cpu not in allowed for cpu in affinity):
         raise ValueError(f"CPU affinity must be a subset of {allowed}")
     args.output = args.output.resolve()
-    for key in ("seed_data", "seed_config", "titles"):
+    for key in ("seed_data", "seed_config", "seed_cache", "titles"):
         source = getattr(args, key)
         if source:
             if source.is_symlink() or not source.is_dir():
@@ -505,6 +513,7 @@ def run(args: argparse.Namespace) -> int:
     seed = tree_identity(args.seed_data)
     profiles = tree_identity(args.titles)
     config = tree_identity(args.seed_config)
+    cache = tree_identity(args.seed_cache)
     if implementation and any(Path(item["path"]).name == "settings.toml" for item in seed + config):
         raise ValueError("profile mode generates settings.toml; remove seeded settings.toml to avoid undeclared overrides")
     cgroup_start = cgroup_envelope()
@@ -515,7 +524,10 @@ def run(args: argparse.Namespace) -> int:
                   "guest_trace_interval_frames": args.trace_every,
                   "resource_envelope": cgroup_start["comparable"],
                   "seed_config": config, "profiles": profiles,
-                  "cache_policy": "fresh application cache per trial; host page cache uncontrolled",
+                  "cache_policy": "cloned immutable application cache seed" if args.seed_cache else "fresh application cache per trial; host page cache uncontrolled",
+                  "seed_cache": cache, "driver_cache": args.driver_cache,
+                  "probe_observer": {"batch_telemetry": args.batch_telemetry, "capture": args.capture,
+                                     "measure_start": args.measure_start, "measure_end": args.measure_end or args.frames},
                   "renderer_environment": {key: os.environ[key] for key in RENDERER_ENV if key in os.environ}}
     if implementation:
         experiment["implementation_constraints"] = implementation["constraints"]
@@ -538,6 +550,7 @@ def run(args: argparse.Namespace) -> int:
             "source": implementation_source, "allocator_before": allocator_before}
         shutil.copy2(args.implementation_profile, args.output / "implementation-profile.json")
     write_json(args.output / "manifest.json", manifest)
+    manifest["harness"]["batch_metrics_sha256"] = digest(Path(batch_metrics.__file__))
     for index in range(args.repeats):
         trial = args.output / f"trial-{index + 1:02}"
         trial.mkdir()
@@ -547,7 +560,10 @@ def run(args: argparse.Namespace) -> int:
             else:
                 (trial / name).mkdir()
         for name in ("home", "cache", "tmp", "xdg-data"):
-            (trial / name).mkdir()
+            if name == "cache" and args.seed_cache:
+                shutil.copytree(args.seed_cache, trial / name)
+            else:
+                (trial / name).mkdir()
         if implementation:
             (trial / "data/settings.toml").write_text(profile_rules.settings(implementation))
         env = {key: os.environ[key] for key in ("PATH", *RENDERER_ENV)
@@ -562,6 +578,15 @@ def run(args: argparse.Namespace) -> int:
         command = [str(args.executable), "--probe", str(args.rom), str(args.frames)]
         if args.trace_every is not None:
             env["ZAKURO_PROBE_TRACE_EVERY"] = str(args.trace_every)
+        if args.batch_telemetry:
+            env["ZAKURO_PROBE_TELEMETRY"] = "1"
+        if args.capture == "boundaries":
+            env["ZAKURO_PROBE_CAPTURE"] = "boundaries"
+        if args.driver_cache != "uncontrolled":
+            env.update({"__GL_SHADER_DISK_CACHE": "0" if args.driver_cache == "off" else "1",
+                        "MESA_SHADER_CACHE_DISABLE": "true" if args.driver_cache == "off" else "false",
+                        "__GL_SHADER_DISK_CACHE_PATH": str(trial / "cache/driver-nvidia"),
+                        "MESA_SHADER_CACHE_DIR": str(trial / "cache/driver-mesa")})
         if implementation:
             env.update(profile_rules.environment(implementation))
         result = {"trial": trial.name, "command": command, "environment": env}
@@ -573,6 +598,13 @@ def run(args: argparse.Namespace) -> int:
             result["metrics"] = measure(command, trial, env, args.timeout, affinity, args.rss_limit_mib, preload_path)
             result["host_activity"] = result["metrics"].pop("host_activity")
             result["probe"] = probe_result(trial, args.frames)
+            if args.batch_telemetry:
+                reports = list(trial.glob("probe-*/report.toml"))
+                if len(reports) != 1:
+                    raise ValueError("expected one probe for batch telemetry")
+                timing_path = reports[0].with_name("batch-timing.csv")
+                result["batch_telemetry"] = {"source": identity(timing_path),
+                    "summary": batch_metrics.read(timing_path, args.frames, args.measure_start, args.measure_end or args.frames)}
             if (args.trace_every is not None and (result["probe"].get("guest_trace") or {}).get("sampling_interval_frames") != args.trace_every):
                 result["probe"]["errors"].append("requested guest trace missing or using a different interval")
                 result["probe"]["valid"] = False
@@ -612,7 +644,9 @@ def run(args: argparse.Namespace) -> int:
             manifest["implementation_profile"]["allocator_after"] = allocator_after
             if allocator_after != allocator_before:
                 changed.append("implementation_allocator")
-    for key, initial in (("seed_data", seed), ("seed_config", config), ("titles", profiles)):
+    if digest(Path(batch_metrics.__file__)) != manifest["harness"]["batch_metrics_sha256"]:
+        changed.append("batch_metrics_support")
+    for key, initial in (("seed_data", seed), ("seed_config", config), ("seed_cache", cache), ("titles", profiles)):
         if tree_identity(getattr(args, key)) != initial:
             changed.append(key)
     cgroup_end = cgroup_envelope()
@@ -704,6 +738,26 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
     elif probe.get("guest_trace") is not None or probe.get("report", {}).get("guest_trace_file"):
         errors.append("undeclared guest trace instrumentation")
     env = trial.get("environment", {})
+    observer = experiment.get("probe_observer", {})
+    if observer.get("batch_telemetry"):
+        expected["ZAKURO_PROBE_TELEMETRY"] = "1"
+        timing = trial.get("batch_telemetry", {})
+        summary = timing.get("summary", {})
+        if (summary.get("rows") != frames or summary.get("schema_version") != 1
+                or summary.get("measurement", {}).get("start_batch_inclusive") != observer.get("measure_start")
+                or summary.get("measurement", {}).get("end_batch_exclusive") != observer.get("measure_end")
+                or not re.fullmatch(r"[0-9a-f]{64}", str(timing.get("source", {}).get("sha256", "")))):
+            errors.append("missing/contradictory buffered batch telemetry")
+    if observer.get("capture") == "boundaries":
+        expected["ZAKURO_PROBE_CAPTURE"] = "boundaries"
+    driver_cache = experiment.get("driver_cache", "uncontrolled")
+    if driver_cache not in ("uncontrolled", "off", "isolated"):
+        errors.append("unknown driver-cache policy")
+    elif driver_cache != "uncontrolled":
+        expected.update({"__GL_SHADER_DISK_CACHE": "0" if driver_cache == "off" else "1",
+                         "MESA_SHADER_CACHE_DISABLE": "true" if driver_cache == "off" else "false",
+                         "__GL_SHADER_DISK_CACHE_PATH": str(Path(env.get("XDG_CACHE_HOME", "")) / "driver-nvidia"),
+                         "MESA_SHADER_CACHE_DIR": str(Path(env.get("XDG_CACHE_HOME", "")) / "driver-mesa")})
     if not isinstance(env, dict):
         return errors + ["invalid process environment shape"]
     if any(not isinstance(value, str) or env.get(key) != value for key, value in expected.items()):
@@ -869,6 +923,13 @@ def main() -> int:
     runner.add_argument("--max-other-cpu-fraction", type=float, default=0.10,
                         help="comparison gate: maximum estimated unrelated CPU / all online host capacity (default 0.10)")
     runner.add_argument("--trace-every", type=int, help="diagnostic guest-state checkpoint interval in completed frames; default off")
+    runner.add_argument("--seed-cache", type=Path, help="immutable per-build warmed XDG cache; cloned each trial, never shared writable")
+    runner.add_argument("--driver-cache", choices=("uncontrolled", "off", "isolated"), default="uncontrolled")
+    runner.add_argument("--capture", choices=("legacy", "boundaries"), default="legacy",
+                        help="boundaries retains eight screenshots but omits every-ten-batch flash reads")
+    runner.add_argument("--batch-telemetry", action="store_true", help="require optional buffered run_frame wall/CPU/progress observations")
+    runner.add_argument("--measure-start", type=int, default=0, help="inclusive zero-based batch boundary; startup still executes")
+    runner.add_argument("--measure-end", type=int, help="exclusive measurement boundary; default frames")
     runner.set_defaults(action=run)
     comparer = commands.add_parser("compare", help="compare complete baseline/candidate manifests")
     comparer.add_argument("baseline", type=Path)

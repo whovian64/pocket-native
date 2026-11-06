@@ -1,10 +1,12 @@
 # Host evaluation and contribution results
 
-This work targets converted-game CPU time and memory while retaining fixed
-render quality and exact sampled output. The requested 2× speed and half-resource
-target is **not established**. No RG DS Plus runtime, battery or FPS measurement
-is available. See the [reproduction guide](performance-eval.md) and
+This historical prologue/bedroom evaluation retains fixed quality and exact
+sampled output. **A consistent game-level CPU/time/RSS improvement is not
+established.** No RG DS Plus runtime, battery or FPS measurement is available. See the [reproduction guide](performance-eval.md) and
 [hardware/deployment limits](rg-ds-plus-feasibility.md).
+
+The latest [three-game Original/Current protocol](consistent-eval-results.md)
+is separate from these historical observations.
 
 The later [Route 1 follow-up](route1-eval-results.md) tests four additional
 candidates independently and retains only a small cached-pipeline shortcut.
@@ -32,7 +34,7 @@ It does not establish a game-level speedup.
 - Fail differential verification on mismatches and cover present or swapped
   private guest pages through checked pagemap flags; no PFN access is required.
 
-## Final controlled host comparison
+## Historical controlled host comparison
 
 **The final timing comparison is ineligible.** All six runs completed and
 matched exact report/work fields, literal warnings and eight sampled BMPs.
@@ -55,9 +57,8 @@ All six rows, sampled simultaneous RSS components, page faults, block I/O and
 host activity are in the small [observation CSV](assets/ultra-sun-runtime-observations.csv).
 [Provenance and output hashes](assets/ultra-sun-eval-provenance.json) bind the
 ROM identity, input, renderer, original/candidate binaries and source archive.
-The requested 2× speed / half-resource result is not established; even the
-unadmitted observed RSS ranges do not satisfy the conservative half-RSS gate.
-There is no accepted CPU/time/RSS improvement chart to publish.
+These observations do not establish an accepted CPU/time/RSS improvement,
+and no performance-gain chart is derived from them.
 
 Genuine same-frame Original/Optimized captures were inspected and retained
 locally for manual review. **No game imagery is included in this contribution**,

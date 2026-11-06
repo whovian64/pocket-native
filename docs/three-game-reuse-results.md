@@ -108,4 +108,4 @@ retain source/binary identities and all dispositions. Raw/held/rejected
 receipts, original artifacts and private saves remain local. No ROM, generated
 game C/library, save, key, game image or raw profile is included. Human visual
 review, complete game coverage and actual ARM/Mali/handheld execution remain
-outstanding. No new 2x objective was pursued.
+outstanding.

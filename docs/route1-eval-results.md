@@ -3,7 +3,7 @@
 A saved Route 1 checkpoint makes outdoor gameplay repeatable without replaying
 the full prologue. Of four candidates tested independently, this follow-up
 retains only the cached-pipeline binding shortcut. **No gameplay speedup is
-claimed.** The earlier 2× objective was not resumed.
+claimed.**
 
 ## What changes
 

@@ -1,10 +1,11 @@
 # Reproducible performance evaluation
 
 The evaluation measures a specific converted game and fixed frame workload on
-Linux. Its goal is at least **2× faster wall time, 50% less CPU time and 50% less
-peak process RSS**, while preserving sampled screen output. These are targets,
-not a statement that the current engine or this game achieves them. RSS does
-not include all GPU memory, the operating system, battery use or storage.
+Linux, preserving captured work and sampled screen output. Report CPU cost,
+elapsed time and memory independently; no universal speedup target is required.
+RSS excludes GPU allocations, the operating system, battery use and storage.
+For paired A/A controls, warmed caches, named gameplay windows and normal async
+scheduling, use [the consistent multi-game protocol](consistent-evals.md).
 
 Use your own local ROM. Keep ROMs, converted libraries, save data, screenshots
 and trial output outside Git. `build/perf/` is already ignored. The harness
@@ -78,7 +79,8 @@ both start empty. Symlinks in seed/profile trees are rejected. Each repetition
 gets its own working directory, HOME, temporary directory, application cache,
 configuration and `ZAKURO_DATA`. Source seeds are never passed to the runtime.
 The output directory must be new and cannot be inside a seed directory.
-Application caches are fresh each time; the host's filesystem/page cache is
+Application caches are fresh by default; `--seed-cache` explicitly clones a
+per-build warmed cache instead. The host's filesystem/page cache is
 **not flushed**, and pre-trial ROM hashing itself warms file pages, so these
 are not controlled cold-disk measurements. Keep the
 machine otherwise idle and alternate baseline/candidate batches to assess drift.
@@ -131,9 +133,10 @@ regenerate both measurements after changing harness logic. Missing schema,
 harness identity or resource-envelope provenance prevents a passing comparison.
 Pixel equality is deliberately strict; a differing pixel is a review condition,
 not automatic permission to weaken correctness checks. Medians and observed
-ranges are reported. All three resource targets must pass even using the
-candidate's slowest/largest trial divided by the baseline's fastest/smallest
-trial. This conservative range check is not a statistical confidence interval.
+ranges are reported. The legacy comparison also retains its conservative half-resource threshold
+fields for compatibility, using candidate maximum divided by baseline minimum.
+Those fields are not the project objective or the paired runner's admission
+criteria, and the range check is not a statistical confidence interval.
 
 `measured_workload_target_met` reports those numerical gates. `target_met` also
 requires explicit human scene review evidence. A deterministic black screen,

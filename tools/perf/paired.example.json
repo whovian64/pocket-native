@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "order_seed": 20261106,
+  "pairs": 3,
+  "aa_repeats": 3,
+  "clock": 4000000000000,
+  "timeout_seconds": 300,
+  "max_other_cpu_fraction": 0.1,
+  "aa_max_span_fraction": 0.05,
+  "titles_directory": "titles",
+  "lock_file": "build/performance-slot.lock",
+  "titles": [
+    {
+      "id": "omega-ruby",
+      "rom": "build/private/omega-ruby.3ds",
+      "library": "build/private/omega-ruby/original-native.so",
+      "seed_data": "build/private/omega-ruby/immutable-save-seed",
+      "input": "tools/perf/workloads/omega-ruby-usa-route101.input",
+      "scene": "tools/perf/workloads/omega-ruby-usa-route101.json",
+      "frames": 6000,
+      "measure_start": 1800
+    },
+    {
+      "id": "pokemon-y",
+      "rom": "build/private/pokemon-y.3ds",
+      "library": "build/private/pokemon-y/original-native.so",
+      "seed_data": "build/private/pokemon-y/immutable-save-seed",
+      "input": "tools/perf/workloads/pokemon-y-usa-route1.input",
+      "scene": "tools/perf/workloads/pokemon-y-usa-route1.json",
+      "frames": 6000,
+      "measure_start": 1800
+    },
+    {
+      "id": "ultra-sun",
+      "rom": "build/private/ultra-sun.3ds",
+      "library": "build/private/ultra-sun/original-native.so",
+      "seed_data": "build/private/ultra-sun/immutable-save-seed",
+      "input": "tools/perf/workloads/ultra-sun-usa-route1.input",
+      "scene": "tools/perf/workloads/ultra-sun-usa-route1.json",
+      "frames": 6000,
+      "measure_start": 1800
+    }
+  ],
+  "lanes": [
+    {
+      "id": "fresh-serialized",
+      "role": "equal-work",
+      "cache": "fresh",
+      "profile": "tools/perf/profiles/common-serialized.json"
+    },
+    {
+      "id": "warm-serialized",
+      "role": "equal-work",
+      "cache": "warm",
+      "profile": "tools/perf/profiles/common-serialized.json"
+    },
+    {
+      "id": "fresh-async",
+      "role": "async-diagnostic",
+      "cache": "fresh",
+      "profile": "tools/perf/profiles/common-async.json"
+    }
+  ],
+  "renderer_environment": {
+    "EGL_PLATFORM": "surfaceless"
+  },
+  "host_policy": {
+    "cpus": [
+      2,
+      4
+    ],
+    "siblings": [
+      10,
+      12
+    ],
+    "max_busy_fraction": 0.03,
+    "max_core_fraction": 0.1,
+    "max_cpu_c": 85,
+    "max_temperature_span_c": 3,
+    "window_seconds": 3,
+    "consecutive_windows": 2,
+    "timeout_seconds": 30
+  },
+  "original": {
+    "executable": "build/original/pocket-native",
+    "build_metadata": "build/original/runtime-build.json"
+  },
+  "current": {
+    "executable": "build/current/pocket-native",
+    "build_metadata": "build/current/runtime-build.json"
+  }
+}

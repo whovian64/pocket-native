@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "original-current-serialized-monolithic-system",
+  "reviewed_by": "Codex methodology implementation; human/device review pending",
+  "rationale": "Common original/current settings: deterministic serialized GPU, synchronous monolithic shaders, system allocator, default cache policies; no visual quality reductions",
+  "constraints": {
+    "gpu_thread": false,
+    "generic_shaders": false,
+    "generic_lighting": false,
+    "stand_ins": false
+  },
+  "knobs": {
+    "shader_linking": "monolithic",
+    "background_shaders": false,
+    "texture_cache_mib": null,
+    "gles_ring_kib": null,
+    "rom_cache_mib": null,
+    "allocator": {
+      "kind": "system"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "original-current-shipped-async",
+  "reviewed_by": "Codex methodology implementation; human/device review pending",
+  "rationale": "Separate product-scheduling diagnostic; GPU thread and background shaders enabled with default monolithic exact-quality settings",
+  "constraints": {
+    "gpu_thread": true,
+    "generic_shaders": false,
+    "generic_lighting": false,
+    "stand_ins": false
+  },
+  "knobs": {
+    "shader_linking": "monolithic",
+    "background_shaders": true,
+    "texture_cache_mib": null,
+    "gles_ring_kib": null,
+    "rom_cache_mib": null,
+    "allocator": {
+      "kind": "system"
+    }
+  }
+}
