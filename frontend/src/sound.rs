@@ -91,7 +91,7 @@ pub fn play(samples: mpsc::Receiver<Message>) {
                     pacer.ratio,
                     (std::mem::take(&mut pacer.dropped) as f64 / AUDIO_SAMPLE_RATE * 1000.0) as u64,
                     (std::mem::take(&mut pacer.transition_dropped) as f64 / AUDIO_SAMPLE_RATE * 1000.0) as u64,
-                    device.underruns().map_or_else(|| "not measured".into(), |count| count.to_string())
+                    device.underruns().map_or_else(|| "not measured".into(), |count| format!("{count} so far"))
                 );
                 since_log = std::time::Instant::now();
             }
@@ -181,8 +181,8 @@ impl Pacer {
             // Re-read pending after any catch-up skip above.
             let lookahead = if self.mode == Mode::Fast(FastForwardAudio::SpedUp) { 1 } else { SEGMENT + SEEK };
             let ready = self.stretch.pending().saturating_sub(lookahead) as f64 * self.ratio;
-            // Centre each output burst around the target rather than
-            // letting its mean depth sit half a burst below the target.
+            // Keep an output-burst safety margin. WSOLA's lookahead makes
+            // this approximate: Normal pitch can sit above the target.
             let burst = if self.mode == Mode::Fast(FastForwardAudio::SpedUp) {
                 input.len() as f64 * self.ratio
             } else { HOP as f64 };
