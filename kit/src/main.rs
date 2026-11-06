@@ -99,6 +99,9 @@ impl App {
             message: None,
             picking: None,
         };
+        if !app.kit.join("scripts").join("build.sh").is_file() {
+            app.message = Some("No Pocket Native kit around this program: put it in the kit's folder, beside its scripts folder.".into());
+        }
         // games dropped on the program itself come as its arguments
         let given: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
         if !given.is_empty() {
