@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::font::{rgba, Canvas};
 use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
+use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, FastForwardAudio, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -35,6 +35,7 @@ enum Field {
     ShowSaving,
     Rotation,
     FrameCap,
+    FastForwardAudio,
     Power,
     Option(usize),
     TouchSpeed,
@@ -177,7 +178,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
     match page {
         Page::Main => vec![
             ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::ShowBuilding, Field::ShowSaving, Field::Rotation])),
-            ("Performance", only(vec![Field::FrameCap, Field::Power])),
+            ("Performance", only(vec![Field::FrameCap, Field::FastForwardAudio, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
             ("Controls", only(vec![Field::TouchSpeed, Field::Cursor, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
@@ -249,6 +250,10 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
             ("Rotation", rotation.into())
         }
         Field::FrameCap => ("Frame cap", format!("{} fps", settings.frame_cap)),
+        Field::FastForwardAudio => ("Fast-forward audio", match settings.fast_forward_audio {
+            FastForwardAudio::PreservePitch => "Normal pitch",
+            FastForwardAudio::SpedUp => "Sped up",
+        }.into()),
         Field::Power => ("Power", format!("{:?}", settings.power)),
         Field::Option(index) => {
             let option = &profile.options[index];
@@ -317,6 +322,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::ShowSaving => settings.show_saving = !settings.show_saving,
         Field::Rotation => settings.rotation = step(&[Rotation::Auto, Rotation::Clockwise, Rotation::CounterClockwise, Rotation::Off], settings.rotation, by),
         Field::FrameCap => settings.frame_cap = step(&CAPS, settings.frame_cap, by),
+        Field::FastForwardAudio => settings.fast_forward_audio = step(&[FastForwardAudio::PreservePitch, FastForwardAudio::SpedUp], settings.fast_forward_audio, by),
         Field::Power => settings.power = step(&[Power::Saver, Power::Balanced, Power::Performance], settings.power, by),
         Field::Option(index) => {
             let option = &profile.options[index];
@@ -366,6 +372,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::ShowSaving => "The word in the top right corner while the game saves, to leave the power on. Off hides it.",
         Field::Rotation => "Turns the picture for a screen that shows it the wrong way round. Takes effect when the game starts again.",
         Field::FrameCap => "The most pictures shown a second. Lower lasts longer and runs cooler.",
+        Field::FastForwardAudio => "Normal pitch keeps voices natural as play speeds up. Sped up raises pitch too. Both follow game progress.",
         Field::Power => "How fast the CPU and GPU run. Performance is fastest and warmest, Saver lasts longest.",
         Field::Option(index) => &profile.options[index].help,
         Field::TouchSpeed => "How fast the right stick moves the touch cursor. R2 or R3 touches.",
@@ -704,6 +711,20 @@ fn clock() -> String {
 mod tests {
     use super::*;
     use crate::font::Font;
+
+    #[test]
+    fn fast_forward_audio_defaults_for_old_configs_and_saves_the_menu_choice() {
+        let mut settings: Settings = toml::from_str("frame_cap = 60").unwrap();
+        assert_eq!(settings.fast_forward_audio, FastForwardAudio::PreservePitch);
+        let mut game = GameSettings::default();
+        let profile = Profile::default();
+        change(Field::FastForwardAudio, 1, &mut settings, &mut game, &profile);
+        assert_eq!(settings.fast_forward_audio, FastForwardAudio::SpedUp);
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored, settings);
+        change(Field::FastForwardAudio, 1, &mut settings, &mut game, &profile);
+        assert_eq!(settings.fast_forward_audio, FastForwardAudio::PreservePitch);
+    }
 
     /// every field's help fits the two lines under the list.
     #[test]

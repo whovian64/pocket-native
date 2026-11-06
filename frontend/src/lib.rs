@@ -6,7 +6,7 @@
 //!
 //! A tap of FN, or L3 and R2 together, opens the menu, FN+Start quits (Select+Start on the RG351P/M), a tap
 //! of L2 or FN+L1 swaps the screens, FN+R1 shows both or one big, and FN+Y
-//! toggles up to 2x fast-forward (muted). FN+Select
+//! toggles up to 2x fast-forward with audio. FN+Select
 //! turns the d-pad into the circle pad or the touch cursor, L3 doing for FN
 //! in these, the right stick moves the touch cursor and R2 touches, or tilts
 //! the console with L2 held, and R3 makes it the C-stick with L2 and R2 as
@@ -208,6 +208,7 @@ pub fn run(mut args: Vec<String>) {
     let mut note: Option<(&str, Instant)> = None;
     let mut fn_alone = false;
     let mut playback = playback::Playback::default();
+    let mut audio_mode = sound::Mode::default();
     let mut exit_code = 0;
 
     let mut panel_period = Duration::from_secs_f64(1.0 / 60.0);
@@ -396,13 +397,18 @@ pub fn run(mut args: Vec<String>) {
 
         if probe.is_none() && playback.input(&keys) {
             // Start a fresh deadline in either mode; never catch up the
-            // old schedule. No accelerated audio enters the output queue.
+            // old schedule. Audio follows the new speed without backlog.
             next = Instant::now();
             frame = playback.interval(panel_period);
             skipped = 0;
-            let _ = sound.send(sound::Message::Reset);
-            note = Some((if playback.fast_forward { "Fast-forward: up to 2x (muted)" } else { "Normal speed" }, Instant::now()));
+            note = Some((if playback.fast_forward { "Fast-forward: up to 2x" } else { "Normal speed" }, Instant::now()));
             log::info!("playback target {}x", playback.speed());
+        }
+
+        let wanted_audio = sound::Mode::new(playback.fast_forward, settings.fast_forward_audio);
+        if wanted_audio != audio_mode {
+            audio_mode = wanted_audio;
+            let _ = sound.send(sound::Message::Mode(audio_mode));
         }
 
         // L3 stands in for FN on handhelds with no FN
@@ -546,7 +552,7 @@ pub fn run(mut args: Vec<String>) {
             system.answer_keyboard("Zakuro", confirm);
         }
         let audio = system.take_audio();
-        if !audio.is_empty() && probe.is_none() && !playback.fast_forward {
+        if !audio.is_empty() && probe.is_none() {
             let _ = sound.send(sound::Message::Samples(audio));
         }
 
@@ -583,7 +589,7 @@ pub fn run(mut args: Vec<String>) {
                 (last_fps, fps, fps_since) = (fps, 0, Instant::now());
             }
             let said = note.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(said, _)| said)
-                .or(playback.fast_forward.then_some("Fast-forward: up to 2x (muted)"));
+                .or(playback.fast_forward.then_some("Fast-forward: up to 2x"));
             let saving = zakuro_core::services::host_archive::saving();
             if second || said != status.as_ref().and_then(|status: &Status| status.note) || saving != status.as_ref().is_some_and(|status| status.saving) {
                 let building = zakuro_gpu::compiling();

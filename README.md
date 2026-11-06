@@ -150,17 +150,20 @@ report.
 | FN + Start | Quits |
 | Tap L2, or FN + L1 | Swaps the screens |
 | FN + R1 | Switches between both screens and one big screen |
-| FN + Y | Toggles fast-forward (up to 2×, muted) |
+| FN + Y | Toggles fast-forward (up to 2×, with audio) |
 | FN + Select | Switches the D-pad between D-pad, circle pad and touch cursor |
 
 On a handheld with no FN button, L3 does what FN does.
 
 **Fast-forward** requests twice the normal game speed; press FN + Y (or
 L3 + Y) again to return to normal. The overlay stays visible while it is
-on. It resets to normal when you restart the game. Audio is muted during
-fast-forward and resumes afterwards; a short tail already in the audio
-device may finish playing when you switch. The selected frame cap still
-limits screen updates per second, and interpolation pauses while speeding
+on. It resets to normal when you restart the game. Audio keeps playing:
+**Performance > Fast-forward audio** defaults to **Normal pitch**, which
+shortens the audio without raising voices or notes. **Sped up** lets pitch
+follow the achieved speed too. Both follow game progress; music advances faster with the game,
+rather than playing at its original tempo and drifting behind. A short tail
+already in the audio device may finish when you switch. The selected frame
+cap still limits screen updates per second, and interpolation pauses while speeding
 up. Game clocks, rendering options and native game code are unchanged.
 
 This is a shared Linux/Android runtime feature for all titles, using the
@@ -183,7 +186,8 @@ Every setting has a line of help at the bottom of the menu.
   and more), aspect ratio, render resolution, smooth scaling, frame
   interpolation, fps counter, clock and battery, shader and saving popups,
   rotation
-- **Performance:** frame cap (20, 30 or 60) and power (saver, balanced,
+- **Performance:** frame cap (20, 30 or 60), fast-forward audio (normal pitch
+  or sped up) and power (saver, balanced,
   performance)
 - **This game:** options from the game's profile, where it has some
 - **Controls:** touch cursor speed, the touch cursor shown or hidden
