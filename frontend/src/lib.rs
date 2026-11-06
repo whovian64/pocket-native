@@ -215,7 +215,8 @@ pub fn run(mut args: Vec<String>) {
     let mut frame = panel_period;
     let mut next = Instant::now();
     // ZAKURO_FPS_CAP=n shows the screens at most n times a second whatever
-    // the menu says, in wall time at either playback speed
+    // the menu says, scaled by requested speed; below that speed the
+    // visible update rate falls proportionally
     let fixed_cap: Option<f64> = std::env::var("ZAKURO_FPS_CAP").ok().and_then(|v| v.parse().ok()).filter(|&n: &f64| n > 0.0);
     let mut presented = 0u64;
     let mut cursor = (160.0f32, 120.0f32);
