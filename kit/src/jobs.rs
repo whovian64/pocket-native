@@ -43,12 +43,13 @@ pub struct Job {
 }
 
 /// the kit's folder: the one the program sits in, or above it, with the
-/// scripts in it.
+/// scripts in it. An AppImage runs from a mount of its own, the file it
+/// came in sits in the kit.
 pub fn kit_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("POCKET_NATIVE_KIT") {
         return dir.into();
     }
-    let exe = std::env::current_exe().ok();
+    let exe = std::env::var_os("APPIMAGE").map(PathBuf::from).or_else(|| std::env::current_exe().ok());
     let found = exe.as_deref().and_then(Path::parent).and_then(|dir| dir.ancestors().find(|dir| dir.join("scripts").join("build.sh").is_file()).map(Path::to_path_buf));
     found.unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
 }
