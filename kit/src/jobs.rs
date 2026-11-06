@@ -44,14 +44,68 @@ pub struct Job {
 
 /// the kit's folder: the one the program sits in, or above it, with the
 /// scripts in it. An AppImage runs from a mount of its own, the file it
-/// came in sits in the kit.
-pub fn kit_root() -> PathBuf {
+/// came in sits in the kit. With no kit around, the one the program carries.
+pub fn kit_root() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("POCKET_NATIVE_KIT") {
-        return dir.into();
+        return Ok(dir.into());
     }
     let exe = std::env::var_os("APPIMAGE").map(PathBuf::from).or_else(|| std::env::current_exe().ok());
     let found = exe.as_deref().and_then(Path::parent).and_then(|dir| dir.ancestors().find(|dir| dir.join("scripts").join("build.sh").is_file()).map(Path::to_path_buf));
-    found.unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    match found {
+        Some(dir) => Ok(dir),
+        None if PACK.is_empty() => Ok(std::env::current_dir().unwrap_or_default()),
+        None => unpack().map_err(|error| format!("Could not unpack the kit this program carries: {error}")),
+    }
+}
+
+/// the kit packed into the program by kit/build-release.sh: each file's
+/// path length, path, mode and size, then its bytes.
+static PACK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kit.pack"));
+
+/// the kit the program carries, in the user's data folder, unpacked again
+/// when the program carries another. Its games go to a Pocket Native folder
+/// in the user's own, where the kit didn't say otherwise before.
+fn unpack() -> std::io::Result<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from).ok_or_else(|| std::io::Error::other(format!("{name} isn't set")));
+    let (data, home) = if cfg!(windows) { (var("LOCALAPPDATA")?.join("Pocket Native"), var("USERPROFILE")?) } else { (var("XDG_DATA_HOME").or_else(|_| var("HOME").map(|home| home.join(".local/share")))?.join("pocket-native"), var("HOME")?) };
+    let kit = data.join("kit");
+    let stamp = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        PACK.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+    if std::fs::read_to_string(kit.join(".pack")).is_ok_and(|had| had == stamp) {
+        return Ok(kit);
+    }
+    unpack_into(PACK, &kit)?;
+    if !kit.join("kit.txt").exists() {
+        std::fs::write(kit.join("kit.txt"), format!("out={}\n", home.join("Pocket Native").display()))?;
+    }
+    std::fs::write(kit.join(".pack"), stamp)?;
+    Ok(kit)
+}
+
+fn unpack_into(mut pack: &[u8], kit: &Path) -> std::io::Result<()> {
+    fn take<'a>(pack: &mut &'a [u8], n: usize) -> std::io::Result<&'a [u8]> {
+        let (taken, rest) = pack.split_at_checked(n).ok_or_else(|| std::io::Error::other("the pack is cut short"))?;
+        *pack = rest;
+        Ok(taken)
+    }
+    while !pack.is_empty() {
+        let len = u32::from_le_bytes(take(&mut pack, 4)?.try_into().unwrap()) as usize;
+        let name = String::from_utf8_lossy(take(&mut pack, len)?).into_owned();
+        let mode = u32::from_le_bytes(take(&mut pack, 4)?.try_into().unwrap());
+        let size = u64::from_le_bytes(take(&mut pack, 8)?.try_into().unwrap()) as usize;
+        let path = name.split('/').fold(kit.to_path_buf(), |path, part| path.join(part));
+        std::fs::create_dir_all(path.parent().unwrap_or(kit))?;
+        std::fs::write(&path, take(&mut pack, size)?)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+        #[cfg(not(unix))]
+        let _ = mode;
+    }
+    Ok(())
 }
 
 /// the script for a job on this system, and its arguments.
@@ -309,5 +363,25 @@ mod tests {
         assert!((job.fraction() - 0.25).abs() < 0.01, "{}", job.fraction());
         let job = job_reading(&["== 0004000000030800 Mario Kart 7", "compiled 72 of 72", "== 00040000000EC300 The Legend of Zelda: A Link Between Worlds"]);
         assert!(job.games[0].stage == Stage::Done && job.games[1].stage == Stage::Waiting);
+    }
+
+    #[test]
+    fn a_pack_unpacks_into_its_folders() {
+        let mut pack = Vec::new();
+        for (name, mode, body) in [("scripts/build.sh", 0o755u32, &b"#!/bin/bash\n"[..]), ("README.md", 0o644, b"kit")] {
+            pack.extend((name.len() as u32).to_le_bytes());
+            pack.extend(name.as_bytes());
+            pack.extend(mode.to_le_bytes());
+            pack.extend((body.len() as u64).to_le_bytes());
+            pack.extend(body);
+        }
+        let kit = std::env::temp_dir().join(format!("pn-kit-unpack-{}", std::process::id()));
+        unpack_into(&pack, &kit).unwrap();
+        assert_eq!(std::fs::read(kit.join("scripts").join("build.sh")).unwrap(), b"#!/bin/bash\n");
+        assert_eq!(std::fs::read(kit.join("README.md")).unwrap(), b"kit");
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(kit.join("scripts").join("build.sh")).unwrap().permissions()) & 0o777, 0o755);
+        assert!(unpack_into(&pack[..pack.len() - 1], &kit).is_err());
+        std::fs::remove_dir_all(&kit).unwrap();
     }
 }

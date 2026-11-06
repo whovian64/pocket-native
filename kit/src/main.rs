@@ -14,7 +14,10 @@ use games::Game;
 use jobs::{Engine, Job, Kind};
 
 fn main() -> eframe::Result {
-    let kit = jobs::kit_root();
+    let (kit, problem) = match jobs::kit_root() {
+        Ok(kit) => (kit, None),
+        Err(problem) => (PathBuf::new(), Some(problem)),
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("Pocket Native").with_inner_size([900.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_drag_and_drop(true),
         ..Default::default()
@@ -25,7 +28,7 @@ fn main() -> eframe::Result {
         Some(_) => eframe::NativeOptions { event_loop_builder: Some(Box::new(|builder| _ = winit::platform::x11::EventLoopBuilderExtX11::with_x11(builder))), ..options },
         None => options,
     };
-    eframe::run_native("Pocket Native", options, Box::new(move |cc| Ok(Box::new(App::new(cc, kit)))))
+    eframe::run_native("Pocket Native", options, Box::new(move |cc| Ok(Box::new(App::new(cc, kit, problem)))))
 }
 
 /// what the kit remembers between runs, beside it in kit.txt.
@@ -78,7 +81,7 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext, kit: PathBuf) -> App {
+    fn new(cc: &eframe::CreationContext, kit: PathBuf, problem: Option<String>) -> App {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         let (send, newer) = channel();
         let checking = kit.clone();
@@ -96,10 +99,10 @@ impl App {
             checking_engine: Some(check_engine()),
             newer: Some(newer),
             update: None,
-            message: None,
+            message: problem,
             picking: None,
         };
-        if !app.kit.join("scripts").join("build.sh").is_file() {
+        if app.message.is_none() && !app.kit.join("scripts").join("build.sh").is_file() {
             app.message = Some("No Pocket Native kit around this program: put it in the kit's folder, beside its scripts folder.".into());
         }
         // games dropped on the program itself come as its arguments
