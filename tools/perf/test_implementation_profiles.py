@@ -39,7 +39,7 @@ def attach(manifest: dict, declared: dict) -> dict:
     if knobs["gles_ring_kib"] is not None:
         logs.append(f"GLES mutable ring initial capacity: 128 KiB (original 8192 KiB, requested cap {knobs['gles_ring_kib']} KiB, target 0x8892); grows on demand")
     if knobs["rom_cache_mib"]:
-        logs.append(f"ROM cache enabled: budget_mib={knobs['rom_cache_mib']} chunk_mib=1 host_page_bytes=4096 completed_reads_only=true best_effort=true")
+        logs.append(f"ROM cache enabled: budget_mib={knobs['rom_cache_mib']} chunk_mib=1 host_page_bytes=4096 eviction_scope=old_tracked_chunks code_copy_retirement=true best_effort=true")
     preload = None
     if allocator["kind"] == "gnu_preload":
         identity = {"path": allocator["path"], "sha256": allocator["sha256"], "bytes": 1000}

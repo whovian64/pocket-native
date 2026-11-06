@@ -3918,6 +3918,7 @@ impl Gles {
             }
             keep
         });
+        self.prune_texture_aliases();
         let recent = self.flushes.saturating_sub(PROGRAM_KEEP_FLUSHES);
         let mut programs = Vec::new();
         let used = &self.program_used;
@@ -5166,6 +5167,9 @@ mod tests {
             Ok(gles) => gles,
             Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
         };
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
         let bound = |texels: Arc<[[u8; 4]]>, width, height| BoundTexture {
             texels, packed: None, drawn: None, linear: false,
             wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge,
@@ -5206,6 +5210,13 @@ mod tests {
         let replacement = gles.texture(live.last().unwrap()).unwrap();
         assert_ne!(replacement, live_first, "a retired alias cannot return its old GL object");
         assert!(gles.texture_aliases.is_empty(), "a new canonical owner is not its own alias");
+        let transient = bound(Arc::from(vec![[31, 47, 63, 255]; 2]), 2, 1);
+        assert_eq!(gles.texture(&transient).unwrap(), replacement);
+        assert_eq!(gles.texture_aliases.len(), 1);
+        drop(transient);
+        gles.make_room();
+        assert!(gles.texture_aliases.is_empty(), "memory-pressure recovery releases dead weak payload allocations before retrying");
+        assert_eq!(gles.texture(live.last().unwrap()).unwrap(), replacement, "recovery preserves the current batch's canonical upload");
         gles.worker.run(|| {});
     }
 

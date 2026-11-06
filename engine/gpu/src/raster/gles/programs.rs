@@ -940,7 +940,12 @@ mod compiler_release_tests {
             return;
         }
         assert!(program_cache_path("test", BINARY_VERTEX, BINARY_FRAGMENT).is_none());
-        let gles = Gles::new().expect("actual EGL context required for separable no-path test");
+        let mut gles = Gles::new().expect("actual EGL context required for separable no-path test");
+        // Finish startup jobs before this isolated fixture can exit and
+        // tear down the driver underneath its background compiler.
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
         gles.worker.run(|| {
             let gl = GL_CONTEXT.get().unwrap();
             assert_ne!(pipeline_fn(0), 0, "actual separable program entry points required");
