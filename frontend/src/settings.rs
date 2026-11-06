@@ -79,6 +79,15 @@ pub enum Power {
     Performance,
 }
 
+/// Fast-forward always keeps sound in step with the game. PreservePitch
+/// compresses time without changing pitch; SpedUp lets it follow speed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FastForwardAudio {
+    #[default]
+    PreservePitch,
+    SpedUp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Speed {
     Slow,
@@ -156,6 +165,7 @@ pub struct Settings {
     /// does, which Auto leaves to.
     pub rotation: Rotation,
     pub frame_cap: u32,
+    pub fast_forward_audio: FastForwardAudio,
     pub power: Power,
     pub touch_speed: Speed,
     pub cursor: Cursor,
@@ -189,6 +199,7 @@ impl Default for Settings {
             show_clock: true,
             rotation: Rotation::Auto,
             frame_cap: 30,
+            fast_forward_audio: FastForwardAudio::PreservePitch,
             power: Power::Performance,
             touch_speed: Speed::Normal,
             cursor: Cursor::Auto,

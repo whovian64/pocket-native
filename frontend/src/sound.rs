@@ -7,6 +7,8 @@ use std::sync::mpsc;
 
 use zakuro_core::AUDIO_SAMPLE_RATE;
 
+use crate::settings::FastForwardAudio;
+
 /// where the sound goes: how many frames it holds that have not played yet,
 /// and taking more, all of them before it returns.
 trait Device {
@@ -31,10 +33,23 @@ trait Device {
     fn idle(&mut self, _idle: bool) {}
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Normal,
+    Fast(FastForwardAudio),
+}
+
+impl Mode {
+    pub fn new(fast: bool, audio: FastForwardAudio) -> Self {
+        if fast { Self::Fast(audio) } else { Self::Normal }
+    }
+}
+
 pub enum Message {
     Samples(Vec<[i16; 2]>),
     /// Drop queued pre-transition audio and the stretcher's history.
-    Reset,
+    Mode(Mode),
 }
 
 pub fn play(samples: mpsc::Receiver<Message>) {
@@ -86,6 +101,7 @@ pub fn play(samples: mpsc::Receiver<Message>) {
 /// keeps the sound target seconds behind: stretches it longer while less is
 /// queued and shorter while more is, and far behind leaves the oldest out.
 struct Pacer {
+    mode: Mode,
     stretch: Stretch,
     target: f64,
     /// past how many frames behind the oldest is left out, and down to how
@@ -101,7 +117,7 @@ struct Pacer {
 impl Pacer {
     fn new(target_seconds: f64, (over, to): (f64, f64)) -> Pacer {
         let frames = |seconds: f64| AUDIO_SAMPLE_RATE * seconds;
-        Pacer { stretch: Stretch::default(), target: frames(target_seconds), over: frames(over), to: frames(to), ratio: 1.0, chunk: Vec::new(), dropped: 0 }
+        Pacer { mode: Mode::Normal, stretch: Stretch::default(), target: frames(target_seconds), over: frames(over), to: frames(to), ratio: 1.0, chunk: Vec::new(), dropped: 0 }
     }
 
     /// Consume transitions in channel order, so no sound from before the
@@ -117,11 +133,13 @@ impl Pacer {
                         input.extend_from_slice(&samples);
                     }
                 }
-                Message::Reset => {
+                Message::Mode(mode) => {
+                    self.mode = mode;
+                    log::info!("sound playback mode {mode:?}");
                     input.clear();
                     self.stretch = Stretch::default();
                     self.chunk.clear();
-                    self.ratio = 1.0;
+                    self.ratio = if mode == Mode::Normal { 1.0 } else { 0.5 };
                 }
             }
         }
@@ -133,17 +151,28 @@ impl Pacer {
     fn take(&mut self, device: &mut dyn Device, input: &[[i16; 2]]) -> f64 {
         self.stretch.feed(input);
         // the sound not yet heard: in the device, and here, not stretched yet
-        let behind = device.queued() as f64 + self.stretch.pending() as f64;
+        // Pending guest samples take fewer output samples during fast
+        // playback; count both sides in the device's time units.
+        let pending_ratio = if self.mode == Mode::Normal { 1.0 } else { self.ratio };
+        let behind = device.queued() as f64 + self.stretch.pending() as f64 * pending_ratio;
         // far behind, after a stall or with a device that holds less than it
         // should, the oldest is left out to catch up at once rather than be
         // stretched away over minutes
         if behind > self.over {
-            self.dropped += self.stretch.skip((behind - self.to) as usize);
+            self.dropped += self.stretch.skip(((behind - self.to) / pending_ratio) as usize);
         }
-        let wanted = (1.0 + (self.target - behind) / self.target).clamp(0.75, 2.5);
+        // The normal 0.75 floor cannot consume a 2x stream. Fast-forward
+        // allows shorter output while the queue feedback follows achieved
+        // speed (which may be less than the requested 2x).
+        let minimum = if self.mode == Mode::Normal { 0.75 } else { 0.25 };
+        let nominal = if self.mode == Mode::Normal { 1.0 } else { 0.5 };
+        let wanted = (nominal + (self.target - behind) / self.target).clamp(minimum, 2.5);
         self.ratio += (wanted - self.ratio) * 0.1;
         self.chunk.clear();
-        self.stretch.stretch(self.ratio, &mut self.chunk);
+        match self.mode {
+            Mode::Fast(FastForwardAudio::SpedUp) => self.stretch.resample(self.ratio, &mut self.chunk),
+            _ => self.stretch.stretch(self.ratio, &mut self.chunk),
+        }
         device.write(&self.chunk);
         behind
     }
@@ -361,6 +390,24 @@ struct Stretch {
 }
 
 impl Stretch {
+    /// Change pitch along with duration, with a fractional input position
+    /// carried across batches so their boundaries cannot add/drop samples.
+    fn resample(&mut self, ratio: f64, out: &mut Vec<[i16; 2]>) {
+        while (self.at as usize) + 1 < self.input.len() {
+            let base = self.at as usize;
+            let fraction = (self.at - base as f64) as f32;
+            out.push([0, 1].map(|channel| {
+                let a = self.input[base][channel];
+                let b = self.input[base + 1][channel];
+                (a + (b - a) * fraction).clamp(-32768.0, 32767.0) as i16
+            }));
+            self.at += 1.0 / ratio;
+        }
+        let used = (self.at as usize).min(self.input.len().saturating_sub(1));
+        self.input.drain(..used);
+        self.at -= used as f64;
+    }
+
     /// takes more of the title's sound in.
     fn feed(&mut self, samples: &[[i16; 2]]) {
         self.input.extend(samples.iter().map(|&[l, r]| [l as f32, r as f32]));
@@ -418,7 +465,9 @@ impl Stretch {
             self.tail = self.input[start + HOP..start + SEGMENT].to_vec();
             self.at += step;
         }
-        let used = (self.at as usize).saturating_sub(SEEK);
+        // Compression can advance past the newest input. Retain that
+        // fractional position while waiting for the following batch.
+        let used = (self.at as usize).saturating_sub(SEEK).min(self.input.len());
         if used > 0 {
             self.input.drain(..used);
             self.at -= used as f64;
@@ -438,8 +487,9 @@ mod tests {
         assert!(!pacer.stretch.tail.is_empty());
         let input = pacer.collect([
             Message::Samples(vec![[8; 2]; 1000]),
-            Message::Reset, // enter fast-forward
-            Message::Reset, // leave fast-forward, no accelerated audio sent
+            Message::Mode(Mode::Fast(FastForwardAudio::SpedUp)), // enter fast-forward
+            Message::Samples(vec![[8; 2]; 500]),
+            Message::Mode(Mode::Normal), // leave fast-forward
             Message::Samples(vec![[9; 2]; 500]),
         ].into_iter());
         assert_eq!(input, vec![[9; 2]; 500]);
@@ -491,9 +541,10 @@ mod tests {
     /// takes it to a device of capacity frames: how far behind the sound
     /// ends, in seconds, counting what waits in the channel, in the pacer and
     /// in the device.
-    fn run(capacity: usize, speed: f64, minutes: f64, all_at_once: bool) -> f64 {
+    fn run(capacity: usize, speed: f64, minutes: f64, all_at_once: bool, mode: Mode) -> (f64, usize) {
         let mut device = Simulated { capacity, queued: 0, played: 0 };
         let mut pacer = Pacer::new(device.target(), device.catch_up());
+        pacer.collect(std::iter::once(Message::Mode(mode)));
         let per_frame = (AUDIO_SAMPLE_RATE / 60.0) as usize;
         let tone: Vec<[i16; 2]> = (0..per_frame).map(|i| [((i as f32 * 0.07).sin() * 8000.0) as i16; 2]).collect();
         let mut channel: std::collections::VecDeque<Vec<[i16; 2]>> = Default::default();
@@ -524,20 +575,20 @@ mod tests {
             pacer.take(&mut device, &input);
         }
         let waiting: usize = channel.iter().map(Vec::len).sum();
-        (waiting as f64 + pacer.stretch.pending() as f64 + device.queued as f64 / pacer.ratio) / AUDIO_SAMPLE_RATE
+        ((waiting as f64 + pacer.stretch.pending() as f64 + device.queued as f64 / pacer.ratio) / AUDIO_SAMPLE_RATE, pacer.dropped)
     }
 
     /// a buffer too small to hold the target, as AAudio's was, must not
     /// leave the sound further and further behind.
     #[test]
     fn a_small_buffer_does_not_drift() {
-        let behind = run(192, 1.0, 5.0, true);
+        let (behind, _) = run(192, 1.0, 5.0, true, Mode::Normal);
         assert!(behind < 0.2, "{:.0} ms behind after five minutes", behind * 1000.0);
     }
 
     #[test]
     fn a_roomy_buffer_stays_near_the_target() {
-        let behind = run(4096, 1.0, 5.0, true);
+        let (behind, _) = run(4096, 1.0, 5.0, true, Mode::Normal);
         assert!(behind < 0.2, "{:.0} ms behind after five minutes", behind * 1000.0);
     }
 
@@ -545,8 +596,56 @@ mod tests {
     /// is squeezed or left out rather than piled up.
     #[test]
     fn a_fast_title_does_not_drift() {
-        let behind = run(4096, 1.05, 5.0, true);
+        let (behind, _) = run(4096, 1.05, 5.0, true, Mode::Normal);
         assert!(behind < 0.25, "{:.0} ms behind after five minutes", behind * 1000.0);
+    }
+
+    #[test]
+    fn fast_forward_audio_follows_achieved_speed_without_drifting_or_dropping() {
+        for audio in [FastForwardAudio::PreservePitch, FastForwardAudio::SpedUp] {
+            for speed in [0.75, 1.0, 1.5, 2.0] {
+                for capacity in [192, 4096] {
+                    let (behind, dropped) = run(capacity, speed, 5.0, true, Mode::Fast(audio));
+                    assert!(behind < 0.3, "{audio:?} at {speed}x: {behind}s behind");
+                    assert_eq!(dropped, 0, "{audio:?} at {speed}x left sound out");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_pitch_preserves_a_tone_while_sped_up_doubles_its_pitch() {
+        let tone: Vec<_> = (0..AUDIO_SAMPLE_RATE as usize).map(|i| {
+            [((i as f64 * std::f64::consts::TAU * 440.0 / AUDIO_SAMPLE_RATE).sin() * 8000.0) as i16; 2]
+        }).collect();
+        for (audio, expected_pitch) in [(FastForwardAudio::PreservePitch, 440.0), (FastForwardAudio::SpedUp, 880.0)] {
+            let mut stretch = Stretch::default();
+            stretch.feed(&tone);
+            let mut out = Vec::new();
+            if audio == FastForwardAudio::PreservePitch { stretch.stretch(0.5, &mut out); }
+            else { stretch.resample(0.5, &mut out); }
+            assert!((0.45..0.55).contains(&(out.len() as f64 / AUDIO_SAMPLE_RATE)));
+            let crossings = out.windows(2).filter(|pair| pair[0][0] <= 0 && pair[1][0] > 0).count();
+            let pitch = crossings as f64 * AUDIO_SAMPLE_RATE / out.len() as f64;
+            assert!((pitch - expected_pitch).abs() < expected_pitch * 0.03, "{audio:?}: {pitch} Hz");
+        }
+    }
+
+    #[test]
+    fn sped_up_resampling_keeps_fractional_position_across_batches() {
+        let input: Vec<_> = (0..4000).map(|i| [i; 2]).collect();
+        let mut whole = Stretch::default();
+        whole.feed(&input);
+        let mut expected = Vec::new();
+        whole.resample(0.63, &mut expected);
+        let mut batched = Stretch::default();
+        let mut actual = Vec::new();
+        for batch in input.chunks(137) {
+            batched.feed(batch);
+            batched.resample(0.63, &mut actual);
+        }
+        assert_eq!(actual.len(), expected.len());
+        for (a, b) in actual.iter().zip(expected) { assert!((a[0] - b[0]).abs() <= 1); }
     }
 
     #[test]
