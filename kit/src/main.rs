@@ -417,7 +417,7 @@ fn progress(ui: &mut egui::Ui, job: &Job, show_log: &mut bool) {
     }
     ui.toggle_value(show_log, "Show the log");
     if *show_log {
-        egui::ScrollArea::vertical().max_height(180.0).stick_to_bottom(true).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("log").max_height(180.0).stick_to_bottom(true).show(ui, |ui| {
             for line in &job.log {
                 ui.monospace(line);
             }
