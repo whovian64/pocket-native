@@ -917,6 +917,7 @@ pub struct Resources {
     pub textures: TextureCache,
     meshes: MeshCache,
     pub light_tables: Tables,
+    lighting_cache: crate::lighting::Cache,
     pub proctex_tables: crate::proctex::Tables,
     pub fog_table: crate::fog::Table,
     /// counts changes to the registers the fragment stages read, a draw's
@@ -2049,7 +2050,7 @@ struct DrawState<'a> {
     texture2_uses_coord1: bool,
     /// unit 0 is projected, type 3 in bits 28-30 of its parameters.
     texture0_projected: bool,
-    lighting: Option<Lighting>,
+    lighting: Option<&'a Lighting>,
     tables: &'a Tables,
     /// texture 3, made up from its coordinates, and its tables.
     proctex: Option<crate::proctex::ProcTex<'a>>,
@@ -2076,7 +2077,7 @@ impl DrawState<'_> {
             depth_map: self.depth_map,
             geometry,
             textures: self.textures,
-            lighting: self.lighting.as_ref(),
+            lighting: self.lighting,
             tables: self.tables,
             proctex: self.proctex.is_some(),
             proctex_tables: self.proctex_tables,
@@ -2223,7 +2224,7 @@ fn fill_triangle(
                 }
             }
 
-            let fragment = state.lighting.as_ref().map(|lighting| {
+            let fragment = state.lighting.map(|lighting| {
                 let quaternion = std::array::from_fn(|i| {
                     interpolate([a.quaternion_over_w[i], b.quaternion_over_w[i], c.quaternion_over_w[i]])
                 });
@@ -2738,7 +2739,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         texture2_uses_coord1: registers[REG_TEXTURE_CONFIG] & (1 << 13) != 0,
         texture0_projected: registers[TEXTURE_UNIT_BASES[0] + 2] >> 28 & 7 == 3,
         // the lighting only matters to a draw whose combiners read it.
-        lighting: tex_env.reads_lighting().then(|| Lighting::read(registers)).flatten(),
+        lighting: tex_env.reads_lighting().then(|| resources.lighting_cache.read(registers)).flatten(),
         tables: &resources.light_tables,
         proctex: crate::proctex::ProcTex::read(registers, &resources.proctex_tables),
         proctex_tables: &resources.proctex_tables,
@@ -3071,6 +3072,39 @@ mod tests {
     const RED: Vec4 = [1.0, 0.0, 0.0, 1.0];
     const GREEN: Vec4 = [0.0, 1.0, 0.0, 1.0];
     const BLUE: Vec4 = [0.0, 0.0, 1.0, 1.0];
+
+    #[test]
+    fn retained_lighting_matches_fresh_decoding_in_software_draws() {
+        let mut registers = target_registers();
+        registers[crate::lighting::REG_ENABLE] = 1;
+        registers[0x1C4] = u32::MAX; // no lookup-table terms
+        // Replace with primary fragment color, then pass it through.
+        for stage in [0x0C0, 0x0C8, 0x0D0, 0x0D8, 0x0F0, 0x0F8] {
+            registers[stage] = 0x000F_000F;
+        }
+        registers[0x0C0] = 0x0001_0001;
+        let shaded = cover(-0.5, GREEN);
+        let mut retained = Resources::default();
+        for (ambient, disabled, lit) in [
+            (0x00FF_0000, 0, true),
+            (0x00FF_0000, 0, true),
+            (0x0000_00FF, 0, true),
+            (0x0000_00FF, 1, true),
+            (0x0000_FF00, 0, false),
+            (0x0000_FF00, 0, true),
+        ] {
+            registers[0x1C0] = ambient;
+            registers[0x1C6] = disabled;
+            registers[0x0C0] = if lit { 0x0001_0001 } else { 0 };
+            let mut cached = ConsoleMemory::default();
+            let mut fresh = ConsoleMemory::default();
+            let actual = rasterize_shaded(&registers, &mut cached, &mut retained, &shaded);
+            let expected = rasterize_shaded(&registers, &mut fresh, &mut Resources::default(), &shaded);
+            assert!(actual > 0);
+            assert_eq!(actual, expected);
+            assert_eq!(pixels(&mut cached), pixels(&mut fresh));
+        }
+    }
 
     /// titles map depth with a scale of -1, so near is 1, and keep the
     /// nearer surface with a GREATER test against a buffer cleared to 0.

@@ -29,32 +29,128 @@ pub mod system_archives;
 pub mod y2r;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::kernel::ipc::{CommandBuffer, Header};
 use crate::System;
+
+/// Dispatch identity resolved once when a port or session is created.
+/// Alias spelling is retained for diagnostics and sub-session routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServiceKind {
+    Srv,
+    Apt,
+    Gsp,
+    Hid,
+    Fs,
+    Cfg,
+    Err,
+    Dsp,
+    LdrRo,
+    Ir,
+    IrRst,
+    Y2r,
+    Frd,
+    Nfc,
+    Cecd,
+    Boss,
+    Cam,
+    Other,
+}
+
+/// Known services clone without allocating; unknown names retain their exact
+/// bytes and share ownership across requests. Identity lives with the object,
+/// so closing a handle and reusing a slab slot cannot leave a stale route.
+#[derive(Debug, Clone)]
+pub struct ServiceName {
+    kind: ServiceKind,
+    name: ServiceText,
+}
+
+#[derive(Debug, Clone)]
+enum ServiceText {
+    Known(&'static str),
+    Other(Arc<str>),
+}
+
+impl ServiceName {
+    pub fn as_str(&self) -> &str {
+        match &self.name {
+            ServiceText::Known(name) => name,
+            ServiceText::Other(name) => name,
+        }
+    }
+
+    fn kind(&self) -> ServiceKind {
+        self.kind
+    }
+}
+
+impl From<String> for ServiceName {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "srv:" => Self { kind: ServiceKind::Srv, name: ServiceText::Known("srv:") },
+            "srv:pm" => Self { kind: ServiceKind::Srv, name: ServiceText::Known("srv:pm") },
+            "APT:U" => Self { kind: ServiceKind::Apt, name: ServiceText::Known("APT:U") },
+            "APT:A" => Self { kind: ServiceKind::Apt, name: ServiceText::Known("APT:A") },
+            "APT:S" => Self { kind: ServiceKind::Apt, name: ServiceText::Known("APT:S") },
+            "gsp::Gpu" => Self { kind: ServiceKind::Gsp, name: ServiceText::Known("gsp::Gpu") },
+            "hid:USER" => Self { kind: ServiceKind::Hid, name: ServiceText::Known("hid:USER") },
+            "hid:SPVR" => Self { kind: ServiceKind::Hid, name: ServiceText::Known("hid:SPVR") },
+            "fs:USER" => Self { kind: ServiceKind::Fs, name: ServiceText::Known("fs:USER") },
+            "FSFile" => Self { kind: ServiceKind::Fs, name: ServiceText::Known("FSFile") },
+            "FSDirectory" => Self { kind: ServiceKind::Fs, name: ServiceText::Known("FSDirectory") },
+            "cfg:u" => Self { kind: ServiceKind::Cfg, name: ServiceText::Known("cfg:u") },
+            "cfg:s" => Self { kind: ServiceKind::Cfg, name: ServiceText::Known("cfg:s") },
+            "cfg:i" => Self { kind: ServiceKind::Cfg, name: ServiceText::Known("cfg:i") },
+            "err:f" => Self { kind: ServiceKind::Err, name: ServiceText::Known("err:f") },
+            "dsp::DSP" => Self { kind: ServiceKind::Dsp, name: ServiceText::Known("dsp::DSP") },
+            "ldr:ro" => Self { kind: ServiceKind::LdrRo, name: ServiceText::Known("ldr:ro") },
+            "ir:USER" => Self { kind: ServiceKind::Ir, name: ServiceText::Known("ir:USER") },
+            "ir:rst" => Self { kind: ServiceKind::IrRst, name: ServiceText::Known("ir:rst") },
+            "y2r:u" => Self { kind: ServiceKind::Y2r, name: ServiceText::Known("y2r:u") },
+            "frd:u" => Self { kind: ServiceKind::Frd, name: ServiceText::Known("frd:u") },
+            "frd:a" => Self { kind: ServiceKind::Frd, name: ServiceText::Known("frd:a") },
+            "nfc:u" => Self { kind: ServiceKind::Nfc, name: ServiceText::Known("nfc:u") },
+            "nfc:m" => Self { kind: ServiceKind::Nfc, name: ServiceText::Known("nfc:m") },
+            "cecd:u" => Self { kind: ServiceKind::Cecd, name: ServiceText::Known("cecd:u") },
+            "cecd:s" => Self { kind: ServiceKind::Cecd, name: ServiceText::Known("cecd:s") },
+            "boss:U" => Self { kind: ServiceKind::Boss, name: ServiceText::Known("boss:U") },
+            "boss:P" => Self { kind: ServiceKind::Boss, name: ServiceText::Known("boss:P") },
+            "cam:u" => Self { kind: ServiceKind::Cam, name: ServiceText::Known("cam:u") },
+            _ => Self { kind: ServiceKind::Other, name: ServiceText::Other(Arc::from(name)) },
+        }
+    }
+}
+
+impl From<&str> for ServiceName {
+    fn from(name: &str) -> Self {
+        Self::from(name.to_owned())
+    }
+}
 
 /// where a request is headed.
 #[derive(Debug, Clone)]
 pub enum Target {
     /// a connection made with svcConnectToPort, e.g. srv:.
-    Port(String),
+    Port(ServiceName),
     /// a session obtained from srv:GetServiceHandle.
-    Service { name: String, subhandle: u32 },
+    Service { name: ServiceName, subhandle: u32 },
 }
 
 impl Target {
     pub fn port(name: String) -> Target {
-        Target::Port(name)
+        Target::Port(name.into())
     }
 
     pub fn service(name: String, subhandle: u32) -> Target {
-        Target::Service { name, subhandle }
+        Target::Service { name: name.into(), subhandle }
     }
 
     pub fn name(&self) -> &str {
         match self {
-            Target::Port(name) => name,
-            Target::Service { name, .. } => name,
+            Target::Port(name) => name.as_str(),
+            Target::Service { name, .. } => name.as_str(),
         }
     }
 }
@@ -88,7 +184,10 @@ pub fn handle_request(system: &mut System, target: Target) {
     let buffer = CommandBuffer::new(thread.tls);
     let header = buffer.header(&mut system.memory);
     let command = header.command_id();
-    let name = target.name().to_owned();
+    let name = target.name();
+    let kind = match &target {
+        Target::Port(name) | Target::Service { name, .. } => name.kind(),
+    };
 
     log::trace!(
         "IPC {name} cmd 0x{command:04X} ({} normal, {} translate)",
@@ -96,25 +195,25 @@ pub fn handle_request(system: &mut System, target: Target) {
         header.translate_params()
     );
 
-    let handled = match name.as_str() {
-        "srv:" | "srv:pm" => srv::handle(system, &buffer, header),
-        "APT:U" | "APT:A" | "APT:S" => apt::handle(system, &buffer, header),
-        "gsp::Gpu" => gsp::handle(system, &buffer, header),
-        "hid:USER" | "hid:SPVR" => hid::handle(system, &buffer, header),
-        "fs:USER" | "FSFile" | "FSDirectory" => fs::handle(system, &buffer, header, &target),
-        "cfg:u" | "cfg:s" | "cfg:i" => cfg::handle(system, &buffer, header),
-        "err:f" => err::handle(system, &buffer, header),
-        "dsp::DSP" => dsp::handle(system, &buffer, header),
-        "ldr:ro" => ldr_ro::handle(system, &buffer, header),
-        "ir:USER" => ir::handle(system, &buffer, header),
-        "ir:rst" => ir_rst::handle(system, &buffer, header),
-        "y2r:u" => y2r::handle(system, &buffer, header),
-        "frd:u" | "frd:a" => frd::handle(system, &buffer, header),
-        "nfc:u" | "nfc:m" => nfc::handle(system, &buffer, header),
-        "cecd:u" | "cecd:s" => cecd::handle(system, &buffer, header),
-        "boss:U" | "boss:P" => boss::handle(system, &buffer, header),
-        "cam:u" => cam::handle(system, &buffer, header),
-        _ => misc::handle(system, &buffer, header, &name),
+    let handled = match kind {
+        ServiceKind::Srv => srv::handle(system, &buffer, header),
+        ServiceKind::Apt => apt::handle(system, &buffer, header),
+        ServiceKind::Gsp => gsp::handle(system, &buffer, header),
+        ServiceKind::Hid => hid::handle(system, &buffer, header),
+        ServiceKind::Fs => fs::handle(system, &buffer, header, &target),
+        ServiceKind::Cfg => cfg::handle(system, &buffer, header),
+        ServiceKind::Err => err::handle(system, &buffer, header),
+        ServiceKind::Dsp => dsp::handle(system, &buffer, header),
+        ServiceKind::LdrRo => ldr_ro::handle(system, &buffer, header),
+        ServiceKind::Ir => ir::handle(system, &buffer, header),
+        ServiceKind::IrRst => ir_rst::handle(system, &buffer, header),
+        ServiceKind::Y2r => y2r::handle(system, &buffer, header),
+        ServiceKind::Frd => frd::handle(system, &buffer, header),
+        ServiceKind::Nfc => nfc::handle(system, &buffer, header),
+        ServiceKind::Cecd => cecd::handle(system, &buffer, header),
+        ServiceKind::Boss => boss::handle(system, &buffer, header),
+        ServiceKind::Cam => cam::handle(system, &buffer, header),
+        ServiceKind::Other => misc::handle(system, &buffer, header, name),
     };
 
     if !handled {
@@ -140,10 +239,10 @@ pub fn handle_request(system: &mut System, target: Target) {
             buffer.set(&mut system.memory, 1, 0);
             buffer.set(&mut system.memory, 2, descriptor);
             buffer.set(&mut system.memory, 3, addr);
-        } else if is_network_service(&name) {
-            offline(system, &buffer, header, &name);
+        } else if is_network_service(name) {
+            offline(system, &buffer, header, name);
         } else {
-            unimplemented(system, &buffer, header, &name);
+            unimplemented(system, &buffer, header, name);
         }
     }
 }
@@ -222,6 +321,75 @@ pub fn unimplemented(system: &mut System, buffer: &CommandBuffer, header: Header
 pub(crate) mod tests {
     use super::*;
     use crate::Config;
+
+    #[test]
+    fn service_names_preserve_aliases_and_share_unknown_names() {
+        let groups = [
+            (ServiceKind::Srv, &["srv:", "srv:pm"][..]),
+            (ServiceKind::Apt, &["APT:U", "APT:A", "APT:S"]),
+            (ServiceKind::Gsp, &["gsp::Gpu"]),
+            (ServiceKind::Hid, &["hid:USER", "hid:SPVR"]),
+            (ServiceKind::Fs, &["fs:USER", "FSFile", "FSDirectory"]),
+            (ServiceKind::Cfg, &["cfg:u", "cfg:s", "cfg:i"]),
+            (ServiceKind::Err, &["err:f"]), (ServiceKind::Dsp, &["dsp::DSP"]),
+            (ServiceKind::LdrRo, &["ldr:ro"]), (ServiceKind::Ir, &["ir:USER"]),
+            (ServiceKind::IrRst, &["ir:rst"]), (ServiceKind::Y2r, &["y2r:u"]),
+            (ServiceKind::Frd, &["frd:u", "frd:a"]),
+            (ServiceKind::Nfc, &["nfc:u", "nfc:m"]),
+            (ServiceKind::Cecd, &["cecd:u", "cecd:s"]),
+            (ServiceKind::Boss, &["boss:U", "boss:P"]), (ServiceKind::Cam, &["cam:u"]),
+        ];
+        for (kind, aliases) in groups {
+            for alias in aliases {
+                let name = ServiceName::from(*alias);
+                assert_eq!(name.kind(), kind);
+                assert_eq!(name.as_str(), *alias);
+                assert!(matches!(name.name, ServiceText::Known(_)));
+                assert_eq!(name.as_str().as_ptr(), name.clone().as_str().as_ptr());
+            }
+        }
+        for other in ["ssl:C", "nwm::UDS", "unknown\0name", "apt:u", ""] {
+            let target = Target::service(other.to_owned(), 0x1234);
+            let copy = target.clone();
+            assert_eq!(target.name(), other);
+            assert_eq!(copy.name().as_ptr(), target.name().as_ptr());
+            let Target::Service { name, subhandle } = copy else { panic!() };
+            assert_eq!(subhandle, 0x1234);
+            assert_eq!(name.kind(), ServiceKind::Other);
+        }
+    }
+
+    #[test]
+    fn reused_session_slot_routes_to_the_new_service_and_invalid_handle_fails() {
+        use crate::kernel::object::{ClientSession, KObject};
+        let (mut system, buffer) = system_with_thread();
+        let old = system.kernel.objects.insert(KObject::ClientSession(ClientSession {
+            service: "srv:".into(), subhandle: 0,
+        }));
+        let handle = system.kernel.handles.create(&mut system.kernel.objects, old, "srv:");
+        let duplicate = system.kernel.handles.duplicate_object(&mut system.kernel.objects, old, "copy");
+        assert!(system.kernel.handles.close(&mut system.kernel.objects, handle));
+        // A duplicated handle still uses the same object's service route.
+        buffer.set(&mut system.memory, 0, Header::new(1, 0, 0).0);
+        system.cpu.regs[0] = duplicate;
+        crate::kernel::svc::dispatch(&mut system, 0x32);
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+        assert!(system.kernel.handles.close(&mut system.kernel.objects, duplicate));
+        let new = system.kernel.objects.insert(KObject::ClientSession(ClientSession {
+            service: "nwm::UDS".into(), subhandle: 0,
+        }));
+        assert_eq!(new, old, "exercise free-list reuse");
+        let new_handle = system.kernel.handles.create(&mut system.kernel.objects, new, "nwm::UDS");
+        buffer.set(&mut system.memory, 0, Header::new(0x001B, 0, 0).0);
+        system.cpu.regs[0] = new_handle;
+        crate::kernel::svc::dispatch(&mut system, 0x32);
+        assert_eq!(buffer.get(&mut system.memory, 1), 0xC941_1002);
+        let reply = buffer.get(&mut system.memory, 0);
+        system.cpu.regs[0] = handle;
+        crate::kernel::svc::dispatch(&mut system, 0x32);
+        assert_eq!(system.cpu.regs[0], zakuro_common::result::errors::INVALID_HANDLE.0);
+        assert_eq!(buffer.get(&mut system.memory, 0), reply, "invalid request leaves TLS alone");
+    }
 
     /// a system with one running thread, whose TLS holds the command buffer
     /// a request is read from and replied into.

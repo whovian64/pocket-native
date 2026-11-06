@@ -5955,6 +5955,8 @@ mod tests {
         };
         if separable() {
             eprintln!("monolithic program retirement test, skipped with separable stages");
+            // The standalone skipped fixture can exit before prewarming ends.
+            gles.stop();
             return;
         }
         let worker = gles.worker.clone();
@@ -6009,6 +6011,7 @@ mod tests {
         assert!(!gles.program_used.contains_key(&stale));
         assert!(!gles.program_admitted.contains_key(&stale));
         assert!(gles.fragment.is_none() && gles.stamped.is_none());
+        gles.stop();
     }
 
     #[test]

@@ -937,7 +937,7 @@ fn connect_to_port(system: &mut System) {
     let object = system
         .kernel
         .objects
-        .insert(KObject::ClientPort(name.clone()));
+        .insert(KObject::ClientPort(name.clone().into()));
     let handle = system
         .kernel
         .handles
@@ -956,9 +956,9 @@ fn send_sync_request(system: &mut System) {
     };
 
     let target = match system.kernel.objects.get(object) {
-        Some(KObject::ClientPort(name)) => crate::services::Target::port(name.clone()),
+        Some(KObject::ClientPort(name)) => crate::services::Target::Port(name.clone()),
         Some(KObject::ClientSession(session)) => {
-            crate::services::Target::service(session.service.clone(), session.subhandle)
+            crate::services::Target::Service { name: session.service.clone(), subhandle: session.subhandle }
         }
         _ => {
             log::warn!("svcSendSyncRequest on a {} handle", {
