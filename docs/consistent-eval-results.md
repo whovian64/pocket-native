@@ -59,4 +59,4 @@ Use the new named windows to choose where to profile next: separate load/shader-
 
 Route loops include long idle intervals. These results do not establish battle coverage, full game-state/audio equivalence, real presentation frame pacing, handheld performance, power savings or total-device RAM. Human visual review and real Android/KMS/Mali testing remain outstanding.
 
-[Protocol and reproduction](consistent-evals.md) · [Earlier incremental runtime decisions](native-boundary-results.md)
+[Protocol and reproduction](consistent-evals.md) · [Earlier incremental runtime decisions](native-boundary-results.md) · [Further native-execution experiments](native-optimization-experiments.md)
