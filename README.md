@@ -161,8 +161,8 @@ on. It resets to normal when you restart the game. Audio keeps playing:
 **Performance > Fast-forward audio** defaults to **Normal pitch**, which
 shortens the audio without raising voices or notes. **Sped up** lets pitch
 follow the achieved speed too. Both follow game progress; music advances
-faster with the game,
-rather than playing at its original tempo and drifting behind. A short tail
+faster with the game rather than playing at its original tempo and drifting
+behind. A short tail
 already in the audio device may finish when you switch; pending software
 audio is discarded on the transition. Interpolation pauses while speeding
 up. The presentation budget scales with **requested** speed: it reaches the
