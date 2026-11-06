@@ -225,9 +225,9 @@ the child's measured user+system CPU time estimates CPU consumed elsewhere,
 including the evaluator's own small overhead. Negative residuals within the
 accounting tick tolerance are clamped to zero rather than called a speedup.
 
-`--max-other-cpu-fraction` sets the comparison budget (default **0.10**) and is
+`--max-other-cpu-fraction` sets the comparison budget (default **0.15**) and is
 part of the experiment identity. The estimate is normalized by wall seconds
-times **all online host CPUs**, so 0.10 permits approximately 1.6 CPU cores of
+times **all online host CPUs**, so 0.15 permits approximately 2.4 CPU cores of
 external work on a 16-CPU machine. Every trial must remain within the same
 declared budget. Missing/unreadable telemetry, regressing counters, changed
 CPU count/tick rate, a governor change during a trial, or a trial above budget

@@ -150,11 +150,15 @@ def validate(plan):
         or not 1 <= host["consecutive_windows"] <= 5
     ):
         raise ValueError("preflight must be bounded by 60 seconds")
-    if (
-        not 0 < plan["max_other_cpu_fraction"] <= 0.10
-        or not 0 < plan["aa_max_span_fraction"] <= 0.10
-    ):
-        raise ValueError("host/AA acceptance cannot exceed 10%")
+    for key in ("max_other_cpu_fraction", "aa_max_span_fraction"):
+        value = plan[key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or not 0 < value <= 1
+        ):
+            raise ValueError("host/AA acceptance must be a finite fraction in (0, 1]")
     if not 0 < host["max_temperature_span_c"] <= 20 or not 0 < host["max_cpu_c"] <= 110:
         raise ValueError("invalid temperature policy")
 

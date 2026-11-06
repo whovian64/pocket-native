@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "scope": "Retrospective timing-policy sensitivity only; not new measurements or performance admission. Original frozen decisions remain unchanged. No runs discarded or replaced.",
+  "thresholds_selected_after_measurements": true,
+  "source_campaign_sha256": {
+    "freeze.json": "f488fb3e18673a44faffb883e6123fa66c9eede8d8a354faee3cb10abc56f157",
+    "progress.json": "496391b137ca74ed838e7afd7c0169eb9add03c3de5b97150be66e4ba51f83ba",
+    "analysis.json": "f1ec5e96175f97d6aee08a4da4cee328eddbf1af18a2f072f319c34b79a338d7",
+    "input-integrity.json": "a344b81ddcd45bb29b2c5ed37771d663056ccfb0ec62caaf4e3b51471d4d7acc"
+  },
+  "original_policy": {
+    "max_other_cpu_fraction": 0.1,
+    "aa_max_span_fraction": 0.05,
+    "host_policy": {
+      "cpus": [
+        2,
+        4,
+        6,
+        7
+      ],
+      "siblings": [
+        10,
+        12,
+        14,
+        15
+      ],
+      "max_busy_fraction": 0.03,
+      "max_core_fraction": 0.1,
+      "max_cpu_c": 97,
+      "max_temperature_span_c": 3,
+      "window_seconds": 2,
+      "consecutive_windows": 2,
+      "timeout_seconds": 8
+    }
+  },
+  "revised_policy": {
+    "max_other_cpu_fraction": 0.15,
+    "aa_max_span_fraction": 0.1,
+    "host_policy": {
+      "cpus": [
+        2,
+        4,
+        6,
+        7
+      ],
+      "siblings": [
+        10,
+        12,
+        14,
+        15
+      ],
+      "max_busy_fraction": 0.1,
+      "max_core_fraction": 0.25,
+      "max_cpu_c": 97,
+      "max_temperature_span_c": 5,
+      "window_seconds": 2,
+      "consecutive_windows": 2,
+      "timeout_seconds": 8
+    }
+  },
+  "measured_processes": 81,
+  "raw_manifests_sha256_verified": 81,
+  "original_campaign_unchanged": true,
+  "series": {
+    "omega-ruby/fresh-serialized": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.1014420380497388,
+        "cpu_seconds": 0.09319478604524206,
+        "measurement_wall_seconds": 0.01928808957459702,
+        "measurement_process_cpu_seconds": 0.03737062445978811
+      },
+      "AA_spread_screen_pass": false,
+      "preflight_passes": 4,
+      "during_run_observation_passes": 5,
+      "external_cpu_passes": 8,
+      "all_revised_timing_screens_pass": false
+    },
+    "omega-ruby/warm-serialized": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.05654930844091704,
+        "cpu_seconds": 0.05933634240386306,
+        "measurement_wall_seconds": 0.10448629835528453,
+        "measurement_process_cpu_seconds": 0.10732059469731006
+      },
+      "AA_spread_screen_pass": false,
+      "preflight_passes": 7,
+      "during_run_observation_passes": 7,
+      "external_cpu_passes": 9,
+      "all_revised_timing_screens_pass": false
+    },
+    "omega-ruby/fresh-async": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.06469141424938964,
+        "cpu_seconds": 0.060345991602744765,
+        "measurement_wall_seconds": 0.009330497740236624,
+        "measurement_process_cpu_seconds": 0.012405766053044547
+      },
+      "AA_spread_screen_pass": true,
+      "preflight_passes": 9,
+      "during_run_observation_passes": 6,
+      "external_cpu_passes": 8,
+      "all_revised_timing_screens_pass": false
+    },
+    "pokemon-y/fresh-serialized": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.04186307934118235,
+        "cpu_seconds": 0.03850839422758438,
+        "measurement_wall_seconds": 0.03147602921205489,
+        "measurement_process_cpu_seconds": 0.034748820453272024
+      },
+      "AA_spread_screen_pass": true,
+      "preflight_passes": 6,
+      "during_run_observation_passes": 4,
+      "external_cpu_passes": 8,
+      "all_revised_timing_screens_pass": false
+    },
+    "pokemon-y/warm-serialized": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.10132785413124916,
+        "cpu_seconds": 0.10991243854541159,
+        "measurement_wall_seconds": 0.17739308424378802,
+        "measurement_process_cpu_seconds": 0.18016861174355608
+      },
+      "AA_spread_screen_pass": false,
+      "preflight_passes": 5,
+      "during_run_observation_passes": 5,
+      "external_cpu_passes": 7,
+      "all_revised_timing_screens_pass": false
+    },
+    "pokemon-y/fresh-async": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.10152565815148804,
+        "cpu_seconds": 0.10198147453078689,
+        "measurement_wall_seconds": 0.19636900299115476,
+        "measurement_process_cpu_seconds": 0.21460719729417352
+      },
+      "AA_spread_screen_pass": false,
+      "preflight_passes": 8,
+      "during_run_observation_passes": 5,
+      "external_cpu_passes": 8,
+      "all_revised_timing_screens_pass": false
+    },
+    "ultra-sun/fresh-serialized": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.07040284043478848,
+        "cpu_seconds": 0.09339533810660455,
+        "measurement_wall_seconds": 0.3532814354482974,
+        "measurement_process_cpu_seconds": 0.36275014782838916
+      },
+      "AA_spread_screen_pass": false,
+      "preflight_passes": 7,
+      "during_run_observation_passes": 4,
+      "external_cpu_passes": 9,
+      "all_revised_timing_screens_pass": false
+    },
+    "ultra-sun/warm-serialized": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.08446871341868561,
+        "cpu_seconds": 0.0883576827317181,
+        "measurement_wall_seconds": 0.11507273017225012,
+        "measurement_process_cpu_seconds": 0.11659160990479857
+      },
+      "AA_spread_screen_pass": false,
+      "preflight_passes": 8,
+      "during_run_observation_passes": 6,
+      "external_cpu_passes": 9,
+      "all_revised_timing_screens_pass": false
+    },
+    "ultra-sun/fresh-async": {
+      "status": "retrospective-only; original verdict unchanged",
+      "runs": 9,
+      "AA_span_over_mean": {
+        "wall_seconds": 0.06500370243381308,
+        "cpu_seconds": 0.04692467597572676,
+        "measurement_wall_seconds": 0.052695715132268464,
+        "measurement_process_cpu_seconds": 0.04484772177431736
+      },
+      "AA_spread_screen_pass": true,
+      "preflight_passes": 7,
+      "during_run_observation_passes": 5,
+      "external_cpu_passes": 8,
+      "all_revised_timing_screens_pass": false
+    }
+  },
+  "limits": [
+    "Checks overlap; do not add pass counts.",
+    "Preflight recheck uses only recorded windows immediately preceding launch, not an earlier hypothetical start time.",
+    "Async remains diagnostic with unequal work/output.",
+    "Passing noise screens alone does not establish improvement."
+  ]
+}

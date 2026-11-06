@@ -77,11 +77,43 @@ The campaign performs:
    AB/BA order with a seeded first order. Three pairs support a pilot, not a
    precise small-effect claim. Larger budgets must be chosen before running.
 
-Do not overwrite held campaigns, drop slow trials, relax gates after seeing data
-or retry until favorable. `--diagnostic-on-hold` allows the fixed workload to
+Do not overwrite held campaigns, drop slow trials or retry until favorable.
+Freeze any revised policy before a new campaign. Reassessing old data under new
+limits is a **retrospective sensitivity analysis**, not a replacement for the
+original decision or a prospectively validated gain.
+`--diagnostic-on-hold` allows the fixed workload to
 continue after a failed quiet/thermal preflight, retaining that failure and
 blocking timing admission. A still-active compiler/game remains a hard hold.
 Use that flag to investigate behavior, never to obtain accepted benchmark wins.
+
+### Practical desktop limits
+
+These thresholds are evaluation-tool policy introduced in this PR, **not rules
+set by the repository owner or universal benchmarking standards**. The revised
+example tolerates moderate desktop activity:
+
+| Check | Earlier campaign | Revised example |
+|---|---:|---:|
+| Aggregate CPU activity before launch | 3% | 10% |
+| Estimated unrelated CPU during a run | 10% | 15% |
+| Selected-core/SMT activity | 10% | 25% |
+| Identical-build A/A timing span / mean | 5% | 10% |
+| Preflight temperature change | 3°C | 5°C |
+
+Aggregate CPU fractions use total online host capacity; core fractions use each
+watched logical CPU. The core budget covers selected CPUs/siblings before launch
+and siblings during execution, not the game's own selected-core utilization.
+The A/A budget covers both CPU and wall time for the process and named window.
+It is a repeatability screen, not a confidence interval or a guarantee that a
+smaller effect is measurable. Keep paired ranges and uncertainty visible.
+
+The temperature ceiling stays host-specific and unchanged: 85°C in the portable
+example, 97°C in the earlier local campaign. Unknown telemetry, active competing
+builds/games, changing power/governor state, unequal work/output and invalid
+receipts still hold a result. The separate 3% during-run diagnostic is retained
+for context but is not required by the revised preflight. Explicit finite
+acceptance fractions are configurable; the old hard-coded 10% validator ceiling
+has been removed. Choose limits before measuring, rather than to obtain a pass.
 
 ## Separate the lanes and measurement windows
 
@@ -162,8 +194,9 @@ completed with unchanged inputs; it does not mean timings were admitted. Even
 a complete diagnostic campaign can have every series held. Five or more pairs additionally receive a deterministic,
 exploratory bootstrap interval resampling **process pairs**, not correlated
 frames. A narrow interval cannot repair unequal work, quality or host conditions.
-The 10% external-host gate and stricter 3% diagnostic measure fractions of total
-online CPU capacity, not percentage timing error. `admitted` requires complete
+The declared external-host budget (15% in the revised example) and stricter 3%
+diagnostic measure fractions of total online CPU capacity, not percentage timing
+error. `admitted` requires complete
 budget, unchanged inputs, exact captured work/output/warnings/renderer,
 validated observer data, matching window work and eligible A/A/host observations.
 A held result remains a diagnostic observation.

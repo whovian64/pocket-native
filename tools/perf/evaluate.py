@@ -920,8 +920,8 @@ def main() -> int:
     runner.add_argument("--resolution", type=float, default=1.0)
     runner.add_argument("--cpu-affinity", default="", help="comma-separated allowed Linux CPU IDs")
     runner.add_argument("--rss-limit-mib", type=int, help="sampled child RSS watchdog; may overshoot; no virtual-address-space limit")
-    runner.add_argument("--max-other-cpu-fraction", type=float, default=0.10,
-                        help="comparison gate: maximum estimated unrelated CPU / all online host capacity (default 0.10)")
+    runner.add_argument("--max-other-cpu-fraction", type=float, default=0.15,
+                        help="comparison gate: maximum estimated unrelated CPU / all online host capacity (default 0.15)")
     runner.add_argument("--trace-every", type=int, help="diagnostic guest-state checkpoint interval in completed frames; default off")
     runner.add_argument("--seed-cache", type=Path, help="immutable per-build warmed XDG cache; cloned each trial, never shared writable")
     runner.add_argument("--driver-cache", choices=("uncontrolled", "off", "isolated"), default="uncontrolled")

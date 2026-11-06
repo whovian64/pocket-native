@@ -133,6 +133,58 @@ class AdmissionTests(unittest.TestCase):
             host_controls.observation_errors([a, b], self.policy()),
         )
 
+    def test_relaxed_desktop_policy_tolerates_moderate_load_and_thermal_drift(self):
+        example = paired.json.loads(
+            Path(paired.__file__).with_name("paired.example.json").read_text()
+        )
+        policy = {**example["host_policy"], "cpus": [2], "siblings": []}
+        a = self.snapshot()
+        b = self.snapshot(8, temperature=64)
+        for counter in b["cpu"].values():
+            counter["total"] = 200
+        b["cpu"]["cpu2"]["busy"] = 20
+        self.assertFalse(host_controls.check_window(a, b, self.policy())["passed"])
+        self.assertTrue(host_controls.check_window(a, b, policy)["passed"])
+        self.assertEqual(host_controls.observation_errors([a, b], policy), [])
+        for aggregate, local, temperature in [(11, 20, 64), (8, 26, 64), (8, 20, 86)]:
+            b["cpu"]["cpu"]["busy"] = aggregate
+            b["cpu"]["cpu2"]["busy"] = local
+            b["cpu_temperatures_c"] = [temperature]
+            self.assertFalse(host_controls.check_window(a, b, policy)["passed"])
+
+
+class ThresholdPolicyTests(unittest.TestCase):
+    def plan(self):
+        plan = paired.json.loads(
+            Path(paired.__file__).with_name("paired.example.json").read_text()
+        )
+        # The validator needs existing inputs, but never executes these files.
+        existing = str(Path(__file__).resolve())
+        for title in plan["titles"]:
+            for key in ("rom", "library", "input", "scene", "seed_data"):
+                title[key] = existing
+        for variant in ("original", "current"):
+            for key in ("executable", "build_metadata"):
+                plan[variant][key] = existing
+        plan["host_policy"]["cpus"] = [min(paired.os.sched_getaffinity(0))]
+        return plan
+
+    def test_revised_example_and_explicit_policy_are_not_capped_at_ten_percent(self):
+        plan = self.plan()
+        self.assertEqual(plan["max_other_cpu_fraction"], 0.15)
+        self.assertEqual(plan["aa_max_span_fraction"], 0.10)
+        paired.validate(plan)
+        plan.update(max_other_cpu_fraction=0.20, aa_max_span_fraction=0.12)
+        paired.validate(plan)
+
+    def test_acceptance_fractions_must_be_finite_positive_numbers(self):
+        for key in ("max_other_cpu_fraction", "aa_max_span_fraction"):
+            for value in (0, -0.1, 1.01, float("nan"), float("inf"), True, "0.1"):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    plan = self.plan()
+                    plan[key] = value
+                    paired.validate(plan)
+
 
 class PairScheduleTests(unittest.TestCase):
     def plan(self):
@@ -355,6 +407,46 @@ class PairedAnalysisTests(unittest.TestCase):
             plan, rows = self.fixture(directory)
             rows[-1]["preflight_passed"] = False
             self.assertEqual(self.analyze(directory, plan, rows)["status"], "held")
+
+    def test_relaxed_budget_admits_moderate_activity_but_not_failed_preflight(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            plan, rows = self.fixture(directory)
+            plan.update(max_other_cpu_fraction=0.15, aa_max_span_fraction=0.10)
+
+            def change(m):
+                m["experiment"]["max_other_cpu_fraction"] = 0.15
+                m["trials"][0]["host_activity"]["other_cpu_fraction"] = 0.12
+
+            for row in rows:
+                self.mutate(row, change)
+            result = self.analyze(directory, plan, rows)
+            self.assertEqual(result["status"], "admitted")
+            self.assertFalse(result["strict_3pct_pass"])
+            rows[-1]["preflight_passed"] = False
+            self.assertEqual(self.analyze(directory, plan, rows)["status"], "held")
+
+    def test_ten_percent_aa_budget_still_rejects_larger_spread(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            plan, rows = self.fixture(directory)
+
+            def change(m):
+                m["trials"][0]["batch_telemetry"]["summary"]["measurement"][
+                    "wall_seconds"
+                ] = 1.08
+
+            self.mutate(rows[0], change)
+            self.assertFalse(self.analyze(directory, plan, rows)["AA_pass"])
+            plan["aa_max_span_fraction"] = 0.10
+            self.assertEqual(self.analyze(directory, plan, rows)["status"], "admitted")
+            self.mutate(
+                rows[0],
+                lambda m: m["trials"][0]["batch_telemetry"]["summary"][
+                    "measurement"
+                ].update(wall_seconds=1.20),
+            )
+            self.assertFalse(self.analyze(directory, plan, rows)["AA_pass"])
 
 
 if __name__ == "__main__":
