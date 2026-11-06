@@ -35,8 +35,8 @@ use display::*;
 use programs::*;
 use sources::*;
 pub use display::{layout_scale, layout_size, panel_timing, second_window, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
-pub use programs::{compiling, compiling_stand_ins, note_compiler_crash, preparing};
-pub(crate) use programs::COMPILING;
+pub use programs::{compiling, compiling_stand_ins, note_compiler_crash, preparing, waited_draws};
+pub(crate) use programs::{COMPILING, WAITED};
 
 const VERTEX_SIZE: usize = 24 * 4;
 const PROCTEX_WORDS: usize = 8;
@@ -1807,11 +1807,12 @@ impl Gles {
         );
     }
 
-    /// generic, the vertex shaders the kit found in the game's files, each
-    /// with every generic program, the list ZAKURO_VERTEX_LIST names
-    /// (3dsrecomp shaders writes it), so that nothing is built in game.
+    /// the vertex shaders the kit found in the game's files, each with every
+    /// generic program, the list ZAKURO_VERTEX_LIST names (3dsrecomp shaders
+    /// writes it): generic, nothing is built in game; otherwise a draw whose
+    /// own program builds goes on with its stand-in from these meanwhile.
     fn preload_vertex_list(&mut self) {
-        let Some(list) = std::env::var_os("ZAKURO_VERTEX_LIST").map(std::path::PathBuf::from).filter(|_| self.generic) else { return };
+        let Some(list) = std::env::var_os("ZAKURO_VERTEX_LIST").map(std::path::PathBuf::from) else { return };
         let Ok(text) = std::fs::read_to_string(&list) else { return };
         if text.lines().next() != Some("pocket-native vertex 1") {
             return;
@@ -4461,6 +4462,19 @@ impl Gles {
             let built = match draw.stand_in {
                 true => Ok(self.programs.get(&(constants, writes_depth, lighting.clone(), vertex)).copied()),
                 false => self.program(&constants, writes_depth, &lighting, vertex, draw.small, Some(&inputs)),
+            };
+            // its own building, its vertex program with the generic one the
+            // vertex list had built at the start stands in
+            let built = match built {
+                Ok(None) if vertex != 0 => match self.programs.get(&(generic_constants(&constants), writes_depth, Vec::new(), vertex)) {
+                    Some(&program) => {
+                        exact = false;
+                        WAITED[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(Some(program))
+                    }
+                    None => Ok(None),
+                },
+                built => built,
             };
             let program = match built {
                 Ok(Some(program)) => program,

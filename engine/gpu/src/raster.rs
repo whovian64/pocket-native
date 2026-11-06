@@ -2521,8 +2521,14 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             match hardware.draw(memory, &draw) {
                 Ok(()) => return (indices.len() / 3) as u32,
                 Err(_) if fetched.is_some() => return NOT_FETCHED,
-                Err(error) if error == gles::COMPILING && skippable => return 0,
-                Err(error) if error == gles::COMPILING => compiling = true,
+                Err(error) if error == gles::COMPILING && skippable => {
+                    gles::WAITED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return 0;
+                }
+                Err(error) if error == gles::COMPILING => {
+                    gles::WAITED[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    compiling = true;
+                }
                 Err(error) if first_time(&error) => log::error!("the GPU could not shade, {error}, shading on the CPU"),
                 Err(_) => {}
             }
