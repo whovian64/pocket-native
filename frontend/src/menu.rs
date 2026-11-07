@@ -604,7 +604,7 @@ pub fn preparing(canvas: &mut Canvas, (width, height): (u32, u32), done: usize, 
     };
     centred(canvas, SMALL, &count, top + 22.0, DIM);
     centred(canvas, SMALL, "Only on a first start, or when the game used new ones last time", top + 44.0, DIM);
-    centred(canvas, SMALL, "B or a tap: skip, the rest are built as the game needs them", top + 80.0, TEXT);
+    centred(canvas, SMALL, "Press B to skip the rest, which build as you play", top + 80.0, TEXT);
 }
 
 /// what the bottom corners show while the game runs: the frame rate and the
