@@ -590,7 +590,9 @@ struct Texture {
     texture: glow::Texture,
     /// ETC1A4's alpha, which ETC1 leaves out.
     alpha: Option<glow::Texture>,
-    _texels: (Arc<[[u8; 4]]>, Option<crate::raster::Packed>),
+    /// what it was made from, which the texture cache holds while the
+    /// texture's memory stays the same.
+    texels: (Arc<[[u8; 4]]>, Option<crate::raster::Packed>),
     used: u64,
 }
 
@@ -3685,7 +3687,15 @@ impl Gles {
         }
         let mut gone = Vec::new();
         self.textures.retain(|_, texture| {
-            let keep = flushes - texture.used < TEXTURE_KEEP_FLUSHES;
+            // one whose texels the cache let go of, for new ones at the same
+            // place, is never asked for again: a video's every picture would
+            // stay its 600 batches otherwise, memory running out on a 1 GB
+            // handheld
+            let replaced = match &texture.texels {
+                (_, Some((_, bytes))) => Arc::strong_count(bytes) == 1,
+                (texels, None) => Arc::strong_count(texels) == 1,
+            };
+            let keep = flushes - texture.used < TEXTURE_KEEP_FLUSHES && !replaced;
             if !keep {
                 gone.extend([Some(texture.texture), texture.alpha].into_iter().flatten());
             }
@@ -4105,7 +4115,7 @@ impl Gles {
                 }
             }
         });
-        self.textures.insert(key, Texture { texture, alpha, _texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
+        self.textures.insert(key, Texture { texture, alpha, texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
         Ok((texture, alpha))
     }
 
@@ -4806,6 +4816,30 @@ mod tests {
         assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
         // the drawing stayed on the GPU
         assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
+    }
+
+    #[test]
+    fn a_texture_the_cache_replaced_goes_with_its_batch() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let bound = |texels: Arc<[[u8; 4]]>| BoundTexture { texels, packed: None, drawn: None, linear: false, wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge, width: 8, height: 8, border: [0.0; 4], levels: 1, lod: Lod::default() };
+        // one the cache keeps, and a video's pictures, each held only until
+        // the next takes its place
+        let kept: Arc<[[u8; 4]]> = vec![[1, 2, 3, 4]; 64].into();
+        gles.texture(&bound(kept.clone())).unwrap();
+        for picture in 0..50u8 {
+            let texels: Arc<[[u8; 4]]> = vec![[picture; 4]; 64].into();
+            gles.texture(&bound(texels)).unwrap();
+            gles.worker.clone().run(|| ());
+            gles.end_batch();
+        }
+        assert_eq!(gles.textures.len(), 1, "the kept texture alone");
+        assert!(gles.textures.values().any(|texture| Arc::ptr_eq(&texture.texels.0, &kept)));
     }
 
     #[test]
