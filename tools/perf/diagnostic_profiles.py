@@ -185,6 +185,8 @@ def audio_admission(row, requested, completion_required=False):
             require(row[low] <= row[high], "contradictory audio summary observations")
     finish = "unknown_historical_schema1"
     if version == 2:
+        require(row["backend"] in ("alsa", "aaudio", "pending", "unavailable"),
+                "unknown schema-2 audio backend")
         finish, operation, code = row["backend_finish"], row["backend_finish_operation"], row.get("backend_finish_code")
         require(finish in ("unavailable", "not_attempted", "in_progress", "succeeded", "failed"),
                 "invalid backend finish status")
@@ -197,10 +199,10 @@ def audio_admission(row, requested, completion_required=False):
                     and (code == 0) == (finish == "succeeded"), "backend finish code contradicts status")
         require((row["backend"] == "unavailable") == (finish == "unavailable"), "backend availability contradicts finish")
         if operation == "snd_pcm_drain":
-            require(row["backend"] == "ALSA" and "device_rate" in row, "drain observation requires an open ALSA device")
+            require(row["backend"] == "alsa" and "device_rate" in row, "drain observation requires an open ALSA device")
         require(finish != "in_progress" or not finished, "channel finished before backend return")
         require(row["backend"] != "pending" or (finish == "not_attempted" and not finished), "pending device contradicts finish")
-        require(row["backend"] != "ALSA" or not row["underruns_measured"], "ALSA underruns are unmeasured in this source")
+        require(row["backend"] != "alsa" or not row["underruns_measured"], "ALSA underruns are unmeasured in this source")
         accepted = "device_rate" in row and row["device_frames_accepted"] > 0
         expected_delivery = ("mixing_only" if not accepted else
                              "incomplete" if row["partial_writes"] + row["failed_writes"] else "device")

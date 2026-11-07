@@ -30,7 +30,7 @@ def audio_fixture(mode="paced"):
 def finish_fixture(**changes):
     row = audio_fixture()
     del row["drained"]
-    row.update(schema_version=2, channel_finished=True, backend_finish="succeeded",
+    row.update(schema_version=2, backend="alsa", channel_finished=True, backend_finish="succeeded",
                backend_finish_operation="snd_pcm_drain", backend_finish_code=0)
     row.update(changes)
     return row
@@ -168,6 +168,17 @@ class ProfileTests(unittest.TestCase):
 
 
 class FinishAndCapSchemaTests(unittest.TestCase):
+    def test_runtime_alsa_token_admits_only_observed_complete_delivery(self):
+        # sound.rs BACKEND emits lowercase, as does the retained schema-2 report.
+        row = finish_fixture(backend="alsa")
+        original = copy.deepcopy(row)
+        result = diagnostics.audio_admission(row, "paced", completion_required=True)
+        self.assertTrue(result["admitted"])
+        self.assertEqual(result["report"], original)
+        self.assertEqual(row, original)
+        with self.assertRaises(ValueError):
+            diagnostics.audio_admission({**row, "underruns_measured": True, "underruns": 0}, "paced", True)
+
     def test_historical_delivery_is_readable_with_finish_explicitly_unknown(self):
         original = audio_fixture()
         saved = copy.deepcopy(original)
@@ -199,7 +210,7 @@ class FinishAndCapSchemaTests(unittest.TestCase):
         self.assertFalse(diagnostics.audio_admission(row, "paced", True)["admitted"])
 
     def test_aaudio_noop_never_claims_backend_or_acoustic_completion(self):
-        row = finish_fixture(backend="AAudio", backend_finish="not_attempted", backend_finish_operation="none")
+        row = finish_fixture(backend="aaudio", backend_finish="not_attempted", backend_finish_operation="none")
         del row["backend_finish_code"]
         result = diagnostics.audio_admission(row, "paced", True)
         self.assertTrue(result["full_write_admitted"])
@@ -210,7 +221,8 @@ class FinishAndCapSchemaTests(unittest.TestCase):
         for changes in ({"backend_finish": "drained"}, {"backend_finish": "failed"},
                         {"backend_finish_code": -1}, {"backend_finish_code": True}, {"backend_finish_code": 2**31},
                         {"backend_finish_code": -(2**31)-1}, {"backend_finish_code": "0"},
-                        {"backend_finish_operation": "request_stop"}, {"backend": "AAudio"},
+                        {"backend_finish_operation": "request_stop"}, {"backend": "aaudio"},
+                        {"backend": "ALSA"}, {"backend": "AAudio"}, {"backend": "other"},
                         {"backend_finish": "not_attempted", "backend_finish_operation": "none"},
                         {"backend_finish": "in_progress"}, {"channel_finished": 1},
                         {"drained": True}, {"device_frames_accepted": 121}, {"written_frames": 91},
