@@ -55,6 +55,15 @@ Several games can go at once. A `.cia` or an encrypted `.3ds` needs your
 console's `aes_keys.txt`: put it next to the game or in the kit's folder
 and the build finds it, otherwise it asks for a `.cia`.
 
+**Precache shaders**, a box in the kit's window (`--precache` or
+`-Precache` in a terminal), works out from a game's files the shaders its
+3D models need, and the handheld builds them the first time the game
+starts instead of while you play. That first start takes longer, several
+minutes on a Mali-G31 device like the R36S. It reads games made with
+Nintendo's NintendoWare library, Mario Kart 7 and Super Mario 3D Land
+among them, and only their models: menus, text, effects and other games'
+shaders are built the first time they're drawn, as before.
+
 A window shows the build as it goes and stays open at the end so you
 can read how it went. The very first build sets up the build container,
 which downloads a few hundred MB and takes a while. After that, each

@@ -91,32 +91,46 @@ const LARGEST: u64 = 2 << 30;
 
 pub fn find(title: &Title) -> Vec<Shbin> {
     let mut found = Vec::new();
-    if let Ok(code) = title.code() {
-        search(&code, "code", &mut found, 0);
-    }
-    if let Some(romfs) = &title.romfs {
-        if let Ok(root) = romfs.root() {
-            walk(title, &root, String::new(), &mut found);
+    files(title, &mut |data, source| {
+        let mut at = 0;
+        while let Some(next) = data[at..].windows(4).position(|window| window == b"DVLB") {
+            if let Some(shbin) = dvlb(&data[at + next..], source) {
+                found.push(shbin);
+            }
+            at += next + 4;
         }
-    }
+    });
     let mut seen = HashSet::new();
     found.retain(|shbin| seen.insert((shbin.code.clone(), shbin.descriptors.clone())));
     found
 }
 
-fn walk(title: &Title, dir: &DirEntry, path: String, found: &mut Vec<Shbin>) {
+/// every file a title has, its code first, each unpacked from the
+/// compressions and archives titles keep them in, with where it came from.
+pub fn files(title: &Title, file: &mut dyn FnMut(&[u8], &str)) {
+    if let Ok(code) = title.code() {
+        visit(&code, "code", file, 0);
+    }
+    if let Some(romfs) = &title.romfs {
+        if let Ok(root) = romfs.root() {
+            walk(title, &root, String::new(), file);
+        }
+    }
+}
+
+fn walk(title: &Title, dir: &DirEntry, path: String, file: &mut dyn FnMut(&[u8], &str)) {
     let Some(romfs) = &title.romfs else { return };
-    for (_, file) in romfs.files(dir) {
-        if file.data_size > LARGEST {
+    for (_, entry) in romfs.files(dir) {
+        if entry.data_size > LARGEST {
             continue;
         }
-        if let Some(data) = title.read_romfs(&file, 0, file.data_size as usize) {
-            search(&data, &format!("{path}/{}", file.name), found, 0);
+        if let Some(data) = title.read_romfs(&entry, 0, entry.data_size as usize) {
+            visit(&data, &format!("{path}/{}", entry.name), file, 0);
         }
     }
     for (_, sub) in romfs.subdirs(dir) {
         let name = format!("{path}/{}", sub.name);
-        walk(title, &sub, name, found);
+        walk(title, &sub, name, file);
     }
 }
 
@@ -128,7 +142,7 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
-fn search(data: &[u8], source: &str, found: &mut Vec<Shbin>, depth: u32) {
+fn visit(data: &[u8], source: &str, file: &mut dyn FnMut(&[u8], &str), depth: u32) {
     if depth > 4 || data.len() < 8 {
         return;
     }
@@ -139,33 +153,28 @@ fn search(data: &[u8], source: &str, found: &mut Vec<Shbin>, depth: u32) {
         _ => None,
     };
     if let Some((plain, how)) = plain {
-        search(&plain, &format!("{source} ({how})"), found, depth + 1);
+        visit(&plain, &format!("{source} ({how})"), file, depth + 1);
         return;
     }
     let members = match &data[0..4] {
         b"SARC" => sarc(data),
         b"darc" => darc(data),
         b"CRAG" => garc(data),
+        b"NARC" => narc(data),
         _ => mini(data),
     };
     if let Some(members) = members {
         for (index, (start, end)) in members.into_iter().enumerate() {
             if let Some(member) = data.get(start..end) {
-                search(member, &format!("{source}#{index}"), found, depth + 1);
+                visit(member, &format!("{source}#{index}"), file, depth + 1);
             }
         }
         return;
     }
-    let mut at = 0;
-    while let Some(next) = data[at..].windows(4).position(|window| window == b"DVLB") {
-        if let Some(shbin) = dvlb(&data[at + next..], source) {
-            found.push(shbin);
-        }
-        at += next + 4;
-    }
+    file(data, source);
 }
 
-fn dvlb(data: &[u8], source: &str) -> Option<Shbin> {
+pub(crate) fn dvlb(data: &[u8], source: &str) -> Option<Shbin> {
     let count = u32_at(data, 4)? as usize;
     if count == 0 || count > 64 {
         return None;
@@ -333,6 +342,21 @@ fn sarc(data: &[u8]) -> Option<Vec<(usize, usize)>> {
     (0..nodes).map(|n| Some((base + u32_at(data, header + 0xC + n * 16 + 8)? as usize, base + u32_at(data, header + 0xC + n * 16 + 12)? as usize))).collect()
 }
 
+/// a NARC's files, from its allocation table and where its image starts.
+fn narc(data: &[u8]) -> Option<Vec<(usize, usize)>> {
+    let (mut at, mut table, mut image) = (u16_at(data, 0xC)? as usize, None, None);
+    for _ in 0..u16_at(data, 0xE)? {
+        match data.get(at..at + 4)? {
+            b"BTAF" => table = Some(at),
+            b"GMIF" => image = Some(at + 8),
+            _ => {}
+        }
+        at += u32_at(data, at + 4)? as usize;
+    }
+    let (table, image) = (table?, image?);
+    (0..u16_at(data, table + 8)? as usize).map(|n| Some((image + u32_at(data, table + 12 + n * 8)? as usize, image + u32_at(data, table + 16 + n * 8)? as usize))).collect()
+}
+
 /// a darc's files, the folders left out.
 fn darc(data: &[u8]) -> Option<Vec<(usize, usize)>> {
     let table = u32_at(data, 0x10)? as usize;
@@ -409,6 +433,17 @@ mod tests {
         // position in o0, color in o1, texcoord0 in o2's xy
         let entry = Entry { geometry: false, main: 0, end: 0, outputs: vec![(0, 0, 0xF), (2, 1, 0xF), (3, 2, 0x3)] };
         assert_eq!(entry.outmap(), (0b111, 3, [0x0302_0100, 0x0B0A_0908, 0x1F1F_0D0C, 0x1F1F_1F1F, 0x1F1F_1F1F, 0x1F1F_1F1F, 0x1F1F_1F1F]));
+    }
+
+    #[test]
+    fn a_narc_gives_its_files() {
+        // two files, "ab" and "cde", after a name table with nothing in it
+        let mut data = b"NARC\xFE\xFF\x00\x01\0\0\0\0\x10\0\x03\0".to_vec();
+        data.extend(b"BTAF\x1C\0\0\0\x02\0\0\0");
+        data.extend([0u32, 2, 2, 5].iter().flat_map(|word| word.to_le_bytes()));
+        data.extend(b"BTNF\x08\0\0\0GMIF\x0D\0\0\0abcde");
+        let image = data.len() - 5;
+        assert_eq!(narc(&data), Some(vec![(image, image + 2), (image + 2, image + 5)]));
     }
 
     #[test]

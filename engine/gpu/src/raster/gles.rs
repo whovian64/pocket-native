@@ -256,6 +256,26 @@ fn draw_filter(signature: impl FnOnce() -> String, count: usize) -> (bool, bool)
 /// the alpha, for the alpha test constant: masked off, or blended in with a
 /// zero factor and read by no factor, so the shader leaves out what only
 /// they need.
+/// a setup as the manifest keeps it, flags and the registers its program
+/// comes from: the program's fragment constants, whether it writes depth
+/// and its lighting's shape, None for lighting that is off.
+fn setup<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<([u32; FRAGMENT_CONSTANTS], bool, Vec<u32>)> {
+    let flags = u32::from_str_radix(fields.next()?, 16).ok()?;
+    let mut r = [0u32; 0x300];
+    for (register, value) in fields.filter_map(|field| field.split_once('=')) {
+        if let (Ok(register @ 0..0x300), Ok(value)) = (usize::from_str_radix(register, 16), u32::from_str_radix(value, 16)) {
+            r[register] = value;
+        }
+    }
+    let mut packed = Vec::new();
+    if flags & 1 << 17 != 0 {
+        crate::lighting::Lighting::read(&r)?.pack(&mut packed);
+    }
+    let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
+    let (constants, lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
+    Some((constants, writes_depth, lighting))
+}
+
 fn unused_outputs(r: &[u32]) -> u32 {
     let mask = if r[REG_COLOR_BUFFER_WRITE] != 0 && LogicOp::read(r) != Some(LogicOp::Noop) { (r[REG_DEPTH_COLOR_MASK] >> 8) & 0xF } else { 0 };
     let (color, alpha) = (mask & 7 != 0, mask & 8 != 0);
@@ -1552,6 +1572,13 @@ pub struct Gles {
     pictures: u64,
     warned_logic_op: bool,
     preloading: bool,
+    /// the precache list's programs, built at a first start, with the setup
+    /// each came from: one the game uses goes into the manifest then, as the
+    /// next starts prepare the manifest and leave the list.
+    precached: HashMap<ProgramKey, String>,
+    /// where to note the list built once its programs are, beside their
+    /// saved copies, which a cleared cache takes with them.
+    precache_stamp: Option<std::path::PathBuf>,
     /// the console's resolution times this over 4 is what the surfaces are
     /// drawn at, 4 native.
     quarters: u32,
@@ -1671,11 +1698,14 @@ impl Gles {
                 pictures: 0,
                 warned_logic_op: false,
                 preloading: false,
+                precached: HashMap::new(),
+                precache_stamp: None,
                 quarters: 4,
                 natives: Default::default(),
             };
             gles.prepare_helpers();
             gles.preload();
+            gles.preload_precache();
             gles.preload_vertex_list();
             gles.prepare_stand_ins();
             PREPARING.store(compiling(), std::sync::atomic::Ordering::Relaxed);
@@ -1772,20 +1802,7 @@ impl Gles {
                 }
                 None => continue,
             };
-            let Some(Ok(flags)) = fields.next().map(|field| u32::from_str_radix(field, 16)) else { continue };
-            let mut r = [0u32; 0x300];
-            for (register, value) in fields.filter_map(|field| field.split_once('=')) {
-                if let (Ok(register @ 0..0x300), Ok(value)) = (usize::from_str_radix(register, 16), u32::from_str_radix(value, 16)) {
-                    r[register] = value;
-                }
-            }
-            let mut packed = Vec::new();
-            if flags & 1 << 17 != 0 {
-                let Some(lighting) = crate::lighting::Lighting::read(&r) else { continue };
-                lighting.pack(&mut packed);
-            }
-            let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
-            let (mut constants, mut lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
+            let Some((mut constants, writes_depth, mut lighting)) = setup(fields) else { continue };
             // generic, the draws take the generic program with their vertex
             // program, not the one their setup would have
             if self.generic {
@@ -1826,34 +1843,8 @@ impl Gles {
         self.preloading = true;
         for line in text.lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            let [file, entry, mask, total, map @ ..] = fields.as_slice() else { continue };
-            let hex = |field: &str| u32::from_str_radix(field, 16).ok();
-            let (Some(entry), Some(mask), Ok(total)) = (hex(entry), hex(mask), total.parse::<u32>()) else { continue };
-            if map.len() != 7 {
-                continue;
-            }
-            let unit = units.entry((*file).to_owned()).or_insert_with(|| {
-                let bytes = std::fs::read(dir.join(format!("{file}.pica"))).ok().filter(|bytes| bytes.len() == (PROGRAM_SIZE + DESCRIPTOR_SIZE) * 4)?;
-                let mut unit = ShaderUnit::new();
-                for (word, chunk) in unit.program.iter_mut().chain(unit.descriptors.iter_mut()).zip(bytes.as_chunks::<4>().0) {
-                    *word = u32::from_le_bytes(*chunk);
-                }
-                unit.prepare();
-                Some(unit)
-            });
-            let Some(unit) = unit else { continue };
-            unit.entry_point = entry;
-            let mut registers = [0u32; 0x300];
-            registers[crate::registers::REG_SHADER_OUTPUT_TOTAL] = total;
-            registers[crate::registers::REG_VS_OUTPUT_MASK] = mask;
-            for (register, word) in map.iter().enumerate() {
-                registers[crate::registers::REG_SHADER_OUTPUT_MAP + register] = hex(word).unwrap_or(0x1F1F_1F1F);
-            }
-            let Ok(vertex) = self.vertex_stage(unit, super::output_semantics(&registers)) else { continue };
+            let Some((vertex, lit)) = self.listed_vertex(&dir, &mut units, &fields) else { continue };
             shaders += 1;
-            // lit draws need the surface's orientation, which a shader that
-            // hands out no quaternion cannot have given them
-            let lit = map.iter().filter_map(|word| hex(word)).any(|word| word.to_le_bytes().iter().any(|&semantic| (4..=7).contains(&(semantic & 0x1F))));
             for writes_depth in [false, true] {
                 for unbordered in [0, 0x400] {
                     for lighting in if lit { &[0, 1][..] } else { &[0][..] } {
@@ -1871,6 +1862,97 @@ impl Gles {
         }
         self.preloading = false;
         log::info!("{count} generic programs for {shaders} vertex shaders from {} to prepare, handed out in {:.1} s", list.display(), started.elapsed().as_secs_f64());
+    }
+
+    /// the shaders the kit worked out from the game's files, the list beside
+    /// the vertex list (3dsrecomp shaders with precache writes it): each line
+    /// one of the vertex list's shaders, file:entry, and a setup as the
+    /// manifest keeps them. what it missed is built as the game needs it.
+    fn preload_precache(&mut self) {
+        let prewarm = std::env::var_os("ZAKURO_SHADER_MANIFEST").is_some();
+        let Some(list) = std::env::var_os("ZAKURO_VERTEX_LIST").map(std::path::PathBuf::from).filter(|_| prewarm && !self.generic) else { return };
+        let dir = list.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let (Ok(text), Ok(vertices)) = (std::fs::read_to_string(dir.join("precache.txt")), std::fs::read_to_string(&list)) else { return };
+        if text.lines().next() != Some("pocket-native precache 1") || vertices.lines().next() != Some("pocket-native vertex 1") {
+            return;
+        }
+        // built at an earlier start, its programs saved: the manifest has
+        // those the game used, the rest load as it needs them
+        let stamp = program_cache_path(&self.name, "precache", &text).map(|path| path.with_extension("precached"));
+        if stamp.as_ref().is_some_and(|path| path.exists()) {
+            log::info!("the precache list was built at an earlier start, its shaders load as the game needs them");
+            return;
+        }
+        let started = std::time::Instant::now();
+        let queue = self.compiler.is_some();
+        let listed: HashMap<String, Vec<&str>> = vertices
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                Some((format!("{}:{}", fields.first()?, fields.get(1)?), fields))
+            })
+            .collect();
+        let mut units = HashMap::new();
+        let mut stages: HashMap<&str, Option<u64>> = HashMap::new();
+        let mut count = 0;
+        self.preloading = true;
+        for line in text.lines().skip(1) {
+            let mut fields = line.split_whitespace();
+            let Some(at) = fields.next() else { continue };
+            let stage = *stages.entry(at).or_insert_with(|| listed.get(at).and_then(|fields| self.listed_vertex(&dir, &mut units, fields)).map(|(vertex, _)| vertex));
+            let rest = fields.clone().collect::<Vec<_>>().join(" ");
+            let (Some(vertex), Some((constants, writes_depth, lighting))) = (stage, setup(fields)) else { continue };
+            match self.program(&constants, writes_depth, &lighting, vertex, !queue, None) {
+                Ok(_) => {
+                    count += 1;
+                    self.precached.insert((constants, writes_depth, lighting, vertex), rest);
+                }
+                Err(error) => log::warn!("could not prepare a shader from {}, {error}", dir.join("precache.txt").display()),
+            }
+        }
+        self.precache_stamp = stamp;
+        self.preloading = false;
+        if !queue {
+            if let Some(path) = self.precache_stamp.take() {
+                let _ = std::fs::write(path, "");
+            }
+        }
+        log::info!("{count} precached shaders from {} to prepare, handed out in {:.1} s", dir.join("precache.txt").display(), started.elapsed().as_secs_f64());
+    }
+
+    /// a shader of the kit's vertex list, its file, entry, output mask, total
+    /// and map, and whether it hands out the surface's orientation, which lit
+    /// draws need.
+    fn listed_vertex(&mut self, dir: &std::path::Path, units: &mut HashMap<String, Option<ShaderUnit>>, fields: &[&str]) -> Option<(u64, bool)> {
+        let [file, entry, mask, total, map @ ..] = fields else { return None };
+        let hex = |field: &str| u32::from_str_radix(field, 16).ok();
+        let (Some(entry), Some(mask), Ok(total)) = (hex(entry), hex(mask), total.parse::<u32>()) else { return None };
+        if map.len() != 7 {
+            return None;
+        }
+        let unit = units
+            .entry((*file).to_owned())
+            .or_insert_with(|| {
+                let bytes = std::fs::read(dir.join(format!("{file}.pica"))).ok().filter(|bytes| bytes.len() == (PROGRAM_SIZE + DESCRIPTOR_SIZE) * 4)?;
+                let mut unit = ShaderUnit::new();
+                for (word, chunk) in unit.program.iter_mut().chain(unit.descriptors.iter_mut()).zip(bytes.as_chunks::<4>().0) {
+                    *word = u32::from_le_bytes(*chunk);
+                }
+                unit.prepare();
+                Some(unit)
+            })
+            .as_mut()?;
+        unit.entry_point = entry;
+        let mut registers = [0u32; 0x300];
+        registers[crate::registers::REG_SHADER_OUTPUT_TOTAL] = total;
+        registers[crate::registers::REG_VS_OUTPUT_MASK] = mask;
+        for (register, word) in map.iter().enumerate() {
+            registers[crate::registers::REG_SHADER_OUTPUT_MAP + register] = hex(word).unwrap_or(0x1F1F_1F1F);
+        }
+        let vertex = self.vertex_stage(unit, super::output_semantics(&registers)).ok()?;
+        let lit = map.iter().filter_map(|word| hex(word)).any(|word| word.to_le_bytes().iter().any(|&semantic| (4..=7).contains(&(semantic & 0x1F))));
+        Some((vertex, lit))
     }
 
     /// a vertex program's variant for a buffer upside down, y turned over
@@ -2953,6 +3035,12 @@ impl Gles {
     fn program(&mut self, constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, lighting: &[u32], vertex: u64, wait: bool, inputs: Option<&dyn Fn() -> String>) -> Result<Option<glow::Program>, String> {
         let key = (*constants, writes_depth, lighting.to_vec(), vertex);
         if let Some(&program) = self.programs.get(&key) {
+            if !self.precached.is_empty() && !self.preloading {
+                if let Some(setup) = self.precached.remove(&key) {
+                    self.inputs.insert(key.clone(), setup);
+                    self.note_program(&key);
+                }
+            }
             return Ok(Some(program));
         }
         // what the compiler finished, still compiles or could not, and what
@@ -3068,6 +3156,13 @@ impl Gles {
                         }
                     }
                     self.compiler.as_mut().expect("the compiler is still there").failed.insert(key, error);
+                }
+            }
+        }
+        if self.compiler.as_ref().is_some_and(|compiler| compiler.pending.is_empty()) {
+            if let Some(path) = self.precache_stamp.take() {
+                if let Err(error) = std::fs::write(&path, "") {
+                    log::warn!("could not note the precache list built in {}, {error}", path.display());
                 }
             }
         }
@@ -4745,7 +4840,9 @@ impl Gles {
                 let hash = fnv(&[&source]);
                 self.vertex_sources.insert(hash, source);
                 self.vertex_inputs.insert(hash, key);
-                if let (false, Some(path)) = (self.preloading, manifest_path()) {
+                // the manifest's lines need it, a vertex shader from the
+                // kit's list included
+                if let Some(path) = manifest_path() {
                     let file = vertex_path(&path, key.0);
                     let bytes: Vec<u8> = unit.program.iter().chain(unit.descriptors.iter()).flat_map(|word| word.to_le_bytes()).collect();
                     if std::fs::metadata(&file).map(|meta| meta.len()).ok() != Some(bytes.len() as u64) {

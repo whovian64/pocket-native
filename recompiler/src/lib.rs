@@ -27,6 +27,7 @@ pub mod discover;
 pub mod image;
 pub mod overrides;
 pub mod port;
+pub mod precache;
 pub mod rom;
 pub mod shaders;
 pub mod thumb;

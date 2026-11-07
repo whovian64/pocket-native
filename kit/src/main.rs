@@ -35,19 +35,27 @@ fn main() -> eframe::Result {
 struct Saved {
     out: PathBuf,
     keys: Option<PathBuf>,
+    precache: bool,
 }
 
 impl Saved {
     fn load(kit: &Path) -> Saved {
         let text = std::fs::read_to_string(kit.join("kit.txt")).unwrap_or_default();
         let value = |key: &str| text.lines().find_map(|line| line.strip_prefix(key)).map(PathBuf::from);
-        Saved { out: value("out=").unwrap_or_else(|| kit.join("build")), keys: value("keys=").or_else(|| Some(kit.join("aes_keys.txt")).filter(|keys| keys.is_file())) }
+        Saved {
+            out: value("out=").unwrap_or_else(|| kit.join("build")),
+            keys: value("keys=").or_else(|| Some(kit.join("aes_keys.txt")).filter(|keys| keys.is_file())),
+            precache: text.lines().any(|line| line == "precache=1"),
+        }
     }
 
     fn store(&self, kit: &Path) {
         let mut text = format!("out={}\n", self.out.display());
         if let Some(keys) = &self.keys {
             text += &format!("keys={}\n", keys.display());
+        }
+        if self.precache {
+            text += "precache=1\n";
         }
         let _ = std::fs::write(kit.join("kit.txt"), text);
     }
@@ -139,7 +147,7 @@ impl App {
 
     fn start(&mut self, kind: Kind) {
         let roms: Vec<PathBuf> = self.games.iter().filter(|game| game.selected).map(|game| game.path.clone()).collect();
-        match Job::start(&self.kit, kind, &self.saved.out, self.saved.keys.as_deref(), &roms) {
+        match Job::start(&self.kit, kind, &self.saved.out, self.saved.keys.as_deref(), self.saved.precache, &roms) {
             Ok(job) => {
                 self.job = Some(job);
                 self.message = None;
@@ -301,6 +309,11 @@ impl eframe::App for App {
                     self.pick(&ctx, || rfd::FileDialog::new().add_filter("aes_keys.txt", &["txt"]).pick_file().map(Picked::Keys));
                 }
             });
+            let precache = egui::Checkbox::new(&mut self.saved.precache, "Precache shaders");
+            let hint = "Works out the shaders a game's 3D models need from its files, for the handheld to build the first time the game starts instead of while you play. That first start takes longer. Shaders it can't work out are built as the game needs them, as before.";
+            if ui.add_enabled(idle, precache).on_hover_text(hint).changed() {
+                self.saved.store(&self.kit);
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let selected = self.games.iter().filter(|game| game.selected).count();

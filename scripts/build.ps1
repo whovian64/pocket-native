@@ -1,16 +1,19 @@
-# build.ps1 [rom...] [-Keys aes_keys.txt] [-Out folder]
+# build.ps1 [rom...] [-Keys aes_keys.txt] [-Out folder] [-Precache]
 #
 # build.sh for Windows: builds Pocket Native and games for the handheld from
 # your own ROMs, .3ds/.cci or .cia files, compressed (.zcci/.zcia) or not,
 # with your console's aes_keys.txt where they are encrypted, inside a
-# container (Docker Desktop or Podman). With no ROM it asks for them. Leaves
-# "Pocket Native" in the output folder, build\ by default, to copy into
-# roms\ports on the card.
+# container (Docker Desktop or Podman). With no ROM it asks for them.
+# -Precache (or PN_PRECACHE=1) lists the shaders the games' models need for
+# the handheld to build when a game first starts. Leaves "Pocket Native" in
+# the output folder, build\ by default, to copy into roms\ports on the card.
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$Rom = @(),
     [string]$Keys = "",
-    [string]$Out = ""
+    [string]$Out = "",
+    [switch]$Precache
 )
+if ($Precache) { $env:PN_PRECACHE = "1" }
 
 $repo = Split-Path -Parent $PSScriptRoot
 $Host.UI.RawUI.WindowTitle = "Pocket Native"
@@ -96,7 +99,7 @@ foreach ($file in $Rom) {
         $mounts += @("-v", "$(Split-Path -Parent $gameKeys):/keys:ro")
         $arguments += "/keys/$(Split-Path -Leaf $gameKeys)"
     }
-    & $engine run --rm @mounts -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work `
+    & $engine run --rm @mounts -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work -e "PN_PRECACHE=$env:PN_PRECACHE" `
         $image bash /src/scripts/container/inside.sh @arguments
     if ($LASTEXITCODE -ne 0) { $failed += $file }
 }

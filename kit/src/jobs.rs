@@ -113,7 +113,7 @@ fn unpack_into(mut pack: &[u8], kit: &Path) -> std::io::Result<()> {
 }
 
 /// the script for a job on this system, and its arguments.
-fn command(kit: &Path, kind: Kind, out: &Path, keys: Option<&Path>, roms: &[PathBuf]) -> Command {
+fn command(kit: &Path, kind: Kind, out: &Path, keys: Option<&Path>, precache: bool, roms: &[PathBuf]) -> Command {
     let script = match kind {
         Kind::Build => "build",
         Kind::Rebuild => "batch-rebuild",
@@ -149,13 +149,18 @@ fn command(kit: &Path, kind: Kind, out: &Path, keys: Option<&Path>, roms: &[Path
     if kind == Kind::Build {
         command.args(roms);
     }
+    if precache {
+        command.env("PN_PRECACHE", "1");
+    } else {
+        command.env_remove("PN_PRECACHE");
+    }
     command.current_dir(kit).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     command
 }
 
 impl Job {
-    pub fn start(kit: &Path, kind: Kind, out: &Path, keys: Option<&Path>, roms: &[PathBuf]) -> std::io::Result<Job> {
-        let mut child = command(kit, kind, out, keys, roms).spawn()?;
+    pub fn start(kit: &Path, kind: Kind, out: &Path, keys: Option<&Path>, precache: bool, roms: &[PathBuf]) -> std::io::Result<Job> {
+        let mut child = command(kit, kind, out, keys, precache, roms).spawn()?;
         let (send, lines) = channel();
         for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)].into_iter().flatten() {
             let send = send.clone();

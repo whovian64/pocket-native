@@ -22,10 +22,12 @@ usage, 3dsrecomp analyze <rom>
        3dsrecomp build <rom> [<dir>] [--overrides <file or dir>]
        3dsrecomp port <rom> <dir> [--overrides <file or dir>] [--name <name>] [--zakuro <checkout>]
        3dsrecomp verify <rom> <library> [count]
-       3dsrecomp shaders <rom> [<dir>]
+       3dsrecomp shaders <rom> [<dir> [precache]]
 
 build without a dir works in the cache and installs the library where
-Zakuro finds it on its own.";
+Zakuro finds it on its own. shaders with precache also lists the shaders
+the title's NintendoWare models need, for the engine to build before the
+game starts.";
 
 /// what the options on the command line ask for.
 #[derive(Default)]
@@ -65,8 +67,9 @@ fn main() {
         ["build", rom] => build(rom, None, &options),
         ["build", rom, dir] => build(rom, Some(Path::new(dir)), &options),
         ["port", rom, dir] => port(rom, Path::new(dir), &options),
-        ["shaders", rom] => shaders(rom, None),
-        ["shaders", rom, dir] => shaders(rom, Some(Path::new(dir))),
+        ["shaders", rom] => shaders(rom, None, false),
+        ["shaders", rom, dir] => shaders(rom, Some(Path::new(dir)), false),
+        ["shaders", rom, dir, "precache"] => shaders(rom, Some(Path::new(dir)), true),
         #[cfg(feature = "verify")]
         ["verify", rom, library] => check(rom, Path::new(library), 500),
         #[cfg(feature = "verify")]
@@ -451,7 +454,7 @@ impl Totals {
 /// the title's shader binaries, and with a folder each one's words written
 /// there with an index, for what a run's shader list holds to be checked
 /// against.
-fn shaders(rom: &str, dir: Option<&Path>) {
+fn shaders(rom: &str, dir: Option<&Path>, precache: bool) {
     let title = Title::load(rom).unwrap_or_else(|e| {
         eprintln!("{rom}: {e}");
         exit(1);
@@ -473,6 +476,14 @@ fn shaders(rom: &str, dir: Option<&Path>) {
             Ok(0) => println!("no vertex shaders to list"),
             Ok(count) => println!("{count} vertex shaders listed in {}", dir.join("vertex.txt").display()),
             Err(error) => eprintln!("could not write the vertex list: {error}"),
+        }
+        if precache {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recomp3ds::precache::write(&title, &found, dir))) {
+                Ok(Ok(0)) => println!("no shaders to precache, they get built as the game needs them"),
+                Ok(Ok(count)) => println!("{count} shaders to precache listed in {}", dir.join("precache.txt").display()),
+                Ok(Err(error)) => eprintln!("could not write the precache list, the shaders get built as the game needs them: {error}"),
+                Err(_) => eprintln!("could not work out the shaders to precache, they get built as the game needs them"),
+            }
         }
     }
     println!("{} shader binaries, {} shaders", found.len(), found.iter().map(|s| s.entries.len()).sum::<usize>());
