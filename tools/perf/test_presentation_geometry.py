@@ -53,9 +53,6 @@ class ModelTest(unittest.TestCase):
             self.assertTrue(geometry.validate_observation({**profile, **change}, row))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 class IntegrationTest(unittest.TestCase):
     def test_numbered_observation_is_partial_and_identity_checked(self):
         import tempfile
@@ -78,3 +75,7 @@ class IntegrationTest(unittest.TestCase):
             self.assertIn('contradictory presentation identity', result['observed']['presentation_geometry_errors'])
             missing = rules.observe(profile, geometry=record(profile), trial=directory)
             self.assertEqual(missing['observed']['presentation_geometry_conformance'], 'unknown_missing_bound_evidence')
+
+
+if __name__ == '__main__':
+    unittest.main()

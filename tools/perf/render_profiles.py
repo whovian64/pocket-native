@@ -35,9 +35,19 @@ import re
 import struct
 
 _GEOMETRY_PATH = Path(__file__).with_name("presentation_geometry.py")
+_GEOMETRY_SOURCE = _GEOMETRY_PATH.read_bytes()
+GEOMETRY_MODEL_SHA256 = hashlib.sha256(_GEOMETRY_SOURCE).hexdigest()
 _GEOMETRY_SPEC = importlib.util.spec_from_file_location("presentation_geometry", _GEOMETRY_PATH)
 geometry_model = importlib.util.module_from_spec(_GEOMETRY_SPEC)
-_GEOMETRY_SPEC.loader.exec_module(geometry_model)
+# Hash the actual source compiled here, rather than a possibly newer file or
+# cached bytecode. Revalidation and run postchecks must use this same identity.
+exec(compile(_GEOMETRY_SOURCE, str(_GEOMETRY_PATH), "exec"), geometry_model.__dict__)
+
+
+def geometry_support_identity():
+    if hashlib.sha256(_GEOMETRY_PATH.read_bytes()).hexdigest() != GEOMETRY_MODEL_SHA256:
+        raise ValueError("presentation-geometry support differs from the loaded source")
+    return GEOMETRY_MODEL_SHA256
 
 LAYOUTS = ("BigTop", "TopOnly", "SideBySide", "Original", "BigBeside")
 ASPECTS = ("Original", "Integer", "FourThree", "SixteenTen", "SixteenNine", "Stretch", "Crop")
@@ -379,7 +389,7 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
     partial = (capture is not None and capture["retain"] == "numbered" and presentations
                and checks.get("runtime_requested") is True and checks.get("panel_images") is True
                and not geometry_errors)
-    observed["presentation_geometry_model_sha256"] = hashlib.sha256(_GEOMETRY_PATH.read_bytes()).hexdigest()
+    observed["presentation_geometry_model_sha256"] = geometry_support_identity()
     observed["presentation_geometry_errors"] = sorted(set(geometry_errors))
     observed["presentation_geometry_conformance"] = ("observed_numbered_presentations_only" if partial else
         "contradicted" if geometry_errors else "unknown_missing_bound_evidence")

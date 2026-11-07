@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -115,6 +116,7 @@ def with_render_receipts(manifest, profile):
     manifest["render_profile"] = {"declaration": profile,
         "declaration_sha256": evaluate.render_rules.declaration_hash(profile)}
     manifest["harness"]["render_profiles_sha256"] = evaluate.digest(Path(evaluate.render_rules.__file__))
+    manifest["harness"]["presentation_geometry_sha256"] = evaluate.digest(Path(evaluate.render_rules.geometry_model.__file__))
     manifest["experiment"]["render_profile"] = profile
     manifest["experiment"]["resolution"] = profile["internal_scale"]
     for trial in manifest["trials"]:
@@ -128,6 +130,18 @@ def with_render_receipts(manifest, profile):
 
 
 class RenderReceiptTests(unittest.TestCase):
+    def test_geometry_support_is_required_even_when_historical_records_agree(self):
+        for model_sha in (None, "f" * 64):
+            with self.subTest(model_sha=model_sha):
+                baseline = with_render_receipts(fixture(), render_profile())
+                if model_sha is None:
+                    baseline["harness"].pop("presentation_geometry_sha256")
+                else:
+                    baseline["harness"]["presentation_geometry_sha256"] = model_sha
+                result = evaluate.compare_values(baseline, copy.deepcopy(baseline))
+                self.assertEqual(result["status"], "incomparable")
+                self.assertTrue(any("geometry support SHA-256" in error for error in result["errors"]))
+
     def test_scale_only_receipt_can_compare_when_actual_scale_is_proven(self):
         baseline = with_render_receipts(fixture(), render_profile())
         candidate = copy.deepcopy(baseline)
@@ -574,11 +588,30 @@ if os.environ.get("ZAKURO_PROBE_GEOMETRY") == "1":
             self.assertEqual(rendered.returncode, 0, rendered.stderr + rendered.stdout)
             recorded = json.loads((root / "render-result/manifest.json").read_text())
             self.assertEqual(recorded["status"], "complete")
+            self.assertEqual(recorded["harness"]["presentation_geometry_sha256"],
+                             evaluate.render_rules.GEOMETRY_MODEL_SHA256)
             self.assertNotIn("evidence_class", recorded)
             for trial in recorded["trials"]:
                 self.assertTrue(trial["render_observation"]["admitted"])
                 self.assertEqual(evaluate.validate_trial_receipt(recorded, trial), [])
                 self.assertIsNone(trial["render_settings"])
+            # Mutate only an isolated harness copy while its fake game runs.
+            # The loaded model remains usable, but its run must be invalidated.
+            support_copy = root / "copied-harness"
+            shutil.copytree(MODULE.parent, support_copy, ignore=shutil.ignore_patterns("__pycache__"))
+            mutator = root / "mutating-game"
+            mutator.write_text(game.read_text() + "\npathlib.Path(" +
+                repr(str(support_copy / "presentation_geometry.py")) + ").write_text('# replaced during run\\n')\n")
+            mutator.chmod(0o755)
+            mutated_command = rendered_command.copy()
+            mutated_command[1] = str(support_copy / "evaluate.py")
+            mutated_command[mutated_command.index("--executable") + 1] = str(mutator)
+            mutated_command[mutated_command.index("--output") + 1] = str(root / "model-mutated-result")
+            mutated = subprocess.run(mutated_command, capture_output=True, text=True)
+            self.assertEqual(mutated.returncode, 2, mutated.stderr + mutated.stdout)
+            mutated_manifest = json.loads((root / "model-mutated-result/manifest.json").read_text())
+            self.assertEqual(mutated_manifest["status"], "incomplete")
+            self.assertIn("presentation_geometry_support", mutated_manifest["inputs_changed_during_run"])
             panel_profile = render_profile()
             panel_profile.update(id="aspect-cell", aspect="FourThree",
                 presentation_capture={"panel_size": [64, 64], "file": "panel.ppm", "retain": "last", "max_bytes": 12301})

@@ -209,6 +209,10 @@ Unsupported or contradictory geometry is not admitted as this partial capability
 `matrix_presentation_capability_admitted` remains false. The existing render
 `admitted` field retains its scale/settings/panel-byte scope; inspect the
 separate geometry result rather than treating it as full matrix admission.
+Render receipts pin the geometry source bytes actually compiled by the adapter.
+The evaluator checks that identity before and after execution and when reopening
+receipts; historical render receipts without this support identity are not
+accepted by the new validator. A model file changed during a run invalidates it.
 
 Root-run plan, pending a geometry-enabled runtime and exact existing scene and
 binary receipts: start with one native 1x BigTop/Original, unswapped, 640x480

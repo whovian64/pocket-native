@@ -520,6 +520,7 @@ def run(args: argparse.Namespace) -> int:
             allocator["path"] = str(allocator_path)
     render_path = getattr(args, "render_profile", None)
     render, render_source = render_rules.load(render_path.absolute()) if render_path else (None, None)
+    geometry_support = render_rules.geometry_support_identity() if render else None
     for key in ("rom", "executable", "library"):
         path = getattr(args, key).resolve(strict=True)
         if not path.is_file():
@@ -602,6 +603,7 @@ def run(args: argparse.Namespace) -> int:
         manifest["render_profile"] = {"declaration": render,
             "declaration_sha256": render_rules.declaration_hash(render), "source": render_source}
         manifest["harness"]["render_profiles_sha256"] = digest(Path(render_rules.__file__))
+        manifest["harness"]["presentation_geometry_sha256"] = geometry_support
         if not render_rules.timing_eligible(render):
             manifest["evidence_class"] = diagnostic_rules.NON_TIMING
     write_json(args.output / "manifest.json", manifest)
@@ -761,6 +763,11 @@ def run(args: argparse.Namespace) -> int:
             changed.append("render_profile")
         if digest(Path(render_rules.__file__)) != manifest["harness"]["render_profiles_sha256"]:
             changed.append("render_profile_support")
+        try:
+            if render_rules.geometry_support_identity() != manifest["harness"]["presentation_geometry_sha256"]:
+                changed.append("presentation_geometry_support")
+        except (OSError, ValueError):
+            changed.append("presentation_geometry_support")
     for key, initial in (("seed_data", seed), ("seed_config", config), ("seed_cache", cache), ("titles", profiles)):
         if tree_identity(getattr(args, key)) != initial:
             changed.append(key)
@@ -912,6 +919,8 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
         try:
             if manifest.get("harness", {}).get("render_profiles_sha256") != digest(Path(render_rules.__file__)):
                 raise ValueError("render-profile support SHA-256 does not match the loaded adapter")
+            if manifest.get("harness", {}).get("presentation_geometry_sha256") != render_rules.geometry_support_identity():
+                raise ValueError("presentation-geometry support SHA-256 does not match the loaded model")
             declaration = render_rules.validate(receipt["declaration"])
             implementation_receipt = manifest.get("implementation_profile")
             implementation = (profile_rules.validate(implementation_receipt["declaration"])
@@ -971,6 +980,10 @@ def compare_values(baseline: dict, candidate: dict) -> dict:
         if (not isinstance(left_support, str) or not re.fullmatch(r"[0-9a-f]{64}", left_support)
                 or left_support != candidate.get("harness", {}).get("render_profiles_sha256")):
             errors.append("missing or different render-profile support SHA-256")
+        left_geometry = baseline.get("harness", {}).get("presentation_geometry_sha256")
+        if (not isinstance(left_geometry, str) or not re.fullmatch(r"[0-9a-f]{64}", left_geometry)
+                or left_geometry != candidate.get("harness", {}).get("presentation_geometry_sha256")):
+            errors.append("missing or different presentation-geometry support SHA-256")
     for name, value in (("baseline", baseline), ("candidate", candidate)):
         receipt = value.get("render_profile")
         render = receipt.get("declaration") if isinstance(receipt, dict) else None
