@@ -110,7 +110,9 @@ fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> BTreeSet<St
         let lit = material.flags & 1;
         let split = (0..3).filter(|&unit| material.textures[unit].as_ref().and_then(|name| seen.formats.get(name)) == Some(&ETC1A4)).fold(0, |bits, unit| bits | 1 << unit);
         let flags = enabled | split << 4 | 2 << 12 | lit << 17;
-        let counts = if seen.light_counts.is_empty() { BTreeSet::from([1, 2]) } else { seen.light_counts.clone() };
+        // one light, which titles set up themselves as often as not, and
+        // as many as their light sets have
+        let counts: BTreeSet<u32> = if seen.light_counts.is_empty() { BTreeSet::from([1, 2]) } else { seen.light_counts.iter().copied().chain([1]).collect() };
         let lightings = if lit != 0 { lighting(material, &seen.absolute, &counts) } else { vec![BTreeMap::new()] };
         for light in &lightings {
             for fog in FOG_MODES {
