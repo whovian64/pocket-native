@@ -239,6 +239,36 @@ impl PhysicalMemory {
         }
     }
 
+    /// Zeroes exactly the backed range, including any aliases of its pages.
+    pub fn zero(&mut self, paddr: u32, size: u32) -> bool {
+        // A shared mapping cannot use MADV_DONTNEED to zero its backing:
+        // that merely drops this mapping's PTEs. Punching a hole in the memfd
+        // zeroes all aliases and releases old pages without faulting fresh
+        // untouched pages in. The kernel also zeroes partial boundary pages.
+        // Keep small clears in userspace, and fall back on kernels/filesystems
+        // that do not support hole punching (including non-Linux hosts).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if size >= 64 * 1024 {
+            if let Some((fd, offset)) = self.backing(paddr, size) {
+                // SAFETY: backing checked that this exact range is inside
+                // the live shared file. KEEP_SIZE preserves every mapping.
+                if unsafe {
+                    libc::fallocate(fd, libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                        offset as libc::off_t, size as libc::off_t)
+                } == 0 {
+                    return true;
+                }
+            }
+        }
+        match self.host_slice_mut(paddr, size) {
+            Some(slice) => {
+                slice.fill(0);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// host slice backing a physical address range, if it is real memory.
     pub fn host_slice_mut(&mut self, paddr: u32, size: u32) -> Option<&mut [u8]> {
         let (base, store): (u32, &mut Store) = match paddr {
@@ -314,5 +344,63 @@ mod tests {
         assert_eq!(phys.region_size(MemoryRegion::Application), 64 << 20);
         assert_eq!(phys.region_size(MemoryRegion::System), 32 << 20);
         assert_eq!(phys.region_size(MemoryRegion::Base), 32 << 20);
+    }
+
+    #[test]
+    fn zero_preserves_bytes_outside_exact_range() {
+        let mut phys = PhysicalMemory::new(false, 64 << 20);
+        let total = 512 * 1024;
+        for (offset, size) in [(0, 0), (3, 17), (4093, 65535), (4093, 65536),
+                               (0, 65536), (123, 200003), (total - 65537, 65537)] {
+            phys.host_slice_mut(FCRAM_PADDR, total).unwrap().fill(0xB7);
+            assert!(phys.zero(FCRAM_PADDR + offset, size));
+            let bytes = phys.host_slice_mut(FCRAM_PADDR, total).unwrap();
+            assert!(bytes[..offset as usize].iter().all(|&byte| byte == 0xB7));
+            assert!(bytes[offset as usize..(offset + size) as usize].iter().all(|&byte| byte == 0));
+            assert!(bytes[(offset + size) as usize..].iter().all(|&byte| byte == 0xB7));
+        }
+        assert!(!phys.zero(FCRAM_PADDR - 1, 65536));
+        assert!(!phys.zero(FCRAM_PADDR + FCRAM_SIZE_OLD3DS - 4096, 65536));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn large_zero_releases_backing_and_preserves_aliases() {
+        let mut phys = PhysicalMemory::new(false, 64 << 20);
+        let size = 4 << 20;
+        let (fd, offset) = phys.backing(FCRAM_PADDR, size).expect("shared backing");
+        let alias = super::super::fastmem::View::new().expect("alias reservation");
+        assert!(alias.map(0x1000, size, fd, offset));
+        phys.host_slice_mut(FCRAM_PADDR, size).unwrap().fill(0xA5);
+        // SAFETY: the alias maps exactly size bytes of the live shared file.
+        let bytes = unsafe { std::slice::from_raw_parts(alias.base().add(0x1000), size as usize) };
+        assert!(bytes.iter().all(|&byte| byte == 0xA5));
+        assert!(phys.zero(FCRAM_PADDR, size));
+        // Observe allocation before reading the zeroes back into the page cache.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0);
+        assert!(stat.st_blocks * 512 < size as i64 / 16, "zero range remains resident in backing: {} blocks", stat.st_blocks);
+        assert!(bytes.iter().all(|&byte| byte == 0));
+        phys.host_slice_mut(FCRAM_PADDR, 1).unwrap()[0] = 0x63;
+        assert_eq!(bytes[0], 0x63);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn zero_falls_back_when_hole_punching_fails() {
+        let mut phys = PhysicalMemory::new(false, 64 << 20);
+        let size = 128 * 1024;
+        phys.host_slice_mut(FCRAM_PADDR, size).unwrap().fill(0x91);
+        // The mapping stays valid after losing a usable descriptor. Simulate
+        // an unsupported backing operation without depending on this kernel.
+        let fd = phys.shared.as_ref().expect("shared backing").fd;
+        phys.shared.as_mut().unwrap().fd = -1;
+        let cleared = phys.zero(FCRAM_PADDR + 3, size - 6);
+        phys.shared.as_mut().unwrap().fd = fd;
+        assert!(cleared);
+        let bytes = phys.host_slice_mut(FCRAM_PADDR, size).unwrap();
+        assert_eq!(&bytes[..3], &[0x91; 3]);
+        assert!(bytes[3..size as usize - 3].iter().all(|&byte| byte == 0));
+        assert_eq!(&bytes[size as usize - 3..], &[0x91; 3]);
     }
 }

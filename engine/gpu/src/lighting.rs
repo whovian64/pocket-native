@@ -235,18 +235,98 @@ pub struct Lighting {
     shadow: Option<Shadow>,
 }
 
-impl Lighting {
-    /// the lighting set up in the registers, or None when it is off.
-    pub fn read(registers: &[u32]) -> Option<Lighting> {
-        if registers[REG_ENABLE] & 1 == 0 || registers[REG_DISABLE] & 1 != 0 {
+/// Every register word the decoded lighting can depend on. Keeping the
+/// decoder's input separate from the live file also makes the cache key
+/// complete by construction. The table contents are used by `shade`, not
+/// decoded here, and stay borrowed separately from each draw's Resources.
+#[derive(Debug, PartialEq, Eq)]
+struct LightingRegisters {
+    enable: u32,
+    disable: u32,
+    global_ambient: u32,
+    light_count: u32,
+    config0: u32,
+    config1: u32,
+    table_absolute: u32,
+    table_input: u32,
+    table_scale: u32,
+    light_slots: u32,
+    // Include word 8 conservatively; the decoder uses 0..=7 and 9..=11.
+    lights: [[u32; 12]; 8],
+}
+
+impl LightingRegisters {
+    fn read(registers: &[u32]) -> Self {
+        Self {
+            enable: registers[REG_ENABLE],
+            disable: registers[REG_DISABLE],
+            global_ambient: registers[REG_GLOBAL_AMBIENT],
+            light_count: registers[REG_LIGHT_COUNT],
+            config0: registers[REG_CONFIG0],
+            config1: registers[REG_CONFIG1],
+            table_absolute: registers[REG_TABLE_ABSOLUTE],
+            table_input: registers[REG_TABLE_INPUT],
+            table_scale: registers[REG_TABLE_SCALE],
+            light_slots: registers[REG_LIGHT_SLOTS],
+            lights: std::array::from_fn(|number| {
+                let base = REG_LIGHTS + number * 0x10;
+                registers[base..base + 12].try_into().unwrap()
+            }),
+        }
+    }
+}
+
+/// The last decoded result, including disabled lighting. A draw borrows it
+/// rather than cloning Lighting's light vector; the next draw cannot
+/// replace it until that borrow ends.
+#[derive(Default)]
+pub(crate) struct Cache {
+    registers: Option<LightingRegisters>,
+    lighting: Option<Lighting>,
+}
+
+impl Cache {
+    pub(crate) fn read(&mut self, registers: &[u32]) -> Option<&Lighting> {
+        if !Lighting::enabled(registers) {
+            // None needs no raw snapshot or decoder allocation. Re-enabling
+            // must decode again, even if it restores the preceding values.
+            self.registers = None;
+            self.lighting = None;
             return None;
         }
-        let config0 = registers[REG_CONFIG0];
-        let config1 = registers[REG_CONFIG1];
+        let registers = LightingRegisters::read(registers);
+        if self.registers.as_ref() != Some(&registers) {
+            self.lighting = Lighting::decode(&registers);
+            self.registers = Some(registers);
+        }
+        self.lighting.as_ref()
+    }
+}
+
+impl Lighting {
+    fn enabled(registers: &[u32]) -> bool {
+        registers[REG_ENABLE] & 1 != 0 && registers[REG_DISABLE] & 1 == 0
+    }
+
+    /// the lighting set up in the registers, or None when it is off.
+    pub fn read(registers: &[u32]) -> Option<Lighting> {
+        // Preserve the disabled path's early return before reading lights.
+        if !Self::enabled(registers) {
+            return None;
+        }
+        Self::decode(&LightingRegisters::read(registers))
+    }
+
+    fn decode(registers: &LightingRegisters) -> Option<Lighting> {
+        if registers.enable & 1 == 0 || registers.disable & 1 != 0 {
+            return None;
+        }
+        let config0 = registers.config0;
+        let config1 = registers.config1;
         let config = (config0 >> 4) & 0xF;
-        let absolute = registers[REG_TABLE_ABSOLUTE];
-        let inputs = registers[REG_TABLE_INPUT];
-        let scales = registers[REG_TABLE_SCALE];
+        let absolute = registers.table_absolute;
+        let inputs = registers.table_input;
+        let scales = registers.table_scale;
         // each table's input, abs and scale sit four bits apart, abs being
         // a disable bit one above
         let lookup = |field: u32| Lookup {
@@ -266,11 +346,11 @@ impl Lighting {
             (config1 & (1 << disabled) == 0 && supported(config, table)).then(|| lookup(field))
         };
 
-        let count = (registers[REG_LIGHT_COUNT] & 7) + 1;
+        let count = (registers.light_count & 7) + 1;
         let lights: Vec<Light> = (0..count)
             .map(|slot| {
-                let number = ((registers[REG_LIGHT_SLOTS] >> (slot * 4)) & 7) as usize;
-                let block = &registers[REG_LIGHTS + number * 0x10..REG_LIGHTS + number * 0x10 + 0x10];
+                let number = ((registers.light_slots >> (slot * 4)) & 7) as usize;
+                let block = &registers.lights[number];
                 let half = |value: u32| pica_float(value & 0xFFFF, 10, 5);
                 let position = [half(block[4]), half(block[4] >> 16), half(block[5])];
                 Light {
@@ -327,7 +407,7 @@ impl Lighting {
 
         Some(Lighting {
             lights,
-            global_ambient: color(registers[REG_GLOBAL_AMBIENT]),
+            global_ambient: color(registers.global_ambient),
             config,
             distribution0,
             distribution1,
@@ -546,6 +626,86 @@ impl Lighting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn packed(lighting: Option<&Lighting>) -> Option<Vec<u32>> {
+        lighting.map(|lighting| {
+            let mut words = Vec::new();
+            lighting.pack(&mut words);
+            words
+        })
+    }
+
+    fn lit_registers() -> Vec<u32> {
+        let mut registers = vec![0; 0x300];
+        registers[REG_ENABLE] = 1;
+        registers[REG_LIGHT_COUNT] = 7;
+        registers[REG_LIGHT_SLOTS] = 0x7654_3210;
+        registers[REG_CONFIG0] = 8 << 4;
+        for light in 0..8 {
+            let base = REG_LIGHTS + light * 0x10;
+            registers[base + 2] = 0x0080_C0FF;
+            registers[base + 4] = 0x3C00;
+            registers[base + 9] = 1;
+        }
+        registers
+    }
+
+    #[test]
+    fn decoded_lighting_reuses_the_owned_light_vector() {
+        let mut registers = lit_registers();
+        let mut cache = Cache::default();
+        let lights = cache.read(&registers).unwrap().lights.as_ptr();
+        for _ in 0..32 {
+            assert_eq!(cache.read(&registers).unwrap().lights.as_ptr(), lights);
+        }
+        // LUT data is consumed separately at shade time, not decoded into
+        // Lighting. Updating it must not replace the retained light vector.
+        registers[REG_TABLE_DATA] = 123;
+        registers[REG_TABLE_INDEX] = 7;
+        assert_eq!(cache.read(&registers).unwrap().lights.as_ptr(), lights);
+    }
+
+    #[test]
+    fn decoded_lighting_caches_disabled_and_rebuilds_after_reenable() {
+        let mut registers = lit_registers();
+        let mut cache = Cache::default();
+        assert!(cache.read(&registers).is_some());
+        registers[REG_DISABLE] = 1;
+        assert!(cache.read(&registers).is_none());
+        assert!(cache.registers.is_none());
+        assert!(cache.lighting.is_none());
+        // No full snapshot or light blocks are required while disabled.
+        assert!(cache.read(&registers[..REG_DISABLE + 1]).is_none());
+        registers[REG_DISABLE] = 0;
+        registers[REG_GLOBAL_AMBIENT] = 0x123456;
+        assert_eq!(packed(cache.read(&registers)), packed(Lighting::read(&registers).as_ref()));
+        registers[REG_ENABLE] = 0;
+        assert!(cache.read(&registers[..REG_ENABLE + 1]).is_none());
+    }
+
+    #[test]
+    fn decoded_lighting_matches_uncached_across_every_register_bit() {
+        let mut cache = Cache::default();
+        // Eight lights cover all blocks. Reverse their slots in a second
+        // layout and exercise the other supported lookup-table shapes.
+        for config in [0, 4, 8] {
+            let mut registers = lit_registers();
+            registers[REG_CONFIG0] = config << 4;
+            registers[REG_LIGHT_SLOTS] = if config == 4 { 0x0123_4567 } else { 0x7654_3210 };
+            for register in 0..registers.len() {
+                for bit in 0..32 {
+                    registers[register] ^= 1 << bit;
+                    assert_eq!(
+                        packed(cache.read(&registers)),
+                        packed(Lighting::read(&registers).as_ref()),
+                        "configuration {config}, register {register:03x}, bit {bit}",
+                    );
+                    registers[register] ^= 1 << bit;
+                    assert_eq!(packed(cache.read(&registers)), packed(Lighting::read(&registers).as_ref()));
+                }
+            }
+        }
+    }
 
     #[test]
     fn half_floats_decode() {

@@ -10,6 +10,8 @@ pub mod ncsd;
 mod reader;
 pub mod romfs;
 pub mod romfs_build;
+#[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
+mod rom_cache;
 
 use std::path::{Path, PathBuf};
 
@@ -74,15 +76,84 @@ pub enum FsError {
 pub struct RomImage {
     path: PathBuf,
     map: Mmap,
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
+    cache: Option<std::sync::Mutex<rom_cache::RomCache>>,
+}
+
+/// Advice requests made by the optional completed-read cache. Successful
+/// syscalls are not proof that the kernel released every requested page.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RomCacheStats {
+    pub budget_mib: usize,
+    pub tracked_chunks: usize,
+    pub completed_reads: u64,
+    pub eviction_requests: u64,
+    pub advised_bytes: u64,
+    pub mmap_advice_failures: u64,
+    pub file_advice_failures: u64,
+}
+
+fn rom_cache_budget(value: Option<&str>) -> Result<Option<usize>, &'static str> {
+    match value {
+        None | Some("0") => Ok(None),
+        Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
+            match value.parse::<usize>() {
+                Ok(0) => Ok(None),
+                Ok(mib @ 1..=1024) => Ok(Some(mib)),
+                _ => Err("expected an integer from 0 through 1024 MiB"),
+            }
+        }
+        Some(_) => Err("expected an integer from 0 through 1024 MiB"),
+    }
+}
+
+#[cfg(test)]
+mod rom_cache_budget_tests {
+    use super::rom_cache_budget;
+
+    #[test]
+    fn cache_is_off_by_default_and_numeric_budget_is_bounded() {
+        assert_eq!(rom_cache_budget(None), Ok(None));
+        assert_eq!(rom_cache_budget(Some("0")), Ok(None));
+        assert_eq!(rom_cache_budget(Some("16")), Ok(Some(16)));
+        assert_eq!(rom_cache_budget(Some("1024")), Ok(Some(1024)));
+        for invalid in ["", "-1", "+16", "16.0", " 16", "1025", "999999999999999999999999999"] {
+            assert!(rom_cache_budget(Some(invalid)).is_err(), "{invalid}");
+        }
+    }
 }
 
 impl RomImage {
     pub fn open(path: impl AsRef<Path>) -> Result<RomImage, FsError> {
+        let value = std::env::var("ZAKURO_ROM_CACHE_MIB").ok();
+        let budget = rom_cache_budget(value.as_deref()).unwrap_or_else(|reason| {
+            log::warn!("ZAKURO_ROM_CACHE_MIB ignored: {reason}");
+            None
+        });
+        Self::open_with_cache(path, budget)
+    }
+
+    fn open_with_cache(path: impl AsRef<Path>, budget: Option<usize>) -> Result<RomImage, FsError> {
         let path = path.as_ref().to_path_buf();
         let file = std::fs::File::open(&path)?;
         // SAFETY: the ROM is a regular file we only ever read.
         let map = unsafe { Mmap::map(&file)? };
-        Ok(RomImage { path, map })
+        #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
+        let cache = budget.and_then(|mib| match rom_cache::RomCache::new(file, mib) {
+            Ok(cache) => Some(std::sync::Mutex::new(cache)),
+            Err(reason) => {
+                log::warn!("ROM cache unavailable: {reason}");
+                None
+            }
+        });
+        #[cfg(not(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64")))]
+        if budget.is_some() {
+            log::warn!("ROM cache unavailable: requires 64-bit Linux or Android");
+        }
+        Ok(RomImage { path, map,
+            #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
+            cache,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -99,6 +170,35 @@ impl RomImage {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// Call only after these bytes have been copied into guest memory. The
+    /// opt-in LRU retires full pages in old tracked 1 MiB chunks, including
+    /// adjacent read-ahead and partial-read pages. Untracked chunks stay ordinary.
+    pub fn finish_read(&self, offset: u64, len: usize) {
+        #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
+        if let Some(cache) = &self.cache {
+            if let Ok(mut cache) = cache.lock() { cache.finish_read(&self.map, offset, len); }
+        }
+        #[cfg(not(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64")))]
+        let _ = (offset, len);
+    }
+
+    /// Retire the exact source range after an independent owned copy exists.
+    /// Only whole host pages inside the range are eligible; default/off is inert.
+    fn retire_owned_copy(&self, offset: u64, len: usize) {
+        #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
+        if let Some(cache) = &self.cache {
+            if let Ok(mut cache) = cache.lock() { cache.retire_owned_copy(&self.map, offset, len); }
+        }
+        #[cfg(not(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64")))]
+        let _ = (offset, len);
+    }
+
+    pub fn cache_stats(&self) -> Option<RomCacheStats> {
+        #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
+        if let Some(cache) = &self.cache { return cache.lock().ok().map(|cache| cache.stats()); }
+        None
     }
 }
 
@@ -191,11 +291,16 @@ impl Title {
     /// the executable image, decompressed if the exheader says it is BLZ'd.
     pub fn code(&self) -> Result<Vec<u8>, FsError> {
         let raw = self.exefs_file(".code").ok_or(FsError::NoCode)?;
-        if self.exheader.compress_code {
-            lz77::decompress(raw)
+        let code = if self.exheader.compress_code {
+            lz77::decompress(raw)?
         } else {
-            Ok(raw.to_vec())
-        }
+            raw.to_vec()
+        };
+        // `code` owns all output bytes before the raw source is retired. On
+        // decompression failure the `?` above leaves the source untouched.
+        let offset = raw.as_ptr() as usize - self.image.data().as_ptr() as usize;
+        self.image.retire_owned_copy(offset as u64, raw.len());
+        Ok(code)
     }
 
     /// reads len bytes at offset from a RomFS file.

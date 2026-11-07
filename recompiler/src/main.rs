@@ -161,6 +161,10 @@ fn check(path: &str, library: &Path, count: usize) {
         eprintln!("could not open {}, {error}", library.display());
         exit(1);
     });
+    if library.needs_fastmem() && !verify::FASTMEM_SUPPORTED {
+        eprintln!("verifying a fastmem library requires 64-bit Linux");
+        exit(1);
+    }
     let image = image::Image::from_title(&title).unwrap_or_else(|error| {
         eprintln!("could not read the code, {error}");
         exit(1);
@@ -205,6 +209,9 @@ fn check(path: &str, library: &Path, count: usize) {
     }
     print_report("modules", &modules);
     println!("took {:.1?}", start.elapsed());
+    if executable.mismatched != 0 || modules.mismatched != 0 {
+        exit(1);
+    }
 }
 
 /// up to count of the functions that became C, spread over the program, as

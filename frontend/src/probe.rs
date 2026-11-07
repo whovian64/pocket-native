@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -13,6 +14,155 @@ use std::time::Instant;
 use zakuro_core::kernel::thread::ThreadStatus;
 use zakuro_core::services::hid::PadState;
 use zakuro_core::{FrameOutcome, System};
+
+/// Precise, versioned probe data for external performance comparisons. The
+/// human report deliberately rounds times, which is unsuitable for an eval.
+#[derive(serde::Serialize)]
+struct Metrics<'a> {
+    schema_version: u32,
+    title_id: String,
+    requested_frames: u64,
+    attempted_frames: u64,
+    completed_frames: u64,
+    elapsed_seconds: f64,
+    skipped_frames: u64,
+    top_pictures: u64,
+    bottom_pictures: u64,
+    interpreted_instructions: u64,
+    recompiled_instructions: u64,
+    stop_reason: String,
+    screenshots: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_trace_file: Option<&'static str>,
+}
+
+/// Optional diagnostics sample guest state without waiting for host workers.
+/// Serializing after the run avoids disk writes perturbing each checkpoint.
+#[derive(serde::Serialize)]
+struct GuestCheckpoint {
+    completed_frames: u64,
+    guest_cycles: u64,
+    registers: [u32; 16],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_thread: Option<u32>,
+    interpreted_instructions: u64,
+    recompiled_instructions: u64,
+}
+
+#[derive(serde::Serialize)]
+struct GuestTrace<'a> {
+    schema_version: u32,
+    sampling_interval_frames: u64,
+    dropped_checkpoints: u64,
+    checkpoints: &'a [GuestCheckpoint],
+}
+
+const MAX_GUEST_CHECKPOINTS: usize = 100_000;
+
+/// Optional performance observer. Buffered until exit; never queries/waits for
+/// GPU workers. A batch is one run_frame call, not a unique presented picture.
+struct BatchTiming {
+    started: Option<(Instant, Option<u64>)>,
+    batch_started: Option<(Instant, Option<u64>)>,
+    wait_last: u64,
+    wait_us: Option<u64>,
+    rows: Vec<TimingRow>,
+    dropped: u64,
+}
+
+struct TimingRow {
+    frame: u64,
+    wall_ns: u64,
+    cpu_ns: Option<u64>,
+    batch_wall_ns: Option<u64>,
+    batch_cpu_ns: Option<u64>,
+    cycles: u64,
+    interpreted: u64,
+    recompiled: u64,
+    gpu_wait_us: Option<u64>,
+}
+
+fn process_cpu_ns() -> Option<u64> {
+    // SAFETY: getrusage initializes the supplied writable rusage on success.
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    let micros = |t: libc::timeval| (t.tv_sec as u64) * 1_000_000 + t.tv_usec as u64;
+    Some((micros(usage.ru_utime) + micros(usage.ru_stime)) * 1_000)
+}
+
+impl BatchTiming {
+    fn begin_batch(&mut self) {
+        self.batch_started = Some((Instant::now(), process_cpu_ns()));
+        self.wait_last = zakuro_core::GPU_WAITED.load(std::sync::atomic::Ordering::Relaxed);
+        self.wait_us = Some(0);
+    }
+
+    /// Busy::report resets this shared diagnostic counter. Capture its last
+    /// segment immediately before that call, then start from zero. No wait or
+    /// reset is introduced by this observer itself.
+    fn before_wait_reset(&mut self) {
+        let now = zakuro_core::GPU_WAITED.load(std::sync::atomic::Ordering::Relaxed);
+        self.wait_us = self.wait_us.and_then(|sum| now.checked_sub(self.wait_last)?.checked_add(sum));
+        self.wait_last = 0;
+    }
+
+    fn begin(&mut self) {
+        self.started = Some((Instant::now(), process_cpu_ns()));
+    }
+
+    fn finish(&mut self, system: &System, frame: u64) {
+        let Some((at, cpu)) = self.started.take() else { return };
+        let wall_ns = at.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let cpu_ns = cpu.and_then(|before| process_cpu_ns()?.checked_sub(before));
+        if self.rows.len() == MAX_GUEST_CHECKPOINTS {
+            self.dropped += 1;
+            return;
+        }
+        self.rows.push(TimingRow { frame, wall_ns, cpu_ns, batch_wall_ns: None, batch_cpu_ns: None, cycles: system.cpu.cycles,
+            interpreted: system.interpreted_instructions, recompiled: system.recompiled_instructions, gpu_wait_us: None });
+    }
+
+    fn finish_batch(&mut self) {
+        let Some((at, cpu)) = self.batch_started.take() else { return };
+        if let Some(row) = self.rows.last_mut() {
+            row.batch_wall_ns = Some(at.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+            row.batch_cpu_ns = cpu.and_then(|before| process_cpu_ns()?.checked_sub(before));
+            let now = zakuro_core::GPU_WAITED.load(std::sync::atomic::Ordering::Relaxed);
+            row.gpu_wait_us = self.wait_us.and_then(|sum| now.checked_sub(self.wait_last)?.checked_add(sum));
+        }
+    }
+
+    fn write(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        writeln!(out, "frame,wall_ns,process_cpu_ns,batch_wall_ns,batch_process_cpu_ns,guest_cycles,interpreted_instructions,recompiled_instructions,gpu_wait_delta_us")?;
+        for row in &self.rows {
+            writeln!(out, "{},{},{},{},{},{},{},{},{}", row.frame, row.wall_ns,
+                row.cpu_ns.map(|n| n.to_string()).unwrap_or_default(),
+                row.batch_wall_ns.map(|n| n.to_string()).unwrap_or_default(),
+                row.batch_cpu_ns.map(|n| n.to_string()).unwrap_or_default(),
+                row.cycles, row.interpreted, row.recompiled,
+                row.gpu_wait_us.map(|n| n.to_string()).unwrap_or_default())?;
+        }
+        out.flush()?;
+        if self.dropped != 0 || self.rows.iter().any(|row| row.cpu_ns.is_none() || row.batch_cpu_ns.is_none() || row.batch_wall_ns.is_none() || row.gpu_wait_us.is_none()) {
+            return Err(std::io::Error::other("incomplete batch telemetry"));
+        }
+        Ok(())
+    }
+}
+
+fn completion(requested: u64, attempted: u64, stopped: Option<FrameOutcome>) -> (u64, String, bool) {
+    let completed = attempted.saturating_sub(u64::from(stopped.is_some()));
+    let complete = stopped.is_none() && requested > 0 && completed == requested;
+    let reason = match stopped {
+        Some(outcome) => format!("{outcome:?}"),
+        None if complete => "frame_limit".into(),
+        None => "interrupted".into(),
+    };
+    (completed, reason, complete)
+}
 
 /// passes everything on to env_logger and keeps the warnings and errors,
 /// numbers left out so that alike ones count together, with how often and
@@ -70,6 +220,11 @@ pub struct Probe {
     /// times it went black for one look between pictures.
     black: [[bool; 2]; 2],
     flashes: [u64; 2],
+    trace_every: Option<u64>,
+    checkpoints: Vec<GuestCheckpoint>,
+    dropped_checkpoints: u64,
+    timing: Option<BatchTiming>,
+    boundary_captures: bool,
 }
 
 impl Probe {
@@ -77,7 +232,50 @@ impl Probe {
         let out = PathBuf::from(format!("probe-{title_id:016X}"));
         let _ = std::fs::create_dir_all(&out);
         let speed = std::env::var("ZAKURO_PROBE_SPEED").ok().and_then(|speed| speed.parse().ok()).filter(|&speed: &f64| speed > 0.0);
-        Probe { frames, out, started: Instant::now(), shots: Vec::new(), speed, late: 0.0, skipped: 0, black: [[false; 2]; 2], flashes: [0; 2] }
+        let trace_every = std::env::var("ZAKURO_PROBE_TRACE_EVERY").ok().and_then(|value| value.parse().ok()).filter(|&value| value > 0);
+        let timing = (std::env::var("ZAKURO_PROBE_TELEMETRY").as_deref() == Ok("1"))
+            .then(|| BatchTiming { started: None, batch_started: None, wait_last: 0, wait_us: Some(0), rows: Vec::with_capacity(frames.min(MAX_GUEST_CHECKPOINTS as u64) as usize), dropped: 0 });
+        let boundary_captures = std::env::var("ZAKURO_PROBE_CAPTURE").as_deref() == Ok("boundaries");
+        Probe { frames, out, started: Instant::now(), shots: Vec::new(), speed, late: 0.0, skipped: 0, black: [[false; 2]; 2], flashes: [0; 2], trace_every, checkpoints: Vec::new(), dropped_checkpoints: 0, timing, boundary_captures }
+    }
+
+    pub fn begin_frame(&mut self) {
+        if let Some(timing) = self.timing.as_mut() { timing.begin(); }
+    }
+
+    pub fn begin_batch(&mut self) {
+        if let Some(timing) = self.timing.as_mut() { timing.begin_batch(); }
+    }
+
+    pub fn finish_batch(&mut self) {
+        if let Some(timing) = self.timing.as_mut() { timing.finish_batch(); }
+    }
+
+    pub fn before_wait_reset(&mut self) {
+        if let Some(timing) = self.timing.as_mut() { timing.before_wait_reset(); }
+    }
+
+    /// Called immediately after a completed guest frame, before frontend
+    /// applet responses. In particular, no picture-count getter is used here:
+    /// those wait for the GPU and can change interrupt timing while diagnosing it.
+    pub fn checkpoint(&mut self, system: &System, completed_frames: u64) {
+        if let Some(timing) = self.timing.as_mut() { timing.finish(system, completed_frames); }
+        let Some(every) = self.trace_every else { return };
+        if !completed_frames.is_multiple_of(every) {
+            return;
+        }
+        if self.checkpoints.len() == MAX_GUEST_CHECKPOINTS {
+            self.dropped_checkpoints += 1;
+            return;
+        }
+        self.checkpoints.push(GuestCheckpoint {
+            completed_frames,
+            guest_cycles: system.cpu.cycles,
+            registers: system.cpu.regs,
+            current_thread: system.kernel.current_thread,
+            interpreted_instructions: system.interpreted_instructions,
+            recompiled_instructions: system.recompiled_instructions,
+        });
     }
 
     /// whether a handheld running at the probe's speed would be behind, as
@@ -96,6 +294,7 @@ impl Probe {
 
     /// looks at both screens, counting a black one between two that are not.
     pub fn watch(&mut self, system: &mut System) {
+        if self.boundary_captures { return; }
         for (index, screen) in [zakuro_common::Screen::Top, zakuro_common::Screen::Bottom].into_iter().enumerate() {
             let (pixels, _, _) = system.read_screen_scaled(screen);
             let black = pixels.chunks(4).all(|pixel| pixel[0] < 8 && pixel[1] < 8 && pixel[2] < 8);
@@ -150,6 +349,48 @@ impl Probe {
 
     pub fn report(self, system: &mut System, rom: &str, title_id: u64, has_profile: bool, ran: u64, stopped: Option<FrameOutcome>) -> i32 {
         let seconds = self.started.elapsed().as_secs_f64();
+        let (completed, stop_reason, complete) = completion(self.frames, ran, stopped);
+        let timing_written = self.timing.as_ref().is_none_or(|timing| {
+            timing.rows.len() as u64 == completed && timing.write(&self.out.join("batch-timing.csv")).is_ok()
+        });
+        let trace_written = self.trace_every.is_none_or(|sampling_interval_frames| {
+            let trace = GuestTrace { schema_version: 1, sampling_interval_frames, dropped_checkpoints: self.dropped_checkpoints, checkpoints: &self.checkpoints };
+            let path = self.out.join("guest-trace.toml");
+            match toml::to_string(&trace).map_err(|error| error.to_string()).and_then(|text| std::fs::write(&path, text).map_err(|error| error.to_string())) {
+                Ok(()) => true,
+                Err(error) => { eprintln!("could not write {}: {error}", path.display()); false }
+            }
+        });
+        let metrics = Metrics {
+            schema_version: 1,
+            title_id: format!("{title_id:016X}"),
+            requested_frames: self.frames,
+            attempted_frames: ran,
+            completed_frames: completed,
+            elapsed_seconds: seconds,
+            skipped_frames: self.skipped,
+            top_pictures: system.top_pictures(),
+            bottom_pictures: system.bottom_pictures(),
+            interpreted_instructions: system.interpreted_instructions,
+            recompiled_instructions: system.recompiled_instructions,
+            stop_reason,
+            screenshots: &self.shots,
+            guest_trace_file: self.trace_every.map(|_| "guest-trace.toml"),
+        };
+        let metrics_path = self.out.join("report.toml");
+        let metrics_written = match toml::to_string(&metrics) {
+            Ok(text) => match std::fs::write(&metrics_path, text) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("could not write {}: {error}", metrics_path.display());
+                    false
+                }
+            },
+            Err(error) => {
+                eprintln!("could not serialize probe metrics: {error}");
+                false
+            }
+        };
         let mut report = format!("# Probe of {title_id:016X}\n\n");
         let _ = writeln!(report, "- ROM: {rom}");
         let library = std::env::var("ZAKURO_RECOMPILED").unwrap_or_else(|_| "none, the code was interpreted".into());
@@ -189,10 +430,75 @@ impl Probe {
             let _ = writeln!(report, "- {file}");
         }
         let path = self.out.join("report.md");
-        match std::fs::write(&path, &report) {
-            Ok(()) => println!("{}", path.display()),
-            Err(error) => eprintln!("could not write {}: {error}", path.display()),
+        let report_written = match std::fs::write(&path, &report) {
+            Ok(()) => { println!("{}", path.display()); true }
+            Err(error) => { eprintln!("could not write {}: {error}", path.display()); false }
+        };
+        if complete && self.skipped == 0 && metrics_written && report_written && trace_written && timing_written { 0 } else { 1 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_deltas_survive_the_status_report_reset_and_disabled_logging() {
+        use std::sync::atomic::Ordering;
+        // Bind the observer to the real status logger's reset contract. A
+        // change there needs a matching observer update, not silently bad data.
+        assert!(include_str!("busy.rs").contains("GPU_WAITED.swap(0, Ordering::Relaxed)"));
+        struct Restore(u64);
+        impl Drop for Restore {
+            fn drop(&mut self) { zakuro_core::GPU_WAITED.store(self.0, Ordering::Relaxed); }
         }
-        if matches!(stopped, Some(FrameOutcome::Faulted)) { 1 } else { 0 }
+        let _restore = Restore(zakuro_core::GPU_WAITED.load(Ordering::Relaxed));
+        // This test creates no System/GL worker; no other frontend test writes
+        // this diagnostic counter. Exercise both enabled and filtered logging.
+        for reset in [false, true] {
+            zakuro_core::GPU_WAITED.store(100, Ordering::Relaxed);
+            let mut timing = BatchTiming { started: None, batch_started: None, wait_last: 0, wait_us: Some(0), rows: Vec::new(), dropped: 0 };
+            timing.begin_batch();
+            timing.rows.push(TimingRow { frame: 1, wall_ns: 1, cpu_ns: Some(0), batch_wall_ns: None, batch_cpu_ns: None,
+                cycles: 0, interpreted: 0, recompiled: 1, gpu_wait_us: None });
+            zakuro_core::GPU_WAITED.fetch_add(11, Ordering::Relaxed);
+            if reset {
+                timing.before_wait_reset();
+                zakuro_core::GPU_WAITED.swap(0, Ordering::Relaxed);
+            }
+            zakuro_core::GPU_WAITED.fetch_add(7, Ordering::Relaxed);
+            timing.finish_batch();
+            assert_eq!(timing.rows[0].gpu_wait_us, Some(18));
+        }
+    }
+
+    #[test]
+    fn only_the_complete_workload_passes() {
+        assert_eq!(completion(60, 60, None), (60, "frame_limit".into(), true));
+        assert_eq!(completion(60, 20, None), (20, "interrupted".into(), false));
+        assert_eq!(completion(60, 60, Some(FrameOutcome::Faulted)), (59, "Faulted".into(), false));
+        assert_eq!(completion(60, 20, Some(FrameOutcome::Exited)), (19, "Exited".into(), false));
+        assert!(!completion(0, 0, None).2);
+    }
+
+    #[test]
+    fn guest_trace_preserves_exact_state_and_an_idle_thread() {
+        let checkpoints = [GuestCheckpoint {
+            completed_frames: 10,
+            guest_cycles: 44_685_309,
+            registers: std::array::from_fn(|index| 0x1234_0000 + index as u32),
+            current_thread: None,
+            interpreted_instructions: 100,
+            recompiled_instructions: 123_456,
+        }];
+        let trace = GuestTrace { schema_version: 1, sampling_interval_frames: 10, dropped_checkpoints: 0, checkpoints: &checkpoints };
+        let serialized = toml::to_string(&trace).unwrap();
+        let value: toml::Value = toml::from_str(&serialized).unwrap();
+        let checkpoint = &value["checkpoints"][0];
+        assert_eq!(checkpoint["guest_cycles"].as_integer(), Some(44_685_309));
+        assert_eq!(checkpoint["registers"].as_array().unwrap().len(), 16);
+        assert_eq!(checkpoint["registers"][15].as_integer(), Some(0x1234_000f));
+        assert!(checkpoint.get("current_thread").is_none());
+        assert_eq!(checkpoint["recompiled_instructions"].as_integer(), Some(123_456));
     }
 }

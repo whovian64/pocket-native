@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "source_parent_revision": "9e12a09fb94e919dab6a3dc2356cc80925face7e",
+  "native_library_sha256": "3aa528474512976b143b1a06ed83eda44a18058d5c00960aea60c36378d1a5a8",
+  "runtime_sha256": {
+    "renderer-control": "a9cef71c8ece3257a8af635a3c435b28ce415401cd7ca331b92a2f4ca4c7cf9b",
+    "pipeline-only": "3ed461f1919fb9c3949b3032b994be8b618fb227ac0508556c1889a41a144c64",
+    "expiry-only": "90e3a51f3db70bac731fa5b3893100a8882194266d6b41cbd8e54304b16a8fc1"
+  },
+  "build_argv_portable": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "--offline",
+    "-p",
+    "pocket-native",
+    "--features",
+    "zakuro-gpu/gles",
+    "--target",
+    "x86_64-unknown-linux-gnu",
+    "-j",
+    "1",
+    "--config",
+    "target.x86_64-unknown-linux-gnu.rustflags=[]"
+  ],
+  "workload_sha256": "31ff9bd9290eb6d188809c5bf55be9adb7e46d7174273cc5ea58007d650045d6",
+  "private_save_sha256": "06087b106f145c2b17b766fa0df60d818a6ac5020c9c615e0200394aa9b39ce8",
+  "frames": 6000,
+  "clock_ms_since_1900": 4000000000000,
+  "math_native_library_sha256": {
+    "base_library": "5fd6f1824445b4754c0372aff5032d5c18173b4617fbb42c7fddfdfc943c8806",
+    "candidate_library": "db5e9c37b74c32b566af4f8a8519dce88abc4eb00df49bc5d08d19010b2279ed"
+  },
+  "timing_eligible": false,
+  "target_device_execution": false,
+  "claims": "Exact output/work and focused operation-count proof only. No admitted game speedup. Source hashes describe frozen artifacts; later delta is fixture-only prewarm waiting plus documentation.",
+  "final_checks": {
+    "workspace_passed": 420,
+    "workspace_ignored": 8,
+    "python_passed": 48,
+    "explicit_pipeline_gles": true,
+    "forced_unavailable_egl": true,
+    "aarch64_linux_check": true,
+    "android_release_aarch64_link": true
+  }
+}

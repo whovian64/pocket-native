@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "verified_gameplay": true,
+  "name": "Ultra Sun USA Route 1 checkpoint navigation",
+  "scene": "Load Route 1 save; walk between route entrance and house exterior; repeated left/right navigation. Outdoors only; no battle or interior claim.",
+  "reviewed_by": "Codex root actual eight-BMP contact sheet inspection",
+  "rom_sha256": "b812dc50fdb76cc9f82ed80a3798dae11a2fced1e2fee436db02a8910fde39d1",
+  "frames": 6000,
+  "screenshots": {
+    "frame-00749.bmp": "fcb71f2343d9db0ce07f91c376d93c10e10eed7f5fb163c4760a9e81d829aa9b",
+    "frame-01499.bmp": "09e2e86e29593b8268475aa9c870f55f0bbda2a506c79b33808c971659e89805",
+    "frame-02249.bmp": "80f96fd31d19ce8742a9cf4cde7a33d84327f741e66a8cfe0174a707cce26781",
+    "frame-02999.bmp": "7d232a3479f1e4f056e9a6396c5210610e2ad5e91f33df9547c792c54826ed7e",
+    "frame-03749.bmp": "70bc11d9b56ccc2f673763980cebeefdca65611f0da9d91c146c754c3afb820c",
+    "frame-04499.bmp": "dc775d795edd38ca90b0bbe889313458e2435c07b592e6c8c842b24361a1f854",
+    "frame-05249.bmp": "db981a45083a39959928a029c62c92b0a31ac85d379cb91f65bb97bf5bb33e41",
+    "frame-05999.bmp": "0fd9bc873640ebb03537e67473790adc92272fdc052e15e7e81d987a825c43ff"
+  },
+  "input_sha256": "31ff9bd9290eb6d188809c5bf55be9adb7e46d7174273cc5ea58007d650045d6",
+  "limitations": "Agent-reviewed outdoor movement only; no user visual signoff, battle, audio state or device proof. Fresh process/application caches; initial startup included.",
+  "initial_state": "Private checkpoint on Route 1 outside the house; save/font/format bytes held identical between trials. The save is not distributed.",
+  "input_file": "ultra-sun-usa-route1.input",
+  "save_sha256": "06087b106f145c2b17b766fa0df60d818a6ac5020c9c615e0200394aa9b39ce8"
+}

@@ -151,7 +151,15 @@ fn extension(out: &mut String, scope: &Scope, a: u32, op: u32, double: bool, rd:
             let source = sreg(op & 0xF, op & (1 << 5) != 0);
             let integer = if top { format!("(double)(int32_t)ctx->vfp[{source}]") } else { format!("(double)ctx->vfp[{source}]") };
             let value = if double { integer } else { format!("(float){integer}") };
-            emit!(out, "    {}", set(double, rd, &value));
+            // A converted i32/u32 is zero or finite with magnitude >= 1,
+            // so neither FZ nor DN can change it. Initialize the bitcast
+            // before writing either word, including overlapping operands.
+            if double {
+                let destination = 2 * (rd & 15);
+                emit!(out, "    {{ union {{ double value; uint64_t bits; }} converted = {{ .value = {value} }}; ctx->vfp[{destination}] = (uint32_t)converted.bits; ctx->vfp[{}] = (uint32_t)(converted.bits >> 32); }}", destination + 1);
+            } else {
+                emit!(out, "    {{ union {{ float value; uint32_t bits; }} converted = {{ .value = {value} }}; ctx->vfp[{rd}] = converted.bits; }}");
+            }
             true
         }
         // vcvt to an integer rounding toward zero, the other rounding modes
@@ -282,4 +290,76 @@ fn move_pair(out: &mut String, scope: &Scope, a: u32, op: u32, double: bool) -> 
         emit!(out, "    ctx->vfp[{low}] = ctx->r[{rt}]; ctx->vfp[{high}] = ctx->r[{rt2}];");
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn generated_integer_conversions_preserve_state_and_fpscr() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("recomp-integer-vfp-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let scratch = Scratch(dir);
+        let labels = BTreeSet::new();
+        let functions = BTreeMap::new();
+        let interpreted = RefCell::new(Vec::new());
+        let scope = Scope { labels: &labels, functions: &functions, prefix: "", relative: false, interpreted: &interpreted };
+        // Actual opcodes from emitted game functions, including sources
+        // overlapping each half of a double destination and single outputs.
+        let cases = [
+            (0xEEB8_3AC3, 6, 6, false, true),
+            (0xEEB8_0A40, 0, 0, false, false),
+            (0xEEB8_3BE2, 5, 3, true, true),
+            (0xEEB8_5B41, 2, 5, true, false),
+            (0xEEB8_0BC0, 0, 0, true, true),
+            (0xEEB8_0BE0, 1, 0, true, true),
+        ];
+        let mut generated = String::new();
+        for (index, &(opcode, _, _, _, _)) in cases.iter().enumerate() {
+            let mut body = String::new();
+            assert!(data_processing(&mut body, &scope, 0x100000, opcode));
+            assert!(!body.contains("vfp_set_"), "integer output still normalized: {body}");
+            emit!(generated, "static NOINLINE void generated_{index}(Context *ctx) {{\n{body}}}");
+        }
+        assert!(interpreted.borrow().is_empty());
+        let mut arithmetic = String::new();
+        assert!(data_processing(&mut arithmetic, &scope, 0x100000, 0xEE20_0A01));
+        assert!(arithmetic.contains("vfp_set_s"), "ordinary arithmetic must still normalize");
+        let entries = (0..cases.len()).map(|index| format!("generated_{index}")).collect::<Vec<_>>().join(",");
+        emit!(generated, "static void (*generated[])(Context *) = {{{entries}}};");
+        let sources = cases.iter().map(|case| case.1.to_string()).collect::<Vec<_>>().join(",");
+        let destinations = cases.iter().map(|case| case.2.to_string()).collect::<Vec<_>>().join(",");
+        let wide = cases.iter().map(|case| u8::from(case.3).to_string()).collect::<Vec<_>>().join(",");
+        let signed = cases.iter().map(|case| u8::from(case.4).to_string()).collect::<Vec<_>>().join(",");
+        emit!(generated, "static const unsigned sources[] = {{{sources}}}, destinations[] = {{{destinations}}}, wide_outputs[] = {{{wide}}}, signed_inputs[] = {{{signed}}};");
+        std::fs::write(scratch.0.join("generated.h"), generated).unwrap();
+        std::fs::write(scratch.0.join("recomp.h"), recomp_abi::HEADER).unwrap();
+        std::fs::write(scratch.0.join("test.c"), include_str!("../../tests/fixtures/vfp_integer_conversion.c")).unwrap();
+        let compiler = std::env::var_os("CC").filter(|value| !value.is_empty()).unwrap_or_else(|| "cc".into());
+        for optimization in ["-O2", "-O3"] {
+            let executable = scratch.0.join(format!("conversion{optimization}{}", std::env::consts::EXE_SUFFIX));
+            let compiled = Command::new(&compiler).current_dir(&scratch.0)
+                .args(["-std=gnu11", optimization, "-fno-fast-math", "-frounding-math", "-ffp-contract=off", "test.c", "-o"])
+                .arg(&executable).arg("-lm").output().expect("the recompiler's C compiler must be available");
+            assert!(compiled.status.success(), "{optimization}: {}", String::from_utf8_lossy(&compiled.stderr));
+            let result = Command::new(&executable).output().unwrap();
+            assert!(result.status.success(), "{optimization}: {}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            println!("{optimization}: {}", String::from_utf8_lossy(&result.stdout).trim());
+        }
+    }
 }

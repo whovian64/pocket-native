@@ -38,7 +38,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 .kernel
                 .objects
                 .insert(KObject::ClientSession(ClientSession {
-                    service: name.clone(),
+                    service: name.clone().into(),
                     subhandle: 0,
                 }));
             let handle = system

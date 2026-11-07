@@ -31,12 +31,24 @@ cargo build --release
 analyze - shows how much of the code was found; 
 build - writes the C, compiles it and installs the library where Zakuro finds it. Give it a folder (build game.3ds out) to keep everything there instead. 
 
-verify runs the recompiled functions against Zakuro's interpreter, which cargo fetches when it's built with the verify feature:
+verify runs the recompiled functions against Zakuro's interpreter when built with the verify feature:
 
 ```
 cargo build --release --features verify
 ./target/release/3dsrecomp verify game.3ds ~/.local/share/3dsrecomp/<title id>.so
 ```
+
+An optional final argument selects the number of sampled functions (500 by
+default). Mismatches produce a nonzero exit code; functions that reach the
+instruction limit are reported as stuck rather than passed. This checks
+behavior from generated states, not game performance or every possible input.
+Libraries built with `RECOMP_FASTMEM` can be checked on 64-bit Linux with 4 KiB
+host pages and readable `/proc/self/pagemap` present/swapped flags; physical
+page numbers are not needed. Admission fails if coverage cannot be established.
+Both sides use independent sparse guest views with zero-filled, writable
+unknown pages. Comparison includes present and swapped-out pages, including
+writes outside declared regions, then resets the views between cases. Untouched
+pages remain sparse, and host swap need not be disabled.
 
 The build takes a while, so don't worry. After that, Zakuro runs the game on the recompiled code on its own:
 

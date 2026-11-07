@@ -30,7 +30,7 @@ pub enum KObject {
     /// the client end of an IPC session.
     ClientSession(ClientSession),
     /// a named port a game can connect to, e.g. srv:.
-    ClientPort(String),
+    ClientPort(crate::services::ServiceName),
     Process,
     ResourceLimit,
 }
@@ -70,7 +70,7 @@ pub struct SharedMemory {
 #[derive(Debug, Clone)]
 pub struct ClientSession {
     /// which HLE service handles requests on this session.
-    pub service: String,
+    pub service: crate::services::ServiceName,
     /// per-session state, used by services like FS that hand out sub-sessions.
     pub subhandle: u32,
 }

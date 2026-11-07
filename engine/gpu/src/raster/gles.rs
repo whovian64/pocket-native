@@ -28,6 +28,7 @@ use crate::{GpuMemory, Picture, ScreenRef};
 
 mod between;
 mod display;
+mod memory;
 mod programs;
 mod sources;
 
@@ -77,8 +78,8 @@ const EQUATIONS: [u32; 5] = [glow::FUNC_ADD, glow::FUNC_SUBTRACT, glow::FUNC_REV
 
 const TEXTURE_KEEP_FLUSHES: u64 = 600;
 
-/// batches a program nothing drew with is kept for once the driver ran out
-/// of room.
+/// batches a program nothing drew with is kept for; a newly admitted
+/// program gets the same grace period before its first draw.
 const PROGRAM_KEEP_FLUSHES: u64 = 600;
 
 /// batches a surface nothing drew into or read stays for, and how often the
@@ -139,6 +140,14 @@ static VERSIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 fn word_bytes(words: &[u32]) -> &[u8] {
     // SAFETY: the words' own bytes
     unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len() * 4) }
+}
+
+/// Return the vertically inverted, tightly packed staging rows for one upload.
+/// The returned slice borrows staging until the client-memory GL call returns.
+fn upload_staging_rows(staging: &[u8], width: u32, height: u32, (from, to): (u32, u32)) -> (i32, i32, &[u8]) {
+    let (top, count) = ((height - to) as i32, (to - from) as i32);
+    let bytes_per_row = width as usize * 4;
+    (top, count, &staging[(height - to) as usize * bytes_per_row..(height - from) as usize * bytes_per_row])
 }
 
 fn next_version() -> u64 {
@@ -496,8 +505,40 @@ fn persistent(gl: &glow::Context) -> bool {
     })
 }
 
+fn parse_ring_capacity(value: &str) -> Option<usize> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+    let kib = value.parse::<usize>().ok()?;
+    if (128..=8192).contains(&kib) { Some(kib * 1024) } else { None }
+}
+
+fn ring_capacity_override() -> Option<usize> {
+    static CAPACITY: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *CAPACITY.get_or_init(|| match std::env::var("ZAKURO_GLES_RING_KIB") {
+        Ok(value) => match parse_ring_capacity(&value) {
+            Some(bytes) => Some(bytes),
+            None => { log::warn!("invalid ZAKURO_GLES_RING_KIB: expected decimal 128..8192 KiB; using existing ring capacities"); None }
+        },
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => { log::warn!("invalid ZAKURO_GLES_RING_KIB encoding; using existing ring capacities"); None }
+    })
+}
+
+fn mutable_ring_capacity(original: usize, target: u32, align: usize, cap: Option<usize>) -> usize {
+    let Some(cap) = cap else { return original };
+    // The tables are bound before their first upload. Preserve that valid
+    // startup range and room for one aligned offset even with a small cap.
+    let minimum = if target == glow::SHADER_STORAGE_BUFFER { TABLES_SIZE } else { 1 };
+    let align = align.max(1);
+    let minimum = minimum.div_ceil(align) * align;
+    original.min(cap.max(minimum))
+}
+
 impl Ring {
     fn new(gl: &glow::Context, target: u32, size: usize, align: usize) -> Result<Ring, String> {
+        Self::new_with_cap(gl, target, size, align, ring_capacity_override())
+    }
+
+    fn new_with_cap(gl: &glow::Context, target: u32, size: usize, align: usize, cap: Option<usize>) -> Result<Ring, String> {
         // SAFETY: the context is current, and the mapping lasts as long as
         // the buffer, which a ring keeps
         unsafe {
@@ -508,12 +549,21 @@ impl Ring {
                 gl.buffer_storage(target, size as i32, None, flags);
                 let base = gl.map_buffer_range(target, 0, size as i32, flags);
                 if !base.is_null() {
+                    if cap.is_some() {
+                        static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+                        LOGGED.get_or_init(|| log::info!("ZAKURO_GLES_RING_KIB ignored for persistent mapped rings; original immutable storage and quarter limits retained"));
+                    }
                     return Ok(Ring { buffer, size, offset: 0, align, laps: 0, mapped: Some((base, Default::default())) });
                 }
                 log::warn!("could not map a buffer for good, GL error {:#x}, written through GL instead", gl.get_error());
                 gl.delete_buffer(buffer);
                 buffer = gl.create_buffer()?;
                 gl.bind_buffer(target, Some(buffer));
+            }
+            let original = size;
+            let size = mutable_ring_capacity(original, target, align, cap);
+            if let Some(cap) = cap {
+                log::info!("GLES mutable ring initial capacity: {} KiB (original {} KiB, requested cap {} KiB, target {target:#x}); grows on demand", size / 1024, original / 1024, cap / 1024);
             }
             gl.buffer_data_size(target, size as i32, glow::STREAM_DRAW);
             Ok(Ring { buffer, size, offset: 0, align, laps: 0, mapped: None })
@@ -586,18 +636,78 @@ impl Ring {
     }
 }
 
+type TextureLayout = (u32, u32, u32, Option<Packing>);
+type UploadedTextureKey = (usize, TextureLayout);
+const TEXTURE_ALIAS_LIMIT: usize = 512;
+
+/// A weak reference validates allocation identity without keeping its pixels
+/// strongly owned. Weak slices still retain their entire backing allocation
+/// after the last strong owner drops, so dead aliases must be pruned promptly.
+enum TextureIdentity {
+    Rgba(std::sync::Weak<[[u8; 4]]>),
+    Packed(std::sync::Weak<[u8]>),
+}
+
+impl TextureIdentity {
+    fn new(texels: &Arc<[[u8; 4]]>, packed: &Option<crate::raster::Packed>) -> Self {
+        match packed {
+            Some((_, bytes)) => Self::Packed(Arc::downgrade(bytes)),
+            None => Self::Rgba(Arc::downgrade(texels)),
+        }
+    }
+
+    fn live(&self) -> bool {
+        match self {
+            Self::Rgba(weak) => weak.strong_count() != 0,
+            Self::Packed(weak) => weak.strong_count() != 0,
+        }
+    }
+
+    fn matches(&self, texels: &Arc<[[u8; 4]]>, packed: &Option<crate::raster::Packed>) -> bool {
+        match (self, packed) {
+            (Self::Rgba(weak), None) => weak.upgrade().is_some_and(|owner| Arc::ptr_eq(&owner, texels)),
+            (Self::Packed(weak), Some((_, bytes))) => weak.upgrade().is_some_and(|owner| Arc::ptr_eq(&owner, bytes)),
+            _ => false,
+        }
+    }
+}
+
+struct TextureAlias {
+    canonical: UploadedTextureKey,
+    payload: TextureIdentity,
+    /// Validate the canonical owner too, so retirement and allocator pointer
+    /// reuse cannot redirect an old alias to a different upload.
+    owner: TextureIdentity,
+    admitted: u64,
+}
+
+fn texture_upload_bytes(bound: &BoundTexture) -> &[u8] {
+    bound.packed.as_ref().map_or_else(|| bound.texels.as_flattened(), |(_, bytes)| bytes.as_ref())
+}
+
 struct Texture {
     texture: glow::Texture,
     /// ETC1A4's alpha, which ETC1 leaves out.
     alpha: Option<glow::Texture>,
     _texels: (Arc<[[u8; 4]]>, Option<crate::raster::Packed>),
+    layout: TextureLayout,
+    fingerprint: u64,
     used: u64,
 }
 
-#[derive(PartialEq)]
 enum Attribute {
     Constant([f32; 4]),
     Array { offset: usize, ty: u32, count: u32, stride: u32 },
+}
+
+impl PartialEq for Attribute {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Attribute::Constant(a), Attribute::Constant(b)) => a.map(f32::to_bits) == b.map(f32::to_bits),
+            (Attribute::Array { offset: a, ty: b, count: c, stride: d }, Attribute::Array { offset: e, ty: f, count: g, stride: h }) => (a, b, c, d) == (e, f, g, h),
+            _ => false,
+        }
+    }
 }
 
 enum Attributes {
@@ -633,6 +743,39 @@ fn resident_cost(len: usize) -> usize {
 }
 
 impl Resident {
+    /// Only the cache owns these arrays. Queued/current draws retain their
+    /// own leases; previously issued draws are protected by GL's deletion
+    /// semantics. Call before destructuring the current draw's attributes.
+    fn prune_orphans(&mut self, gl: &glow::Context) -> bool {
+        let before = self.buffers.len();
+        let bytes = self.bytes;
+        static MEMORY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let started = MEMORY.get_or_init(|| std::env::var_os("ZAKURO_GPU_MEMORY").is_some()).then(std::time::Instant::now);
+        self.buffers.retain(|_, (buffer, array, _)| {
+            if Arc::strong_count(array) != 1 { return true; }
+            self.bytes -= resident_cost(array.len());
+            // SAFETY: on the GL thread, after all older draws were issued.
+            unsafe { gl.delete_buffer(*buffer) };
+            false
+        });
+        let removed = before - self.buffers.len();
+        if let Some(started) = started.filter(|_| removed > 0) {
+            log::info!("gpu memory resident orphan pruning: removed {removed} buffers, released {} charged bytes, elapsed {} us", bytes - self.bytes, started.elapsed().as_micros());
+        }
+        removed > 0
+    }
+
+    /// A cached VAO still reads these buffers in this draw, even when no
+    /// attribute pointer changes. Protect them before allocating indices.
+    /// A missing entry forces the caller to rebuild instead of trusting it.
+    fn touch(&mut self, array: &Arc<[u8]>) -> bool {
+        let key = (Arc::as_ptr(array) as *const u8 as usize, array.len());
+        match self.buffers.get_mut(&key) {
+            Some((_, _, used)) => { *used = self.draws; true }
+            None => false,
+        }
+    }
+
     fn buffer(&mut self, gl: &glow::Context, array: &Arc<[u8]>) -> Result<glow::Buffer, String> {
         let key = (Arc::as_ptr(array) as *const u8 as usize, array.len());
         let draws = self.draws;
@@ -938,6 +1081,14 @@ impl DrawJob {
                             gl.bind_vertex_array(Some(self.shaded_array));
                             cache.vertex_array = Some(self.shaded_array);
                         }
+                        if matches!(&attributes, Attributes::Resident { .. }) {
+                            local.resident.draws += 1;
+                            if local.resident.draws.is_multiple_of(256) && local.resident.prune_orphans(&gl) {
+                                // Pointer keys alone do not lease an allocation.
+                                // Rebuild bindings after any orphan was removed.
+                                (local.cache.resident, local.cache.stride) = (None, None);
+                            }
+                        }
                         let base_vertex = match attributes {
                             Attributes::Fetched { bytes, slots } => {
                                 let at = local.inputs.push_aligned(&gl, glow::ARRAY_BUFFER, &bytes, 16)?;
@@ -963,11 +1114,12 @@ impl DrawJob {
                                 0
                             }
                             Attributes::Resident { arrays, slots } => {
-                                local.resident.draws += 1;
                                 // the draw before's arrays read the same way,
                                 // the vertex array still has them
                                 let key: Vec<usize> = arrays.iter().map(|array| Arc::as_ptr(array) as *const u8 as usize).collect();
-                                if !local.cache.resident.as_ref().is_some_and(|(last, read)| *last == key && *read == slots) {
+                                let same = local.cache.resident.as_ref().is_some_and(|(last, read)| *last == key && *read == slots)
+                                    && arrays.iter().all(|array| local.resident.touch(array));
+                                if !same {
                                     let buffers = arrays.iter().map(|array| local.resident.buffer(&gl, array)).collect::<Result<Vec<_>, String>>()?;
                                     for (slot, (array, attribute)) in slots.iter().enumerate() {
                                         let slot = slot as u32;
@@ -1486,6 +1638,18 @@ impl Worker {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SelectedFragmentProgram {
+    program: glow::Program,
+    uniforms: FragmentUniformLiveness,
+}
+
+impl SelectedFragmentProgram {
+    fn new(program: glow::Program, constants: &[u32; FRAGMENT_CONSTANTS]) -> Self {
+        Self { program, uniforms: FragmentUniformLiveness::for_constants(constants) }
+    }
+}
+
 pub struct Gles {
     gl: GlRef,
     worker: Arc<Worker>,
@@ -1502,6 +1666,8 @@ pub struct Gles {
     inputs: HashMap<ProgramKey, String>,
     shaded_array: glow::VertexArray,
     generic: bool,
+    /// Explicit opt-in; idle age is measured in batches, not display seconds.
+    retire_idle_programs: bool,
     vertex_array: glow::VertexArray,
     tables: Option<(u64, u64, u64)>,
     /// tables changed since the last draw went, they go with the next.
@@ -1517,13 +1683,17 @@ pub struct Gles {
     samplers_coming: Option<std::sync::mpsc::Receiver<Vec<glow::Sampler>>>,
     surfaces: Vec<Surface>,
     framebuffers: rustc_hash::FxHashMap<(Option<usize>, Option<usize>), glow::Framebuffer>,
-    textures: rustc_hash::FxHashMap<usize, Texture>,
+    textures: rustc_hash::FxHashMap<UploadedTextureKey, Texture>,
+    texture_aliases: rustc_hash::FxHashMap<UploadedTextureKey, TextureAlias>,
+    texture_alias_clock: u64,
+    #[cfg(test)]
+    texture_content_checks: usize,
     samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap, Lod, bool), glow::Sampler>,
     blank: glow::Texture,
     transfer: Option<glow::Program>,
     reinterpreter: Option<glow::Program>,
     /// the last draw's colour words and program and what they came from.
-    fragment: Option<((u64, u32, [bool; 3], bool, bool, u64), Vec<u32>, glow::Program)>,
+    fragment: Option<((u64, u32, [bool; 3], bool, bool, u64), Vec<u32>, SelectedFragmentProgram)>,
     upright: Option<glow::Program>,
     packers: Option<(glow::Program, glow::Program, glow::VertexArray)>,
     copiers: Option<([glow::Program; 3], glow::VertexArray)>,
@@ -1537,6 +1707,9 @@ pub struct Gles {
     retire_at: u64,
     /// the batch each program last drew in, and the last one stamped.
     program_used: rustc_hash::FxHashMap<glow::Program, u64>,
+    /// when linked programs entered the cache, so a prewarmed program has
+    /// the same grace period as one that has already drawn.
+    program_admitted: rustc_hash::FxHashMap<glow::Program, u64>,
     stamped: Option<(glow::Program, u64)>,
     /// the batch room was last made in, and the programs that got a second
     /// try after it.
@@ -1631,6 +1804,7 @@ impl Gles {
                 inputs: HashMap::new(),
                 shaded_array,
                 generic: crate::switch("ZAKURO_GENERIC_SHADERS", "generic shaders"),
+                retire_idle_programs: crate::switch("ZAKURO_RETIRE_PROGRAMS", "periodic retirement of idle linked programs"),
                 vertex_array,
                 tables: None,
                 tables_due: None,
@@ -1646,6 +1820,10 @@ impl Gles {
                 surfaces: Vec::new(),
                 framebuffers: Default::default(),
                 textures: Default::default(),
+                texture_aliases: Default::default(),
+                texture_alias_clock: 0,
+                #[cfg(test)]
+                texture_content_checks: 0,
                 samplers: Default::default(),
                 blank,
                 transfer: None,
@@ -1660,6 +1838,7 @@ impl Gles {
                 flushes: 0,
                 retire_at: RETIRE_EVERY,
                 program_used: Default::default(),
+                program_admitted: Default::default(),
                 stamped: None,
                 room_made: None,
                 retried: Default::default(),
@@ -1705,8 +1884,8 @@ impl Gles {
         }
     }
 
-    /// has the compiler thread make the generic programs a draw stands in
-    /// with while its own compiles, before any draw needs one.
+    /// Keep fallback combinations ready using the original low-priority
+    /// background preparation, even when approximate stand-ins are disabled.
     fn prepare_stand_ins(&mut self) {
         for writes_depth in [false, true] {
             for unbordered in [0, 0x400] {
@@ -2922,24 +3101,31 @@ impl Gles {
                 return Ok(None);
             }
         }
-        if !self.worker.here() {
-            let worker = self.worker.clone();
-            wait_from("program");
-            return worker.run(|| self.program(constants, writes_depth, lighting, vertex, wait, None));
-        }
-        disturb();
-        let program = match build_program(&self.gl, &compiled, &fragment, cached.as_deref()) {
-            Ok(program) => program,
-            Err(error) if self.retried.insert(key.clone()) => {
-                log::warn!("{error}");
-                self.make_room();
-                build_program(&self.gl, &compiled, &fragment, cached.as_deref())?
-            }
-            Err(error) => return Err(error),
+        let worker = self.worker.clone();
+        // Keep the sources prepared above when linking on the GL thread.
+        // Re-entering program would generate and hash the same GLSL twice.
+        let mut finish = || {
+            disturb();
+            let program = match build_program(&self.gl, &compiled, &fragment, cached.as_deref()) {
+                Ok(program) => program,
+                Err(error) if self.retried.insert(key.clone()) => {
+                    log::warn!("{error}");
+                    self.make_room();
+                    build_program(&self.gl, &compiled, &fragment, cached.as_deref())?
+                }
+                Err(error) => return Err(error),
+            };
+            self.programs.insert(key.clone(), program);
+            self.program_admitted.insert(program, self.flushes);
+            self.note_program(&key);
+            Ok(Some(program))
         };
-        self.programs.insert(key.clone(), program);
-        self.note_program(&key);
-        Ok(Some(program))
+        if !worker.here() {
+            wait_from("program");
+            worker.run(finish)
+        } else {
+            finish()
+        }
     }
 
     /// takes up what the compiler thread finished, waiting for one when
@@ -2961,6 +3147,7 @@ impl Gles {
             match result {
                 Ok(program) => {
                     self.programs.insert(key.clone(), program);
+                    self.program_admitted.insert(program, self.flushes);
                     self.note_program(&key);
                 }
                 Err(error) => {
@@ -3418,10 +3605,6 @@ impl Gles {
             None => vec![(0, height)],
         };
         let rows = || ranges.iter().flat_map(|&(from, to)| from..to);
-        let part = |staging: &[u8], (from, to): (u32, u32)| {
-            let (top, count) = ((height - to) as i32, (to - from) as i32);
-            (top, count, staging[(height - to) as usize * width as usize * 4..(height - from) as usize * width as usize * 4].to_vec())
-        };
         disturb();
         let gl = &self.gl;
         match kind {
@@ -3439,8 +3622,8 @@ impl Gles {
                 unsafe {
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                     for &range in &ranges {
-                        let (top, count, rows) = part(&staging, range);
-                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, top, width as i32, count, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&rows)));
+                        let (top, count, rows) = upload_staging_rows(&staging, width, height, range);
+                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, top, width as i32, count, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rows)));
                     }
                 }
             }
@@ -3468,7 +3651,7 @@ impl Gles {
                 unsafe {
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                     for &range in &ranges {
-                        let (top, count, rows) = part(&staging, range);
+                        let (top, count, rows) = upload_staging_rows(&staging, width, height, range);
                         gl.tex_sub_image_2d(
                             glow::TEXTURE_2D,
                             0,
@@ -3478,7 +3661,7 @@ impl Gles {
                             count,
                             glow::DEPTH_STENCIL,
                             glow::UNSIGNED_INT_24_8,
-                            glow::PixelUnpackData::Slice(Some(&rows)),
+                            glow::PixelUnpackData::Slice(Some(rows)),
                         );
                     }
                 }
@@ -3655,11 +3838,17 @@ impl Gles {
         }
         self.flushes += 1;
         let flushes = self.flushes;
+        if self.retire_idle_programs && flushes.is_multiple_of(RETIRE_EVERY) {
+            self.retire_programs();
+        }
         if flushes.is_multiple_of(60) && std::env::var_os("ZAKURO_GLES_TIMES").is_some() {
             report_times();
         }
         if flushes.is_multiple_of(600) {
             log::debug!("{} surfaces, {} textures, {} programs", self.surfaces.len(), self.textures.len(), self.programs.len());
+            if memory::enabled() {
+                self.report_memory();
+            }
         }
         let mut gone = Vec::new();
         self.textures.retain(|_, texture| {
@@ -3669,6 +3858,7 @@ impl Gles {
             }
             keep
         });
+        self.prune_texture_aliases();
         if !gone.is_empty() {
             let gl = self.gl;
             self.worker.post_keeping(move || {
@@ -3679,6 +3869,55 @@ impl Gles {
                 }
             });
         }
+    }
+
+    /// Retires old linked programs after all queued draws that use them.
+    fn retire_programs(&mut self) {
+        let now = self.flushes;
+        let used = &self.program_used;
+        let admitted = &self.program_admitted;
+        let mut retired = Vec::new();
+        self.programs.retain(|key, program| {
+            // Generic stand-ins are startup work, kept ready for new scenes.
+            let since = admitted.get(program).copied().unwrap_or(now).max(used.get(program).copied().unwrap_or(0));
+            let keep = key.0[29] != 0 || now.saturating_sub(since) <= PROGRAM_KEEP_FLUSHES;
+            if !keep {
+                retired.push(*program);
+            }
+            keep
+        });
+        if retired.is_empty() {
+            if separable() {
+                let gl = self.gl;
+                self.worker.post_keeping(move || prune_stages(&gl));
+            }
+            return;
+        }
+        for program in &retired {
+            self.program_used.remove(program);
+            self.program_admitted.remove(program);
+        }
+        self.fragment = None;
+        self.stamped = None;
+        log::debug!("retiring {} programs unused for {PROGRAM_KEEP_FLUSHES} batches, {} remain", retired.len(), self.programs.len());
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            disturb();
+            // SAFETY: on the GL thread, after all draws already queued with
+            // these names. Unbinding permits immediate deletion even if no
+            // further draw follows; otherwise GL defers a bound program's
+            // deletion until a later bind.
+            unsafe {
+                let bound = gl.get_parameter_i32(glow::CURRENT_PROGRAM) as u32;
+                if retired.iter().any(|program| program.0.get() == bound) {
+                    gl.use_program(None);
+                }
+                for program in retired {
+                    delete_program(&gl, program);
+                }
+                prune_stages(&gl);
+            }
+        });
     }
 
     /// lets go of what the driver holds that can be made again when it
@@ -3701,6 +3940,7 @@ impl Gles {
             }
             keep
         });
+        self.prune_texture_aliases();
         let recent = self.flushes.saturating_sub(PROGRAM_KEEP_FLUSHES);
         let mut programs = Vec::new();
         let used = &self.program_used;
@@ -3713,6 +3953,7 @@ impl Gles {
         });
         for program in &programs {
             self.program_used.remove(program);
+            self.program_admitted.remove(program);
         }
         self.fragment = None;
         self.stamped = None;
@@ -3733,6 +3974,7 @@ impl Gles {
             unsafe {
                 textures.into_iter().for_each(|texture| gl.delete_texture(texture));
                 programs.into_iter().for_each(|program| delete_program(&gl, program));
+                prune_stages(&gl);
                 gl.finish();
             }
         });
@@ -4000,12 +4242,69 @@ impl Gles {
         Ok(())
     }
 
+    fn prune_texture_aliases(&mut self) {
+        let textures = &self.textures;
+        self.texture_aliases.retain(|_, alias| alias.payload.live()
+            && textures.get(&alias.canonical).is_some_and(|texture| alias.owner.matches(&texture._texels.0, &texture._texels.1)));
+    }
+
+    fn admit_texture_alias(&mut self, key: UploadedTextureKey, canonical: UploadedTextureKey, bound: &BoundTexture) {
+        if self.texture_aliases.len() >= TEXTURE_ALIAS_LIMIT {
+            let oldest = self.texture_aliases.iter().max_by_key(|(_, alias)| self.texture_alias_clock.wrapping_sub(alias.admitted)).map(|(&key, _)| key).expect("a full alias cache has an entry");
+            self.texture_aliases.remove(&oldest);
+        }
+        self.texture_alias_clock = self.texture_alias_clock.wrapping_add(1);
+        let texture = &self.textures[&canonical];
+        self.texture_aliases.insert(key, TextureAlias {
+            canonical,
+            payload: TextureIdentity::new(&bound.texels, &bound.packed),
+            owner: TextureIdentity::new(&texture._texels.0, &texture._texels.1),
+            admitted: self.texture_alias_clock,
+        });
+    }
+
     fn texture(&mut self, bound: &BoundTexture) -> Result<(glow::Texture, Option<glow::Texture>), String> {
         let _timed = timed(6);
-        let key = bound.packed.as_ref().map_or(Arc::as_ptr(&bound.texels) as *const u8, |(_, bytes)| Arc::as_ptr(bytes) as *const u8) as usize;
+        let pointer = bound.packed.as_ref().map_or(Arc::as_ptr(&bound.texels) as *const u8, |(_, bytes)| Arc::as_ptr(bytes) as *const u8) as usize;
+        let layout = (bound.width, bound.height, bound.levels, bound.packed.as_ref().map(|(packing, _)| *packing));
+        let key = (pointer, layout);
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.flushes;
             return Ok((texture.texture, texture.alpha));
+        }
+        if let Some(alias) = self.texture_aliases.get(&key) {
+            if alias.payload.matches(&bound.texels, &bound.packed) {
+                if let Some(texture) = self.textures.get_mut(&alias.canonical) {
+                    if alias.owner.matches(&texture._texels.0, &texture._texels.1) {
+                        texture.used = self.flushes;
+                        return Ok((texture.texture, texture.alpha));
+                    }
+                }
+            }
+        }
+        // Prune before admitting another alias. Keeping even a dead Weak
+        // slice would retain its bulk allocation until the Weak is dropped.
+        self.prune_texture_aliases();
+        // A bounded decoded cache can return identical data in a new Arc.
+        // Reuse the immutable GPU upload instead of retaining another copy
+        // for every decode. Pointer hits above stay cheap; on a miss the hash
+        // only filters candidates, and exact bytes plus layout prove reuse.
+        let bytes = texture_upload_bytes(bound);
+        #[cfg(test)]
+        { self.texture_content_checks += 1; }
+        let fingerprint = crate::raster::fingerprint(bytes);
+        let identical = self.textures.iter().find_map(|(&old_key, texture)| {
+            let stored = texture._texels.1.as_ref().map_or_else(|| texture._texels.0.as_flattened(), |(_, bytes)| bytes.as_ref());
+            (texture.layout == layout && texture.fingerprint == fingerprint && stored == bytes).then_some(old_key)
+        });
+        #[cfg(test)]
+        let identical = if std::env::var_os("ZAKURO_TEST_SKIP_TEXTURE_REUSE").is_some() { None } else { identical };
+        if let Some(canonical) = identical {
+            let texture = self.textures.get_mut(&canonical).expect("the matching upload remains owned");
+            texture.used = self.flushes;
+            let names = (texture.texture, texture.alpha);
+            self.admit_texture_alias(key, canonical, bound);
+            return Ok(names);
         }
         // its texels go up after the draws before
         let texture = self.texture_name()?;
@@ -4083,7 +4382,7 @@ impl Gles {
                 }
             }
         });
-        self.textures.insert(key, Texture { texture, alpha, _texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
+        self.textures.insert(key, Texture { texture, alpha, _texels: (bound.texels.clone(), bound.packed.clone()), layout, fingerprint, used: self.flushes });
         Ok((texture, alpha))
     }
 
@@ -4323,7 +4622,7 @@ impl Gles {
         let check = *CHECK.get_or_init(|| crate::switch("ZAKURO_CHECK_REUSE", "reused colour words checked"));
         let key = (draw.fragment_state, enabled | split << 4, sources.map(|source| source.is_some()), shaded, writes_depth, vertex);
         let same = self.fragment.as_ref().is_some_and(|(last, ..)| *last == key);
-        let (words, program) = if same && !check {
+        let (mut words, selected) = if same && !check {
             let (_, last, program) = self.fragment.as_ref().expect("the last draw's");
             let mut words = WORDS.take(UNIFORM_WORDS);
             words.extend_from_slice(last);
@@ -4372,13 +4671,15 @@ impl Gles {
                 false => self.program(&constants, writes_depth, &lighting, vertex, draw.small, Some(&inputs)),
             };
             let program = match built {
-                Ok(Some(program)) => program,
+                Ok(Some(program)) => SelectedFragmentProgram::new(program, &constants),
                 // shaded on the CPU meanwhile
                 Ok(None) if vertex != 0 => return Err(COMPILING.to_owned()),
                 Ok(None) if draw.skippable => return Ok(()),
                 Ok(None) => {
                     exact = false;
-                    self.program(&generic_constants(&constants), writes_depth, &[], 0, true, None)?.ok_or("no generic program")?
+                    let generic = generic_constants(&constants);
+                    let program = self.program(&generic, writes_depth, &[], 0, true, None)?.ok_or("no generic program")?;
+                    SelectedFragmentProgram::new(program, &generic)
                 }
                 Err(error) => {
                     if vertex != 0 {
@@ -4410,6 +4711,10 @@ impl Gles {
             }
             (words, program)
         };
+        // Reuse/CHECK/key/manifest state above keeps the original register
+        // words. Only the final submission copy drops proven unused values.
+        selected.uniforms.canonicalize(&mut words);
+        let program = selected.program;
         if self.stamped != Some((program, self.flushes)) {
             self.stamped = Some((program, self.flushes));
             self.program_used.insert(program, self.flushes);
@@ -4692,6 +4997,509 @@ impl Gles {
 mod tests {
     use super::*;
 
+    #[test]
+    fn borrowed_upload_rows_match_the_old_owned_range() {
+        for width in [1u32, 3, 8, 24] {
+            for height in [1u32, 2, 7, 16] {
+                let staging: Vec<u8> = (0..width * height * 4).map(|i| (i * 37 + i / 7) as u8).collect();
+                for from in 0..height {
+                    for to in from + 1..=height {
+                        // Independent old implementation, including its owned copy.
+                        let old_top = (height - to) as i32;
+                        let old_count = (to - from) as i32;
+                        let old = staging[(height - to) as usize * width as usize * 4
+                            ..(height - from) as usize * width as usize * 4].to_vec();
+                        let (top, count, rows) = upload_staging_rows(&staging, width, height, (from, to));
+                        assert_eq!((top, count), (old_top, old_count));
+                        assert_eq!(rows, old.as_slice());
+                        assert_eq!(rows.as_ptr(), staging[(height - to) as usize * width as usize * 4..].as_ptr());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_surface_uploads_match_full_reference_on_actual_gl() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        gles.worker.run(|| {
+            // SAFETY: Worker::run keeps the GLES context current here.
+            unsafe {
+                eprintln!("upload fixture renderer: {}; {}", gles.gl.get_parameter_string(glow::RENDERER), gles.gl.get_parameter_string(glow::VERSION));
+            }
+        });
+        let mut memory = Flat(vec![0; 0x10000]);
+        let kinds = [Kind::Color(ColorFormat::Rgba8), Kind::Color(ColorFormat::Rgb8),
+            Kind::Color(ColorFormat::Rgb565), Kind::Color(ColorFormat::Rgb5A1),
+            Kind::Color(ColorFormat::Rgba4), Kind::Depth(2), Kind::Depth(3), Kind::Depth(4)];
+        let (width, height) = (8u32, 8u32);
+        for (case, kind) in kinds.into_iter().enumerate() {
+            for tiled in [false, true] {
+                let slot = case * 2 + usize::from(tiled);
+                let a = 0x1000 + slot as u32 * 0x400;
+                let b = a + 0x200;
+                let bpp = kind.bytes() as usize;
+                let len = (width * height) as usize * bpp;
+                let old: Vec<u8> = (0..len).map(|i| (i * 17 + 31) as u8).collect();
+                let new: Vec<u8> = (0..len).map(|i| (i * 47 + 83) as u8).collect();
+                let mut reference = old.clone();
+                // The dirty middle belongs to the GPU: only outer rows come
+                // from new guest memory. Compose the reference per pixel.
+                for y in [0, 1, 5, 6, 7] {
+                    for x in 0..width {
+                        let offset = match kind {
+                            Kind::Color(_) => pixel_offset(tiled, x, y, width, bpp as u32),
+                            Kind::Depth(_) => morton_offset(x, y, width, bpp as u32) as usize,
+                        };
+                        reference[offset..offset + bpp].copy_from_slice(&new[offset..offset + bpp]);
+                    }
+                }
+                memory.0[a as usize..a as usize + len].copy_from_slice(&old);
+                memory.0[b as usize..b as usize + len].copy_from_slice(&reference);
+                let actual = gles.surface_rows(&mut memory, a, (width, height), kind, tiled, None).unwrap();
+                let expected = gles.surface_rows(&mut memory, b, (width, height), kind, tiled, None).unwrap();
+                let worker = gles.worker.clone();
+                worker.run(|| {
+                    let gl = gles.gl;
+                    // GLES client memory is used only with no unpack buffer,
+                    // and the context retains the default row/skip state.
+                    unsafe {
+                        assert_eq!(gl.get_parameter_i32(glow::PIXEL_UNPACK_BUFFER_BINDING), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_ROW_LENGTH), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_SKIP_ROWS), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_SKIP_PIXELS), 0);
+                        assert_eq!(gl.get_parameter_i32(glow::UNPACK_ALIGNMENT), 1);
+                    }
+                    gles.surfaces[actual].dirty = Some((2, 5));
+                    gles.upload(actual, &new);
+                    let mut read = |index| {
+                        let mut pixels = vec![0; (width * height * 4) as usize];
+                        match kind {
+                            Kind::Color(_) => {
+                                let framebuffer = gles.framebuffer(Some(index), None).unwrap();
+                                unsafe {
+                                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+                                    gl.read_pixels(0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
+                                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                                }
+                            }
+                            Kind::Depth(_) => gles.read_depth(index, None, &mut pixels).unwrap(),
+                        }
+                        pixels
+                    };
+                    assert_eq!(read(actual), read(expected), "{kind:?}, tiled {tiled}");
+                });
+                // Do not leave a synthetic dirty surface for a later case.
+                gles.surfaces[actual].dirty = None;
+            }
+        }
+        gles.stop();
+    }
+
+    #[test]
+    fn resident_orphan_pruning_preserves_current_and_queued_array_leases() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        gles.worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let mut resident = Resident::default();
+            let old: Arc<[u8]> = Arc::from([1, 2, 3, 4]);
+            let current: Arc<[u8]> = Arc::from([5, 6, 7, 8]);
+            let queued: Arc<[u8]> = Arc::from([9, 10, 11, 12]);
+            let old_buffer = resident.buffer(gl, &old).unwrap();
+            let current_buffer = resident.buffer(gl, &current).unwrap();
+            let queued_buffer = resident.buffer(gl, &queued).unwrap();
+            drop(old);
+            assert!(resident.prune_orphans(gl));
+            assert_eq!(resident.bytes, resident_cost(4) * 2);
+            // SAFETY: the context is current on this worker thread.
+            unsafe {
+                assert!(!gl.is_buffer(old_buffer));
+                assert!(gl.is_buffer(current_buffer));
+                assert!(gl.is_buffer(queued_buffer));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(current_buffer));
+                let read = gl.map_buffer_range(glow::ARRAY_BUFFER, 0, 4, glow::MAP_READ_BIT);
+                assert!(!read.is_null());
+                assert_eq!(std::slice::from_raw_parts(read, 4), &[5, 6, 7, 8]);
+                gl.unmap_buffer(glow::ARRAY_BUFFER);
+            }
+            assert!(!resident.prune_orphans(gl));
+            drop(current);
+            drop(queued);
+            assert!(resident.prune_orphans(gl));
+            assert_eq!(resident.bytes, 0);
+            assert!(resident.buffers.is_empty());
+        });
+        // Join shader compilation before process/driver teardown.
+        gles.stop();
+    }
+
+    #[test]
+    fn resident_constants_compare_float_bits() {
+        assert!(Attribute::Constant([0.0; 4]) != Attribute::Constant([-0.0, 0.0, 0.0, 0.0]));
+        let nan = f32::from_bits(0x7fc0_1234);
+        assert!(Attribute::Constant([nan; 4]) == Attribute::Constant([nan; 4]));
+        assert!(Attribute::Constant([nan; 4]) != Attribute::Constant([f32::from_bits(0x7fc0_1235); 4]));
+        let array = |offset| Attribute::Array { offset, ty: 3, count: 4, stride: 16 };
+        assert!(array(0) == array(0));
+        assert!(array(0) != array(16));
+    }
+
+    #[test]
+    fn resident_cache_hits_keep_vertices_alive_for_new_indices() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        let (vertex_array, shaded_array, blank) = (gles.vertex_array, gles.shaded_array, gles.blank);
+        let observed = gles.worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            // SAFETY: all objects and accesses are on the owning GL thread.
+            unsafe {
+                eprintln!("resident-lifetime GLES renderer: {}; vendor: {}", gl.get_parameter_string(glow::RENDERER), gl.get_parameter_string(glow::VENDOR));
+                let vertex = "#version 310 es\nlayout(location = 0) in vec4 first;\nlayout(location = 0) out vec4 passed;\nvoid main() { vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0); gl_Position = vec4(p, 0.0, 1.0); passed = first; }\n";
+                let fragment = "#version 310 es\nprecision highp float;\nlayout(location = 0) in vec4 passed;\nlayout(location = 0) out vec4 color;\nvoid main() { color = passed; }\n";
+                let program = link(gl, vertex, fragment).unwrap();
+                let image = gl.create_renderbuffer().unwrap();
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(image));
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, 1, 1);
+                let framebuffer = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(image));
+                assert_eq!(gl.check_framebuffer_status(glow::FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+                disturb();
+                // Exactly the real 64 MiB budget: no fabricated accounting,
+                // environment override, or test-only cache implementation.
+                let mut bytes = vec![0; RESIDENT_BYTES];
+                let red: Vec<u8> = [1.0f32, 0.0, 0.0, 1.0].into_iter().flat_map(f32::to_le_bytes).collect();
+                for vertex in bytes[..48].chunks_exact_mut(16) { vertex.copy_from_slice(&red); }
+                let vertices: Arc<[u8]> = bytes.into();
+                let key = (Arc::as_ptr(&vertices) as *const u8 as usize, vertices.len());
+                let index_bytes = || [0u16, 1, 2].into_iter().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+                let mut observations = Vec::new();
+                let mut original_buffer = None;
+                for step in 0..3 {
+                    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                    let prepared = (step > 0).then(|| Arc::<[u8]>::from(index_bytes()));
+                    let geometry = Submit::Shaded {
+                        viewport: [0, 0, 1, 1], cull: 0, uniforms: vec![0; 4],
+                        attributes: Attributes::Resident { arrays: vec![vertices.clone()], slots: vec![(0, Attribute::Array { offset: 0, ty: 3, count: 4, stride: 16 })] },
+                        indices: if prepared.is_none() { index_bytes() } else { Vec::new() },
+                        count: 3, range: (0, 2), resident_indices: prepared,
+                    };
+                    let job = DrawJob {
+                        occlusion: None, framebuffer, program, depth_range: (0.0, 1.0), scissor: [0, 0, 1, 1], color_mask: 0xF,
+                        blend: None, depth: None, depth_mask: false, stencil: None, bound: [(blank, None); 6],
+                        uniforms: vec![0; 4], vertex_array, shaded_array, geometry, targets: [None, None], sources: [None; 3], tables: None,
+                    };
+                    job.submit(GlRef(gl)).unwrap();
+                    let current = local(|local| local.resident.buffers.get(&key).map(|(buffer, _, used)| (*buffer, *used == local.resident.draws)));
+                    if step == 0 { original_buffer = current.map(|(buffer, _)| buffer); }
+                    let alive = original_buffer.is_some_and(|buffer| gl.is_buffer(buffer));
+                    let mut pixel = [0u8; 4];
+                    gl.read_pixels(0, 0, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixel)));
+                    observations.push((current == original_buffer.map(|buffer| (buffer, true)), alive, pixel, gl.get_error()));
+                }
+                gl.delete_program(program); gl.delete_framebuffer(framebuffer); gl.delete_renderbuffer(image);
+                disturb();
+                observations
+            }
+        });
+        // Shut down even when a regression assertion below will fail.
+        gles.stop();
+        assert_eq!(observed.len(), 3);
+        for (step, (same_and_current, alive, pixel, error)) in observed.into_iter().enumerate() {
+            assert!(same_and_current && alive, "step {step}: cached vertex buffer lost before draw");
+            assert_eq!(pixel, [255, 0, 0, 255], "step {step}: current/next cache hit pixels");
+            assert_eq!(error, glow::NO_ERROR, "step {step}: GL error");
+        }
+    }
+
+    #[test]
+    fn live_texture_aliases_avoid_repeated_content_checks() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        let bounds: Vec<_> = (0..300).map(|_| BoundTexture {
+            texels: Arc::from(vec![[255, 0, 0, 255]; 2]), packed: None, drawn: None, linear: false,
+            wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge,
+            width: 2, height: 1, border: [0.0; 4], levels: 1, lod: Default::default(),
+        }).collect();
+        let first = gles.texture(&bounds[0]).unwrap();
+        for bound in &bounds { assert_eq!(gles.texture(bound).unwrap(), first); }
+        let checks = gles.texture_content_checks;
+        for bound in bounds.iter().rev().cycle().take(900) {
+            assert_eq!(gles.texture(bound).unwrap(), first);
+        }
+        gles.worker.run(|| {});
+        assert_eq!(gles.textures.len(), 1);
+        assert_eq!(gles.texture_content_checks, checks, "alternating live aliases must avoid repeated payload hashing and content scans");
+    }
+
+    #[test]
+    fn packed_texture_aliases_validate_the_packed_allocation() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        let bounds: Vec<_> = (0..300).map(|_| BoundTexture {
+            texels: Arc::from([]), packed: Some((Packing::Luminance, Arc::from([64u8, 128]))), drawn: None, linear: false,
+            wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge,
+            width: 2, height: 1, border: [0.0; 4], levels: 1, lod: Default::default(),
+        }).collect();
+        let first = gles.texture(&bounds[0]).unwrap();
+        for bound in &bounds { assert_eq!(gles.texture(bound).unwrap(), first); }
+        let checks = gles.texture_content_checks;
+        for bound in bounds.iter().rev().cycle().take(900) {
+            assert_eq!(gles.texture(bound).unwrap(), first);
+        }
+        assert_eq!(gles.texture_content_checks, checks, "packed aliases also avoid hashing their actual upload bytes again");
+        let alias = gles.texture_aliases.values().next().unwrap();
+        let mismatch = Some((Packing::Luminance, Arc::from([64u8, 128])));
+        assert!(!alias.payload.matches(&bounds[0].texels, &mismatch), "equal contents in a different allocation are not a validated pointer hit");
+        gles.worker.run(|| {});
+    }
+
+    #[test]
+    fn texture_aliases_are_bounded_and_prune_dead_payloads_and_retired_owners() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
+        let bound = |texels: Arc<[[u8; 4]]>, width, height| BoundTexture {
+            texels, packed: None, drawn: None, linear: false,
+            wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge,
+            width, height, border: [0.0; 4], levels: 1, lod: Default::default(),
+        };
+        let canonical = bound(Arc::from(vec![[31, 47, 63, 255]; 512 * 512]), 512, 512);
+        let first = gles.texture(&canonical).unwrap();
+        for _ in 0..32 {
+            let transient = bound(Arc::from(vec![[31, 47, 63, 255]; 512 * 512]), 512, 512);
+            assert_eq!(gles.texture(&transient).unwrap(), first);
+            drop(transient);
+            assert_eq!(gles.texture_aliases.len(), 1, "a miss removes the preceding dead 1 MiB slice before admitting another");
+            assert!(gles.texture_aliases.values().all(|alias| !alias.payload.live()));
+        }
+        // Consume the initial upload's strong reference before inspecting
+        // ownership. Alias weak references are the only remaining cache
+        // ownership of the transient allocations, and pruning drops them.
+        gles.worker.run(|| {});
+        gles.end_batch();
+        assert!(gles.texture_aliases.is_empty(), "end_batch releases all dead weak payload allocations");
+
+        let live: Vec<_> = (0..TEXTURE_ALIAS_LIMIT + 64).map(|_| bound(Arc::from(vec![[31, 47, 63, 255]; 2]), 2, 1)).collect();
+        let live_first = gles.texture(&live[0]).unwrap();
+        for next in &live {
+            assert_eq!(gles.texture(next).unwrap(), live_first);
+            assert!(gles.texture_aliases.len() <= TEXTURE_ALIAS_LIMIT);
+        }
+        assert_eq!(gles.texture_aliases.len(), TEXTURE_ALIAS_LIMIT);
+        let checks = gles.texture_content_checks;
+        assert_eq!(gles.texture(live.last().unwrap()).unwrap(), live_first);
+        assert_eq!(gles.texture_content_checks, checks, "the most recently admitted live alias stays fast");
+        // Keep source allocations alive while the upload retires: removing
+        // its canonical owner must invalidate every alias before reuse.
+        gles.flushes += TEXTURE_KEEP_FLUSHES;
+        gles.end_batch();
+        assert!(gles.textures.is_empty());
+        assert!(gles.texture_aliases.is_empty(), "live aliases do not outlive their canonical upload");
+        let replacement = gles.texture(live.last().unwrap()).unwrap();
+        assert_ne!(replacement, live_first, "a retired alias cannot return its old GL object");
+        assert!(gles.texture_aliases.is_empty(), "a new canonical owner is not its own alias");
+        let transient = bound(Arc::from(vec![[31, 47, 63, 255]; 2]), 2, 1);
+        assert_eq!(gles.texture(&transient).unwrap(), replacement);
+        assert_eq!(gles.texture_aliases.len(), 1);
+        drop(transient);
+        gles.make_room();
+        assert!(gles.texture_aliases.is_empty(), "memory-pressure recovery releases dead weak payload allocations before retrying");
+        assert_eq!(gles.texture(live.last().unwrap()).unwrap(), replacement, "recovery preserves the current batch's canonical upload");
+        gles.worker.run(|| {});
+    }
+
+    #[test]
+    fn repeated_decodes_reuse_exact_uploads_without_aliasing_changed_data() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        let bound = |texels: Vec<[u8; 4]>, width, height| BoundTexture {
+            texels: Arc::from(texels), packed: None, drawn: None, linear: false,
+            wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge,
+            width, height, border: [0.0; 4], levels: 1, lod: Default::default(),
+        };
+        fn pixels(gles: &Gles, texture: glow::Texture, width: i32, height: i32) -> Vec<u8> {
+            gles.worker.run(|| unsafe {
+                let gl = gles.gl;
+                let target = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target));
+                gl.framebuffer_texture_2d(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
+                assert_eq!(gl.check_framebuffer_status(glow::READ_FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+                let mut bytes = vec![0; (width * height * 4) as usize];
+                gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut bytes)));
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                gl.delete_framebuffer(target);
+                bytes
+            })
+        }
+        // Separately allocated payloads emulate repeated LRU eviction/decoding.
+        let first = bound(vec![[255, 0, 0, 255]; 2], 2, 1);
+        let old = Arc::downgrade(&first.texels);
+        let red = gles.texture(&first).unwrap();
+        drop(first);
+        let mut reused = true;
+        for _ in 0..300 {
+            let next = bound(vec![[255, 0, 0, 255]; 2], 2, 1);
+            reused &= gles.texture(&next).unwrap() == red;
+        }
+        // The queued first upload still owns its original bytes until consumed.
+        gles.worker.run(|| {});
+        assert!(reused, "identical new Arcs must reuse the existing GPU upload");
+        assert_eq!(gles.textures.len(), 1, "identical new Arcs cannot accumulate GPU uploads");
+        assert_eq!(old.strong_count(), 1, "one stable canonical payload owns the reused upload");
+        assert!(gles.texture_aliases.len() <= 1, "transient misses promptly prune previous dead aliases");
+        gles.prune_texture_aliases();
+        assert!(gles.texture_aliases.is_empty(), "dead weak aliases cannot retain decoded allocations");
+        let layout = bound(vec![[255, 0, 0, 255]; 2], 1, 2);
+        assert_ne!(gles.texture(&layout).unwrap(), red, "equal bytes with a different shape need separate storage");
+        let changed = bound(vec![[0, 0, 255, 255]; 2], 2, 1);
+        // Force the candidate hash to match: exact comparison must still reject it.
+        let collision = crate::raster::fingerprint(texture_upload_bytes(&changed));
+        for texture in gles.textures.values_mut() { texture.fingerprint = collision; }
+        let blue = gles.texture(&changed).unwrap();
+        assert_ne!(blue, red, "a hash collision cannot reuse different pixels");
+        assert_eq!(pixels(&gles, red.0, 2, 1), [255, 0, 0, 255].repeat(2));
+        assert_eq!(pixels(&gles, blue.0, 2, 1), [0, 0, 255, 255].repeat(2));
+
+        let mut packed = bound(Vec::new(), 2, 1);
+        packed.packed = Some((Packing::Luminance, Arc::from([64u8, 128])));
+        let luminance = gles.texture(&packed).unwrap();
+        packed.packed = Some((Packing::Luminance, Arc::from([64u8, 128])));
+        assert_eq!(gles.texture(&packed).unwrap(), luminance);
+        packed.packed = Some((Packing::Alpha, Arc::from([64u8, 128])));
+        assert_ne!(gles.texture(&packed).unwrap(), luminance, "packing is part of the upload identity");
+        gles.worker.run(|| {});
+    }
+
+    #[test]
+    fn ring_capacity_parser_and_startup_minimums() {
+        for kib in [128, 256, 1024, 8192] {
+            assert_eq!(parse_ring_capacity(&kib.to_string()), Some(kib * 1024));
+        }
+        assert_eq!(parse_ring_capacity(&usize::MAX.to_string()), None);
+        for value in ["", "0", "127", "8193", "-128", "+128", " 128", "128 ", "128KiB", "128.0", "１２８"] {
+            assert_eq!(parse_ring_capacity(value), None, "{value:?}");
+        }
+        assert_eq!(mutable_ring_capacity(8 << 20, glow::ARRAY_BUFFER, 16, None), 8 << 20);
+        assert_eq!(mutable_ring_capacity(8 << 20, glow::ARRAY_BUFFER, 16, Some(128 << 10)), 128 << 10);
+        assert!(mutable_ring_capacity(8 << 20, glow::SHADER_STORAGE_BUFFER, 256, Some(128 << 10)) >= TABLES_SIZE);
+        assert!(mutable_ring_capacity(8 << 20, glow::SHADER_STORAGE_BUFFER, 256 << 10, Some(128 << 10)) >= 256 << 10);
+    }
+
+    #[test]
+    fn capped_mutable_ring_wrap_and_growth_preserve_queued_draws_and_bytes() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        let worker = gles.worker.clone();
+        worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let mut ring = Ring::new_with_cap(gl, glow::ARRAY_BUFFER, 1 << 20, 16, Some(128 << 10)).unwrap();
+            if ring.mapped.is_some() {
+                assert_eq!(ring.size, 1 << 20, "persistent storage retains its original immutable size");
+                assert!(ring.push(gl, glow::ARRAY_BUFFER, &vec![0; (ring.size / 4) + 1]).is_err(), "the original persistent quarter limit remains enforced");
+                eprintln!("persistent ring request preserved; mutable wrap fixture requires a nonpersistent context");
+                return;
+            }
+            assert_eq!(ring.size, 128 << 10);
+            let name = ring.buffer;
+            let payload = |length, color: [f32; 4]| {
+                let mut bytes: Vec<u8> = (0..length).map(|i| (i * 37 + 11) as u8).collect();
+                for vertex in 0..3 {
+                    for (component, value) in color.iter().enumerate() {
+                        bytes[vertex * 16 + component * 4..vertex * 16 + component * 4 + 4].copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+                bytes
+            };
+            let red = payload(96 << 10, [1.0, 0.0, 0.0, 1.0]);
+            let green = payload(96 << 10, [0.0, 1.0, 0.0, 1.0]);
+            let blue = payload((256 << 10) + 17, [0.0, 0.0, 1.0, 1.0]);
+            let vertex = "#version 310 es\nlayout(location = 0) in vec4 color;\nlayout(location = 0) out vec4 passed;\nvoid main() { vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0); gl_Position = vec4(p, 0.0, 1.0); passed = color; }\n";
+            let fragment = "#version 310 es\nprecision highp float;\nlayout(location = 0) in vec4 passed;\nlayout(location = 0) out vec4 color;\nvoid main() { color = passed; }\n";
+            let program = link(gl, vertex, fragment).unwrap();
+            // SAFETY: all objects and accesses are on the GL thread.
+            unsafe {
+                let image = gl.create_renderbuffer().unwrap();
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(image));
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, 1, 1);
+                let target = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(image));
+                assert_eq!(gl.check_framebuffer_status(glow::FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+                let array = gl.create_vertex_array().unwrap();
+                gl.bind_vertex_array(Some(array));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(ring.buffer));
+                gl.enable_vertex_attrib_array(0);
+                gl.vertex_attrib_pointer_f32(0, 4, glow::FLOAT, false, 16, 0);
+                gl.viewport(0, 0, 1, 1);
+                gl.color_mask(true, true, true, true);
+                for capability in [glow::BLEND, glow::DEPTH_TEST, glow::STENCIL_TEST, glow::SCISSOR_TEST, glow::CULL_FACE] { gl.disable(capability); }
+                gl.use_program(Some(program));
+                let pixel = || {
+                    let mut pixel = [0u8; 4];
+                    gl.read_pixels(0, 0, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixel)));
+                    pixel
+                };
+                let contents = |expected: &[u8]| {
+                    let mapped = gl.map_buffer_range(glow::ARRAY_BUFFER, 0, expected.len() as i32, glow::MAP_READ_BIT);
+                    assert!(!mapped.is_null());
+                    assert_eq!(std::slice::from_raw_parts(mapped, expected.len()), expected);
+                    gl.unmap_buffer(glow::ARRAY_BUFFER);
+                };
+                assert_eq!(ring.push(gl, glow::ARRAY_BUFFER, &red).unwrap(), 0);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                // The preceding draw refers to the old store, while the same
+                // object name now receives a wrapped/orphaned green store.
+                assert_eq!(ring.push(gl, glow::ARRAY_BUFFER, &green).unwrap(), 0);
+                assert_eq!(ring.laps, 1);
+                assert_eq!(pixel(), [255, 0, 0, 255]);
+                contents(&green);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                assert_eq!(ring.push(gl, glow::ARRAY_BUFFER, &blue).unwrap(), 0);
+                assert_eq!(ring.buffer, name, "VAO references stay valid during growth");
+                assert!(ring.size >= blue.len());
+                assert_eq!(gl.get_buffer_parameter_i32(glow::ARRAY_BUFFER, glow::BUFFER_SIZE) as usize, ring.size);
+                assert_eq!(pixel(), [0, 255, 0, 255]);
+                contents(&blue);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                assert_eq!(pixel(), [0, 0, 255, 255]);
+                let tables = Ring::new_with_cap(gl, glow::SHADER_STORAGE_BUFFER, 8 << 20, 256, Some(128 << 10)).unwrap();
+                assert!(tables.size >= TABLES_SIZE);
+                gl.bind_buffer_range(glow::SHADER_STORAGE_BUFFER, 4, Some(tables.buffer), 0, TABLES_SIZE as i32);
+                gl.use_program(None);
+                gl.delete_program(program);
+                gl.delete_buffer(tables.buffer);
+                gl.delete_buffer(ring.buffer);
+                gl.delete_vertex_array(array);
+                gl.delete_framebuffer(target);
+                gl.delete_renderbuffer(image);
+            }
+        });
+        // Join shader compilation before process/driver teardown.
+        gles.stop();
+    }
+
     /// guest memory as one flat block from address zero.
     struct Flat(Vec<u8>);
 
@@ -4845,6 +5653,166 @@ mod tests {
     }
 
     #[test]
+    fn fragment_uniform_liveness_preserves_pixels_across_program_modes() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        gles.worker.clone().run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let vertex = "#version 310 es\nprecision highp float;\nlayout(location=0) out vec4 in_color;\nlayout(location=1) out vec4 in_texcoords01;\nlayout(location=2) out vec2 in_texcoord2;\nlayout(location=3) out float in_depth_w;\nlayout(location=4) out vec4 in_quaternion;\nlayout(location=5) out vec4 in_view;\nlayout(location=6) out float in_w;\nvoid main(){ vec2 p=vec2(gl_VertexID==1?3.0:-1.0,gl_VertexID==2?3.0:-1.0); gl_Position=vec4(p,0.0,1.0); in_color=vec4(0.0,0.0,1.0,1.0); in_texcoords01=vec4(0.0); in_texcoord2=vec2(0.0); in_depth_w=0.5; in_w=1.0; in_quaternion=vec4(0.0,0.0,0.0,1.0); in_view=vec4(0.0,0.0,1.0,1.0); }\n";
+            let mut a = [0u32; FRAGMENT_CONSTANTS];
+            a[..6].fill(0x000F_000F);
+            a[0] = 0x000E_000E;
+            let mut b = a;
+            b[0] = 0x000F_000F;
+            b[1] = 0x000E_000E;
+            let generic = generic_constants(&a);
+            let selected: Vec<_> = [&a, &b, &generic].into_iter().map(|constants| {
+                let fragment = fragment_source(constants, false, &[]);
+                let program = link(gl, vertex, &fragment).unwrap();
+                SelectedFragmentProgram::new(program, constants)
+            }).collect();
+            assert_eq!(selected[2].uniforms, FragmentUniformLiveness::All,
+                "a successfully built generic program is still all-live");
+            let words = |constants: &[u32; FRAGMENT_CONSTANTS]| {
+                let mut words = vec![0; UNIFORM_WORDS];
+                for stage in 0..6 {
+                    words[stage * 8] = constants[stage];
+                    words[stage * 8 + 1] = constants[6 + stage];
+                    words[stage * 8 + 2] = constants[12 + stage];
+                    words[stage * 8 + 4] = constants[18 + stage];
+                }
+                let colors = UNIFORM_WORDS - COLOR_WORDS - FOG_WORDS;
+                for (stage, color) in [[1f32,0.0,0.0,1.0],[0.0,1.0,0.0,1.0]].iter().enumerate() {
+                    words[colors + stage * 4..colors + stage * 4 + 4].copy_from_slice(&color.map(f32::to_bits));
+                }
+                words
+            };
+            let mut changed_a = words(&a);
+            let colors = UNIFORM_WORDS - COLOR_WORDS - FOG_WORDS;
+            changed_a[colors + 4..colors + 8].copy_from_slice(&[0f32,0.0,1.0,1.0].map(f32::to_bits));
+            changed_a[3] = 0xDEAD_BEEF;
+            let mut changed_b = words(&b);
+            changed_b[colors] = 0.5f32.to_bits();
+            let draws = [(0, words(&a)), (0, changed_a), (2, words(&b)),
+                (2, changed_b.clone()), (1, changed_b), (0, words(&a)), (2, words(&a))];
+            // SAFETY: all objects/accesses are confined to the GL thread.
+            unsafe {
+                let image = gl.create_renderbuffer().unwrap();
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(image));
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, 1, 1);
+                let target = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(image));
+                assert_eq!(gl.check_framebuffer_status(glow::FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+                let array = gl.create_vertex_array().unwrap();
+                gl.bind_vertex_array(Some(array));
+                gl.viewport(0,0,1,1);gl.color_mask(true,true,true,true);
+                for state in [glow::BLEND,glow::DEPTH_TEST,glow::STENCIL_TEST,glow::SCISSOR_TEST,glow::CULL_FACE,glow::DITHER] { gl.disable(state); }
+                let buffers = [gl.create_buffer().unwrap(),gl.create_buffer().unwrap()];
+                let render = |program, buffer, upload: Option<&[u32]>| {
+                    gl.use_program(Some(program));
+                    gl.bind_buffer(glow::UNIFORM_BUFFER, Some(buffer));
+                    if let Some(words) = upload { gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, word_bytes(words), glow::STREAM_DRAW); }
+                    gl.bind_buffer_base(glow::UNIFORM_BUFFER, 3, Some(buffer));
+                    gl.clear_color(0.0,0.0,0.0,0.0);gl.clear(glow::COLOR_BUFFER_BIT);
+                    gl.draw_arrays(glow::TRIANGLES,0,3);
+                    let mut pixel=[0;4];
+                    gl.read_pixels(0,0,1,1,glow::RGBA,glow::UNSIGNED_BYTE,glow::PixelPackData::Slice(Some(&mut pixel)));
+                    assert_eq!(gl.get_error(),glow::NO_ERROR);
+                    pixel
+                };
+                let mut cached = Vec::new();
+                let mut uploads = 0;
+                for (index, (mode, raw)) in draws.iter().enumerate() {
+                    // The reuse tuple owns raw words and associated mode;
+                    // canonicalization operates on a separate submission copy.
+                    let reused = (raw.clone(), selected[*mode]);
+                    let mut submitted = reused.0.clone();
+                    reused.1.uniforms.canonicalize(&mut submitted);
+                    assert_eq!(reused.0, *raw, "reuse cache remains raw");
+                    let reference = render(reused.1.program, buffers[0], Some(raw));
+                    let changed = cached != submitted;
+                    let actual = render(reused.1.program, buffers[1], changed.then_some(submitted.as_slice()));
+                    if changed { cached = submitted; uploads += 1; }
+                    assert_eq!(actual,reference,"mode transition{index}");
+                    assert_eq!(actual,if [0,1,5,6].contains(&index) {[255,0,0,255]} else {[0,255,0,255]});
+                    if index == 1 { assert!(!changed,"dead-only differences avoid the upload"); }
+                    if index == 3 { assert!(changed,"generic reuse retains even unused register/color differences"); }
+                }
+                assert_eq!(uploads, draws.len()-1);
+                // Negative control: wrongly reusing a static mask for the
+                // generic program must visibly corrupt this fixture's pixel.
+                let mut wrong = words(&b);
+                selected[0].uniforms.canonicalize(&mut wrong);
+                assert_ne!(render(selected[2].program,buffers[1],Some(&wrong)),[0,255,0,255]);
+                for buffer in buffers { gl.delete_buffer(buffer); }
+                gl.delete_vertex_array(array);gl.delete_framebuffer(target);gl.delete_renderbuffer(image);
+                for selected in selected { gl.delete_program(selected.program); }
+            }
+        });
+        // Join shader compilation before process/driver teardown.
+        gles.stop();
+    }
+
+    #[test]
+    fn default_policy_prepares_generic_fallbacks_in_background() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        let mut constants = [0u32; FRAGMENT_CONSTANTS];
+        constants[29] = 1;
+        let count = gles.programs.keys().filter(|key| key.0[29] != 0).count()
+            + gles.compiler.as_ref().map_or(0, |compiler| compiler.pending.iter().filter(|key| key.0[29] != 0).count());
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
+        assert_eq!(count, 8, "startup prepares every generic fallback, without explicit stand-ins");
+        let program = gles.program(&constants, false, &[], 0, true, None).unwrap().unwrap();
+        assert_eq!(gles.program(&constants, false, &[], 0, true, None).unwrap(), Some(program));
+        assert_eq!(gles.programs.keys().filter(|key| key.0[29] != 0).count(), 8);
+    }
+
+    #[test]
+    fn periodic_program_retirement_requires_explicit_policy() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        assert_eq!(gles.retire_idle_programs, std::env::var_os("ZAKURO_RETIRE_PROGRAMS").is_some());
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
+        let worker = gles.worker.clone();
+        let program = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("current GL context");
+            build_program(gl, "#version 310 es\nvoid main() { gl_Position=vec4(0.0); }\n",
+                "#version 310 es\nprecision highp float; layout(location=0) out vec4 color; void main() { color=vec4(1.0); }\n", None).unwrap()
+        });
+        let mut constants = [0u32; FRAGMENT_CONSTANTS];
+        constants[0] = 0x1234;
+        let key = (constants, false, Vec::new(), 0);
+        gles.programs.insert(key.clone(), program);
+        gles.program_admitted.insert(program, 0);
+        gles.program_used.insert(program, 0);
+        gles.retire_idle_programs = false;
+        gles.flushes = PROGRAM_KEEP_FLUSHES + RETIRE_EVERY - 1;
+        gles.end_batch();
+        assert_eq!(gles.programs.get(&key), Some(&program), "default policy preserves idle/prewarmed programs");
+        gles.retire_idle_programs = true;
+        gles.flushes += RETIRE_EVERY - 1;
+        gles.end_batch();
+        let alive = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("current GL context");
+            // SAFETY: on the owner context after the retirement job.
+            unsafe { gl.is_program(program) }
+        });
+        assert!(!gles.programs.contains_key(&key) && !alive, "explicit opt-in retains periodic deletion mechanics");
+    }
+
+    #[test]
     fn every_generic_stand_in_builds() {
         let gles = match Gles::new() {
             Ok(gles) => gles,
@@ -4902,15 +5870,15 @@ mod tests {
                     constants[28] = if writes_depth { WRITES_DEPTH } else { 0 };
                     let fragment = fragment_source(&generic_constants(&constants), writes_depth, &[]);
                     let token = build_separable(gl, VERTEX_SOURCE, &fragment).expect("the stages build");
-                    let (vertex, fragment) = SEPARATE.lock().unwrap().as_ref().unwrap()[&(SHARE_GROUP.get(), token)];
+                    let (vertex, fragment) = SEPARATE.lock().unwrap().as_ref().unwrap()[&(SHARE_GROUP.get(), token)].clone();
                     // SAFETY: on the GL thread with its context current
                     unsafe {
                         let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
                         let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
                         let mut pipeline = 0u32;
                         generate(1, &mut pipeline);
-                        stages_of(pipeline, VERTEX_SHADER_BIT, vertex.0.get());
-                        stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.0.get());
+                        stages_of(pipeline, VERTEX_SHADER_BIT, vertex.program.0.get());
+                        stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.program.0.get());
                         let validate: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(5));
                         let status: extern "system" fn(u32, u32, *mut i32) = std::mem::transmute(pipeline_fn(6));
                         let log: extern "system" fn(u32, i32, *mut i32, *mut u8) = std::mem::transmute(pipeline_fn(7));
@@ -4930,6 +5898,265 @@ mod tests {
             failures
         });
         assert!(failures.is_empty(), "pipelines that did not validate: {failures:#?}");
+    }
+
+    #[test]
+    fn retired_separable_pair_reloads_with_identical_pixels() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        if (0..PIPELINE_NEEDED).any(|index| pipeline_fn(index) == 0) { eprintln!("no program pipelines here, skipped"); return; }
+        // Settle startup prewarming before checking retired raw GL names.
+        // The shared compiler can otherwise allocate new programs while this
+        // fixture observes deletion, including reusing a just-retired name.
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
+        let worker = gles.worker.clone();
+        worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let vertex = "#version 310 es\n// pair reload pixel fixture\nvoid main() { vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0); gl_Position = vec4(p, 0.0, 1.0); }\n";
+            let fragment = "#version 310 es\nprecision highp float;\nlayout(location = 0) out vec4 color;\nvoid main() { color = vec4(0.25, 0.5, 0.75, 1.0); }\n";
+            // SAFETY: on the GL thread, using an isolated one-pixel target.
+            unsafe {
+                let image = gl.create_renderbuffer().unwrap();
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(image));
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, 1, 1);
+                let target = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(image));
+                assert_eq!(gl.check_framebuffer_status(glow::FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+                let vertices = gl.create_vertex_array().unwrap();
+                gl.bind_vertex_array(Some(vertices));
+                gl.viewport(0, 0, 1, 1);
+                gl.color_mask(true, true, true, true);
+                for capability in [glow::BLEND, glow::DEPTH_TEST, glow::STENCIL_TEST, glow::SCISSOR_TEST, glow::CULL_FACE] {
+                    gl.disable(capability);
+                }
+                let render = |token| {
+                    let (vertex, fragment) = SEPARATE.lock().unwrap().as_ref().unwrap()[&(SHARE_GROUP.get(), token)].clone();
+                    let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
+                    let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
+                    let bind: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(4));
+                    let mut pipeline = 0;
+                    generate(1, &mut pipeline);
+                    stages_of(pipeline, VERTEX_SHADER_BIT, vertex.program.0.get());
+                    stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.program.0.get());
+                    PIPELINES.with(|pipelines| pipelines.borrow_mut().insert(token, pipeline));
+                    gl.use_program(None);
+                    bind(pipeline);
+                    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                    let mut pixel = [0u8; 4];
+                    gl.read_pixels(0, 0, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixel)));
+                    (pixel, vertex.program, fragment.program)
+                };
+                let first = build_separable(gl, vertex, fragment).unwrap();
+                let (before, v, f) = render(first);
+                assert_ne!(before, [0; 4], "the fixture draws rather than retaining the clear");
+                assert_eq!(before[3], 255);
+                delete_program(gl, first);
+                prune_stages(gl);
+                assert!(!gl.is_program(v) && !gl.is_program(f), "the old pair's stages really were reclaimed");
+                let second = build_separable(gl, vertex, fragment).unwrap();
+                let (after, _, _) = render(second);
+                assert_eq!(before, after, "requesting the same pair after eviction reproduces its pixels");
+                delete_program(gl, second);
+                prune_stages(gl);
+                gl.delete_vertex_array(vertices);
+                gl.delete_framebuffer(target);
+                gl.delete_renderbuffer(image);
+            }
+        });
+    }
+
+    #[test]
+    fn separable_inflight_stage_reservation_prevents_reclaim() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        if pipeline_fn(0) == 0 { eprintln!("no separable programs here, skipped"); return; }
+        let worker = gles.worker.clone();
+        worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let reserved = stage_program(gl, glow::VERTEX_SHADER, "#version 310 es\n// in-flight stage lease\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n").unwrap();
+            let program = reserved.program;
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let held = barrier.clone();
+            let compiler = std::thread::spawn(move || {
+                held.wait();
+                held.wait();
+                // Releasing a compiler's lease must not invoke GL here.
+                drop(reserved);
+            });
+            barrier.wait();
+            prune_stages(gl);
+            // SAFETY: on the sharing GL thread.
+            unsafe { assert!(gl.is_program(program), "a compiler still reserves this stage"); }
+            barrier.wait();
+            compiler.join().unwrap();
+            prune_stages(gl);
+            // SAFETY: on the sharing GL thread after explicit pruning.
+            unsafe { assert!(!gl.is_program(program), "a cache-only stage is reclaimed after its lease ends"); }
+        });
+    }
+
+    #[test]
+    fn separable_pairs_share_stage_until_the_final_pipeline_retires() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        if (0..PIPELINE_NEEDED).any(|index| pipeline_fn(index) == 0) { eprintln!("no program pipelines here, skipped"); return; }
+        let worker = gles.worker.clone();
+        worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            let vertex = "#version 310 es\n// shared stage retirement\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+            let fragment = |red: u32| format!("#version 310 es\nprecision highp float;\nlayout(location = 0) out vec4 color;\nvoid main() {{ color = vec4({red}.0, 0.0, 0.0, 1.0); }}\n");
+            let first = build_separable(gl, vertex, &fragment(0)).unwrap();
+            let second = build_separable(gl, vertex, &fragment(1)).unwrap();
+            let (shared, a, b) = {
+                let pairs = SEPARATE.lock().unwrap();
+                let pairs = pairs.as_ref().unwrap();
+                let (v1, f1) = &pairs[&(SHARE_GROUP.get(), first)];
+                let (v2, f2) = &pairs[&(SHARE_GROUP.get(), second)];
+                assert!(Arc::ptr_eq(v1, v2), "both pairs reserve the exact same stage");
+                (v1.program, f1.program, f2.program)
+            };
+            // Build actual context-local pipelines, including one left bound
+            // while retired. They must go before the stage leases are released.
+            // SAFETY: every required pipeline function was loaded above.
+            unsafe {
+                let generate: extern "system" fn(i32, *mut u32) = std::mem::transmute(pipeline_fn(1));
+                let stages_of: extern "system" fn(u32, u32, u32) = std::mem::transmute(pipeline_fn(3));
+                let bind: extern "system" fn(u32) = std::mem::transmute(pipeline_fn(4));
+                for (token, fragment) in [(first, a), (second, b)] {
+                    let mut pipeline = 0;
+                    generate(1, &mut pipeline);
+                    stages_of(pipeline, VERTEX_SHADER_BIT, shared.0.get());
+                    stages_of(pipeline, FRAGMENT_SHADER_BIT, fragment.0.get());
+                    PIPELINES.with(|pipelines| pipelines.borrow_mut().insert(token, pipeline));
+                    gl.use_program(None);
+                    bind(pipeline);
+                }
+                delete_program(gl, first);
+                prune_stages(gl);
+                assert!(!gl.is_program(a), "the retired pair's exclusive stage is reclaimed");
+                assert!(gl.is_program(shared) && gl.is_program(b), "the second pipeline still owns its stages");
+                delete_program(gl, second);
+                prune_stages(gl);
+                assert!(!gl.is_program(shared) && !gl.is_program(b), "final pipeline deletion releases the last stage owners");
+                assert!(PIPELINES.with(|pipelines| !pipelines.borrow().contains_key(&first) && !pipelines.borrow().contains_key(&second)));
+            }
+        });
+    }
+
+    #[test]
+    fn queued_work_precedes_program_retirement_and_new_programs_keep_their_grace() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        if separable() {
+            eprintln!("monolithic program retirement test, skipped with separable stages");
+            // The standalone skipped fixture can exit before prewarming ends.
+            gles.stop();
+            return;
+        }
+        let worker = gles.worker.clone();
+        let handles = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            std::array::from_fn::<_, 5, _>(|i| {
+                let vertex = format!("#version 310 es\nvoid main() {{ gl_Position = vec4({}.0, 0.0, 0.0, 1.0); }}\n", i);
+                let fragment = "#version 310 es\nprecision highp float;\nlayout(location = 0) out vec4 color;\nvoid main() { color = vec4(1.0); }\n";
+                build_program(gl, &vertex, fragment, None).expect("a test program links")
+            })
+        });
+        for (i, &program) in handles.iter().enumerate() {
+            let mut constants = [0; FRAGMENT_CONSTANTS];
+            constants[29] = (i == 2) as u32;
+            gles.programs.insert((constants, false, Vec::new(), i as u64 + 1), program);
+            gles.program_admitted.insert(program, if i == 1 { 601 } else { 0 });
+            gles.program_used.insert(program, match i { 3 => 601, 4 => 1, _ => 0 });
+        }
+        let stale = handles[0];
+        gles.fragment = Some(((0, 0, [false; 3], false, false, 0), Vec::new(), SelectedFragmentProgram {
+            program: stale, uniforms: FragmentUniformLiveness::All,
+        }));
+        gles.stamped = Some((stale, 0));
+        gles.flushes = 601;
+        let order = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let before = order.clone();
+        // Keep prior work in the producer's partial batch. A direct channel
+        // send would miss the ordering path used by fewer than sixteen draws.
+        worker.hold(worker.held.lock().unwrap(), Held::Job(Box::new(move || {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            // SAFETY: on the GL thread; this work was queued before retirement.
+            unsafe {
+                assert!(gl.is_program(stale), "prior queued work still owns a live program");
+                gl.use_program(Some(stale));
+            }
+            before.store(1, std::sync::atomic::Ordering::Release);
+        })));
+        assert_eq!(worker.held.lock().unwrap().len(), 1);
+        gles.retire_programs();
+        assert_eq!(worker.held.lock().unwrap().len(), 2, "retirement follows the still-held work in the same partial batch");
+        assert_eq!(order.load(std::sync::atomic::Ordering::Acquire), 0, "the partial batch has not been sent yet");
+        let after = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            // SAFETY: on the GL thread after the queued retirement job.
+            unsafe { (gl.is_program(stale), gl.get_parameter_i32(glow::CURRENT_PROGRAM), handles[1..].iter().all(|&program| gl.is_program(program))) }
+        });
+        assert_eq!(order.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(!after.0, "retirement releases the old bound program, rather than deferring its deletion");
+        assert_eq!(after.1, 0, "a retiring bound program is unbound");
+        assert!(after.2, "admission grace, stand-ins, recent use and the age boundary are retained");
+        assert!(!gles.programs.values().any(|&program| program == stale));
+        assert!(!gles.program_used.contains_key(&stale));
+        assert!(!gles.program_admitted.contains_key(&stale));
+        assert!(gles.fragment.is_none() && gles.stamped.is_none());
+        gles.stop();
+    }
+
+    #[test]
+    fn separable_stage_keeps_the_program_without_retaining_its_shader() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        if pipeline_fn(0) == 0 {
+            eprintln!("no separable programs here, skipped");
+            return;
+        }
+        // The test must compile its stage, rather than load a saved binary.
+        // This source belongs only to this test; remove only its own cache.
+        const SOURCE: &str = "#version 310 es\n// separable shader lifetime regression\nvoid main() { gl_Position = vec4(0.25, 0.5, 0.75, 1.0); }\n";
+        let cached = RENDERER_NAME.get().and_then(|name| program_cache_path(name, "separable vertex", SOURCE));
+        if let Some(path) = &cached {
+            let _ = std::fs::remove_file(path);
+        }
+        let worker = gles.worker.clone();
+        let (first, second, retained) = worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            assert!(compiled_shader(glow::VERTEX_SHADER, SOURCE).is_none());
+            let first = stage_program(gl, glow::VERTEX_SHADER, SOURCE).expect("the stage links");
+            let second = stage_program(gl, glow::VERTEX_SHADER, SOURCE).expect("the stage is reused");
+            (first, second, compiled_shader(glow::VERTEX_SHADER, SOURCE).is_some())
+        });
+        if let Some(path) = cached {
+            let _ = std::fs::remove_file(path);
+        }
+        assert_eq!(first, second, "the linked stage is reused without compiling again");
+        assert!(!retained, "the linked stage already owns its executable; the detached shader should be released");
     }
 
     #[test]

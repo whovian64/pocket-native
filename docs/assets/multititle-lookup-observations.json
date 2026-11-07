@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "source_control_revision": "138a932c817d6d01f2146be5ac3a24d0cd2c0827",
+  "scope": "Private instrumentation, cumulative call-prefix snapshots and equal-capacity shadow simulations. Not timings or complete-run lookup totals. Native libraries remain original baseline builds.",
+  "observations": [
+    {
+      "title": "omega-ruby",
+      "coverage": "Cumulative snapshot through the last 1048576-call checkpoint before probe exit; final tail is not captured, and module placement resets tags/compulsory-address history. Not complete-run totals.",
+      "calls": 19922944,
+      "hits": 19839668,
+      "misses": 83276,
+      "cold_misses": 14034,
+      "replacement_misses": 69242,
+      "folded_shadow_misses": 23870,
+      "two_way_shadow_misses": 19888,
+      "per_module": [
+        {
+          "module": "DllBackGround",
+          "calls": 5,
+          "hits": 3,
+          "cold_misses": 2,
+          "replacement_misses": 0,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllField",
+          "calls": 2085922,
+          "hits": 2055266,
+          "cold_misses": 1734,
+          "replacement_misses": 28922,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllFieldDemo",
+          "calls": 522,
+          "hits": 464,
+          "cold_misses": 58,
+          "replacement_misses": 0,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllSequence",
+          "calls": 17483,
+          "hits": 17056,
+          "cold_misses": 343,
+          "replacement_misses": 84,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllStartMenu",
+          "calls": 1025,
+          "hits": 979,
+          "cold_misses": 46,
+          "replacement_misses": 0,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllTitle",
+          "calls": 1072,
+          "hits": 1008,
+          "cold_misses": 64,
+          "replacement_misses": 0,
+          "negative_hits": 0
+        },
+        {
+          "module": "main-or-unmapped",
+          "calls": 17816915,
+          "hits": 17764892,
+          "cold_misses": 11787,
+          "replacement_misses": 40236,
+          "negative_hits": 64
+        }
+      ],
+      "instrumented": true,
+      "timing_eligible": false,
+      "packet_prefix": {
+        "packets": 25624576,
+        "eligible": 12485477
+      }
+    },
+    {
+      "title": "pokemon-y",
+      "coverage": "Cumulative snapshot through the last 1048576-call checkpoint before probe exit; final tail is not captured, and module placement resets tags/compulsory-address history. Not complete-run totals.",
+      "calls": 27262976,
+      "hits": 27199543,
+      "misses": 63433,
+      "cold_misses": 13125,
+      "replacement_misses": 50308,
+      "folded_shadow_misses": 27525,
+      "two_way_shadow_misses": 13379,
+      "per_module": [
+        {
+          "module": "DllBackGround",
+          "calls": 8,
+          "hits": 4,
+          "cold_misses": 4,
+          "replacement_misses": 0,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllField",
+          "calls": 1446726,
+          "hits": 1437379,
+          "cold_misses": 1371,
+          "replacement_misses": 7976,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllSequence",
+          "calls": 2206,
+          "hits": 2005,
+          "cold_misses": 144,
+          "replacement_misses": 57,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllStartMenu",
+          "calls": 837,
+          "hits": 789,
+          "cold_misses": 47,
+          "replacement_misses": 1,
+          "negative_hits": 0
+        },
+        {
+          "module": "DllTitle",
+          "calls": 2948120,
+          "hits": 2947712,
+          "cold_misses": 274,
+          "replacement_misses": 134,
+          "negative_hits": 0
+        },
+        {
+          "module": "main-or-unmapped",
+          "calls": 22865079,
+          "hits": 22811654,
+          "cold_misses": 11285,
+          "replacement_misses": 42140,
+          "negative_hits": 15309
+        }
+      ],
+      "instrumented": true,
+      "timing_eligible": false,
+      "packet_prefix": {
+        "packets": 63242240,
+        "eligible": 36009373
+      }
+    }
+  ],
+  "instrumentation_patch_sha256": "34cb848d9bd5cdf25da194ec30eca55e65cb0ed8e2d56e1e53040c25759a9bae",
+  "shadow_model": {
+    "folded": "(address >> 1 ^ (address >> 1 >> 16)) & 65535, exact u32 tags",
+    "two_way": "32768 sets, two exact u32 tags, move hit to MRU, evict LRU, same address>>1 low-bit set index",
+    "placement": "all tags and compulsory-address history cleared whenever a known module is placed or removed"
+  }
+}

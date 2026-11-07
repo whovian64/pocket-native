@@ -425,8 +425,11 @@ static inline void (vfp_set_s)(Context *ctx, int r, float value) {
     union { float f; uint32_t u; } val;
     val.f = value;
     uint32_t bits = val.u;
+    uint32_t magnitude = bits & 0x7FFFFFFFu;
+    if (UNLIKELY(magnitude - 0x00800000u > 0x7F000000u && magnitude != 0)) {
     if ((*ctx->fpscr & FPSCR_FZ) && !(bits & 0x7F800000u) && (bits & 0x007FFFFFu)) bits &= 0x80000000u;
     if ((bits & 0x7FFFFFFFu) > 0x7F800000u && (*ctx->fpscr & FPSCR_DN)) bits = 0x7FC00000u;
+    }
     ctx->vfp[r] = bits;
 }
 
@@ -434,9 +437,12 @@ static inline void (vfp_set_d)(Context *ctx, int d, double value) {
     union { double d; uint64_t u; } val;
     val.d = value;
     uint64_t bits = val.u;
+    uint64_t magnitude = bits & 0x7FFFFFFFFFFFFFFFull;
+    if (UNLIKELY(magnitude - 0x0010000000000000ull > 0x7FE0000000000000ull && magnitude != 0)) {
     if ((*ctx->fpscr & FPSCR_FZ) && !(bits & 0x7FF0000000000000ull) && (bits & 0x000FFFFFFFFFFFFFull))
         bits &= 0x8000000000000000ull;
     if ((bits & 0x7FFFFFFFFFFFFFFFull) > 0x7FF0000000000000ull && (*ctx->fpscr & FPSCR_DN)) bits = 0x7FF8000000000000ull;
+    }
     ctx->vfp[2 * d] = (uint32_t)bits;
     ctx->vfp[2 * d + 1] = (uint32_t)(bits >> 32);
 }
@@ -451,8 +457,11 @@ static inline void (vfp_set_d)(Context *ctx, int d, double value) {
     union { float f; uint32_t u; } __v; \
     __v.f = (val); \
     uint32_t __b = __v.u; \
+    uint32_t __magnitude = __b & 0x7FFFFFFFu; \
+    if (UNLIKELY(__magnitude - 0x00800000u > 0x7F000000u && __magnitude != 0)) { \
     if ((*((ctx)->fpscr) & FPSCR_FZ) && !(__b & 0x7F800000u) && (__b & 0x007FFFFFu)) __b &= 0x80000000u; \
     if ((__b & 0x7FFFFFFFu) > 0x7F800000u && (*((ctx)->fpscr) & FPSCR_DN)) __b = 0x7FC00000u; \
+    } \
     (ctx)->vfp[r] = __b; \
 } while (0)
 

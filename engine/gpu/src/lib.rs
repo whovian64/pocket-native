@@ -1129,6 +1129,7 @@ impl Gpu {
 
             let register = (header & 0xFFFF) as usize;
             let mask = (header >> 16) & 0xF;
+            let write_mask = WRITE_MASKS[mask as usize];
             let extra = ((header >> 20) & 0xFF) as usize;
             let consecutive = header & 0x8000_0000 != 0;
 
@@ -1147,7 +1148,7 @@ impl Gpu {
             if extra == 0 && matches!(register, REG_DRAW_ARRAYS | REG_DRAW_ELEMENTS) && self.twin_draw(memory, renderer, register, data, mask, &words, index) {
                 continue;
             }
-            self.write_internal(memory, renderer, register, data, mask);
+            self.write_internal_masked(memory, renderer, register, data, write_mask);
 
             // a burst into one register, uniforms, program words and light
             // tables the most of what a list carries, goes to the units
@@ -1181,14 +1182,32 @@ impl Gpu {
                 continue;
             }
 
-            for i in 0..extra {
+            // The first write above handles a pending immediate draw. Full
+            // consecutive state words can then store directly until the next
+            // action register, retaining each fragment-state invalidation.
+            let mut batched = 0;
+            if extra > 0 && consecutive && mask == 0xF && self.immediate.vertices.is_empty() {
+                let first = register + 1;
+                batched = extra.min(words.len() - index).min(PASSIVE_RUN_END[first] as usize - first);
+                let end = first + batched;
+                let mut changed = 0;
+                for ((old, &new), &fragment) in self.internal[first..end].iter_mut()
+                    .zip(&words[index..index + batched]).zip(&FRAGMENT[first..end]) {
+                    changed += (fragment && *old != new) as u64;
+                    *old = new;
+                }
+                self.resources.fragment_state += changed;
+                index += batched;
+            }
+
+            for i in batched..extra {
                 if index >= words.len() {
                     break;
                 }
                 let value = words[index];
                 index += 1;
                 let target = if consecutive { register + i + 1 } else { register };
-                self.write_internal(memory, renderer, target, value, mask);
+                self.write_internal_masked(memory, renderer, target, value, write_mask);
             }
 
             // each command is padded so its total length (the base pair plus
@@ -1616,6 +1635,18 @@ impl Gpu {
         value: u32,
         mask: u32,
     ) {
+        self.write_internal_masked(memory, renderer, register, value, WRITE_MASKS[(mask & 0xF) as usize]);
+    }
+
+    #[inline(always)]
+    fn write_internal_masked<M: GpuMemory>(
+        &mut self,
+        memory: &mut M,
+        renderer: &mut dyn Renderer,
+        register: usize,
+        value: u32,
+        write_mask: u32,
+    ) {
         if register >= self.internal.len() {
             return;
         }
@@ -1626,26 +1657,10 @@ impl Gpu {
             self.flush_immediate(memory);
         }
 
-        // the mask selects which bytes of the register the write touches, a set
-        // bit writes that byte.
-        const BYTES: [u32; 16] = {
-            let mut masks = [0u32; 16];
-            let mut mask = 0;
-            while mask < 16 {
-                let mut byte = 0;
-                while byte < 4 {
-                    if mask & (1 << byte) != 0 {
-                        masks[mask] |= 0xFF << (byte * 8);
-                    }
-                    byte += 1;
-                }
-                mask += 1;
-            }
-            masks
-        };
-        let write_mask = BYTES[(mask & 0xF) as usize];
         let old = self.internal[register];
-        let new = (old & !write_mask) | (value & write_mask);
+        // Full writes need no byte merge. A command packet expands its
+        // shared byte mask once, including for every extra word.
+        let new = if write_mask == u32::MAX { value } else { (old & !write_mask) | (value & write_mask) };
         self.internal[register] = new;
         self.resources.fragment_state += (new != old && FRAGMENT[register]) as u64;
         if ACTS[register] {
@@ -1743,6 +1758,23 @@ impl Gpu {
     }
 }
 
+/// The command mask selects bytes, one bit per byte of a register.
+const WRITE_MASKS: [u32; 16] = {
+    let mut masks = [0u32; 16];
+    let mut mask = 0;
+    while mask < 16 {
+        let mut byte = 0;
+        while byte < 4 {
+            if mask & (1 << byte) != 0 {
+                masks[mask] |= 0xFF << (byte * 8);
+            }
+            byte += 1;
+        }
+        mask += 1;
+    }
+    masks
+};
+
 /// the registers the fragment stages' words come from, from the viewport's
 /// depth on to the lighting, short of the vertex stages' from 0x200, but for
 /// where the textures are, how big and in what format, which change from
@@ -1801,6 +1833,18 @@ const ACTS: [bool; INTERNAL_REGISTER_WORDS] = {
     acts
 };
 
+/// First action register at or after each index; the sentinel also bounds
+/// consecutive packets that extend past the internal register file.
+const PASSIVE_RUN_END: [u16; INTERNAL_REGISTER_WORDS + 1] = {
+    let mut ends = [INTERNAL_REGISTER_WORDS as u16; INTERNAL_REGISTER_WORDS + 1];
+    let mut register = INTERNAL_REGISTER_WORDS;
+    while register > 0 {
+        register -= 1;
+        ends[register] = if ACTS[register] { register as u16 } else { ends[register + 1] };
+    }
+    ends
+};
+
 /// applies a write to one of a shader unit's configuration registers.
 fn configure_shader(unit: &mut shader::ShaderUnit, offset: usize, value: u32) {
     match offset {
@@ -1839,6 +1883,214 @@ fn external_index(gsp_offset: u32) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference_register_write(gpu: &mut Gpu, memory: &mut FlatMemory, renderer: &mut SoftwareRenderer, register: usize, value: u32, mask: u32) {
+        if register >= gpu.internal.len() {
+            return;
+        }
+        if !gpu.immediate.vertices.is_empty() && !(REG_FIXED_ATTRIBUTE_DATA..=REG_FIXED_ATTRIBUTE_DATA_END).contains(&register) {
+            gpu.flush_immediate(memory);
+        }
+        let old = gpu.internal[register];
+        let mut bytes = old.to_le_bytes();
+        for (byte, incoming) in value.to_le_bytes().into_iter().enumerate() {
+            if mask & (1 << byte) != 0 {
+                bytes[byte] = incoming;
+            }
+        }
+        let new = u32::from_le_bytes(bytes);
+        gpu.internal[register] = new;
+        gpu.resources.fragment_state += (old != new && FRAGMENT[register]) as u64;
+        if ACTS[register] {
+            gpu.act(memory, renderer, register, new);
+        }
+    }
+
+    fn same_register_effects(a: &Gpu, b: &Gpu) {
+        assert_eq!(a.internal, b.internal);
+        assert_eq!(a.resources.fragment_state, b.resources.fragment_state);
+        assert_eq!(a.pending_jump, b.pending_jump);
+        assert_eq!(a.fixed_attribute_words, b.fixed_attribute_words);
+        assert_eq!(a.fixed_attribute_staging, b.fixed_attribute_staging);
+        assert_eq!(a.fixed_attributes.map(|v| v.map(f32::to_bits)), b.fixed_attributes.map(|v| v.map(f32::to_bits)));
+        for (a, b) in [(&a.vertex_shader, &b.vertex_shader), (&a.geometry_shader, &b.geometry_shader)] {
+            assert_eq!(a.program, b.program);
+            assert_eq!(a.descriptors, b.descriptors);
+            assert_eq!(a.program_write_offset, b.program_write_offset);
+            assert_eq!(a.descriptor_write_offset, b.descriptor_write_offset);
+            assert_eq!(a.int_uniforms, b.int_uniforms);
+            assert_eq!(a.bool_uniforms, b.bool_uniforms);
+            for (a, b) in a.float_uniforms.iter().zip(b.float_uniforms.iter()) {
+                assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits));
+            }
+        }
+    }
+
+    #[test]
+    fn register_masks_match_bytewise_writes_including_actions() {
+        let mut actual = Gpu::new();
+        let mut reference = Gpu::new();
+        let mut memory = FlatMemory(vec![0; 0x2000]);
+        let mut reference_memory = FlatMemory(vec![0; 0x2000]);
+        let mut renderer = SoftwareRenderer::default();
+        let mut reference_renderer = SoftwareRenderer::default();
+        // Every passive register, every byte mask, and ignored high mask
+        // bits. Repeated writes must preserve fragment-state accounting.
+        for register in 0..INTERNAL_REGISTER_WORDS {
+            if ACTS[register] {
+                continue;
+            }
+            for mask in 0..32 {
+                for value in [0xA15A_37C8, 0, u32::MAX, u32::MAX] {
+                    actual.write_internal(&mut memory, &mut renderer, register, value, mask);
+                    reference_register_write(&mut reference, &mut reference_memory, &mut reference_renderer, register, value, mask);
+                }
+            }
+        }
+        same_register_effects(&actual, &reference);
+        // Active data ports must advance even for a zero mask or a
+        // repeated value. Index writes and jumps retain their side effects.
+        let registers = [
+            REG_VS_BLOCK + SHADER_UNIFORM_INDEX, REG_VS_BLOCK + SHADER_UNIFORM_DATA,
+            REG_VS_BLOCK + SHADER_PROGRAM_INDEX, REG_VS_BLOCK + SHADER_PROGRAM_DATA,
+            REG_VS_BLOCK + SHADER_DESCRIPTOR_INDEX, REG_VS_BLOCK + SHADER_DESCRIPTOR_DATA,
+            REG_GS_BLOCK + SHADER_PROGRAM_DATA, lighting::REG_TABLE_DATA,
+            proctex::REG_TABLE_DATA, fog::REG_TABLE_DATA, REG_CMDBUF_JUMP0, REG_CMDBUF_JUMP1,
+        ];
+        for mask in 0..32 {
+            for register in registers {
+                for value in [0, 0xABCD_1234, 0xABCD_1234, 0] {
+                    actual.write_internal(&mut memory, &mut renderer, register, value, mask);
+                    reference_register_write(&mut reference, &mut reference_memory, &mut reference_renderer, register, value, mask);
+                }
+                same_register_effects(&actual, &reference);
+            }
+        }
+        for register in [INTERNAL_REGISTER_WORDS, usize::MAX] {
+            actual.write_internal(&mut memory, &mut renderer, register, 1, 0xF);
+            reference_register_write(&mut reference, &mut reference_memory, &mut reference_renderer, register, 1, 0xF);
+        }
+        same_register_effects(&actual, &reference);
+        assert_eq!(memory.0, reference_memory.0);
+    }
+
+    #[test]
+    fn command_packet_masks_match_scalar_register_writes() {
+        let mut actual = Gpu::new();
+        let mut reference = Gpu::new();
+        let mut memory = FlatMemory(vec![0; 0x2000]);
+        let mut reference_memory = FlatMemory(vec![0; 0x2000]);
+        let mut renderer = SoftwareRenderer::default();
+        let mut reference_renderer = SoftwareRenderer::default();
+        for register in [
+            0x03F, 0x080, 0x100, 0x1FF, INTERNAL_REGISTER_WORDS - 1,
+            REG_FIXED_ATTRIBUTE_INDEX - 2, REG_GS_BLOCK - 2,
+            REG_VS_BLOCK + SHADER_UNIFORM_DATA, REG_VS_BLOCK + SHADER_PROGRAM_DATA,
+        ] {
+            for consecutive in [false, true] {
+                for mask in 0..16 {
+                    // Passive full-mask repeated bursts already collapse
+                    // writes and their invalidation counter.
+                    if !ACTS[register] && !consecutive && mask == 0xF {
+                        continue;
+                    }
+                    for extra in 0..8 {
+                        for missing in 0..=extra.min(2) {
+                            let header = register as u32 | (mask << 16) | (extra << 20)
+                                | if consecutive { 0x8000_0000 } else { 0 };
+                            let mut words = vec![0x3F80_0000, header];
+                            words.extend((0..extra - missing).map(|i| 0x8000_0000 ^ (i * 0x102_0304)));
+                            if missing == 0 && extra % 2 != 0 {
+                                words.push(0xDEAD_BEEF);
+                            }
+                            for (bytes, word) in memory.0.chunks_exact_mut(4).zip(&words) {
+                                bytes.copy_from_slice(&word.to_le_bytes());
+                            }
+                            reference_register_write(&mut reference, &mut reference_memory, &mut reference_renderer, register, words[0], mask);
+                            for (i, &word) in words[2..].iter().take((extra - missing) as usize).enumerate() {
+                                let target = register + if consecutive { i + 1 } else { 0 };
+                                reference_register_write(&mut reference, &mut reference_memory, &mut reference_renderer, target, word, mask);
+                            }
+                            actual.run_command_list(&mut memory, &mut renderer, 0, words.len() as u32 * 4);
+                            same_register_effects(&actual, &reference);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn passive_single_word_packets_match_scalar_invalidation() {
+        let mut actual = Gpu::new();
+        let mut reference = Gpu::new();
+        let mut memory = FlatMemory(vec![0; 8]);
+        let mut reference_memory = FlatMemory(vec![0; 8]);
+        let mut renderer = SoftwareRenderer::default();
+        let mut reference_renderer = SoftwareRenderer::default();
+        for register in 0..INTERNAL_REGISTER_WORDS {
+            if ACTS[register] {
+                continue;
+            }
+            for mask in 0..16 {
+                for value in [0xA15A_37C8u32, 0xA15A_37C8, 0, u32::MAX] {
+                    memory.0[..4].copy_from_slice(&value.to_le_bytes());
+                    let header = register as u32 | (mask << 16);
+                    memory.0[4..].copy_from_slice(&header.to_le_bytes());
+                    actual.run_command_list(&mut memory, &mut renderer, 0, 8);
+                    reference_register_write(&mut reference, &mut reference_memory,
+                        &mut reference_renderer, register, value, mask);
+                }
+                same_register_effects(&actual, &reference);
+            }
+        }
+    }
+
+    #[test]
+    fn consecutive_passive_spans_match_scalar_writes_for_every_mask() {
+        let mut actual = Gpu::new();
+        let mut reference = Gpu::new();
+        let mut memory = FlatMemory(vec![0; 0x2000]);
+        let mut reference_memory = FlatMemory(vec![0; 0x2000]);
+        let mut renderer = SoftwareRenderer::default();
+        let mut reference_renderer = SoftwareRenderer::default();
+        let mut seed = 0x94D0_49BBu32;
+        for register in 0..INTERNAL_REGISTER_WORDS {
+            if ACTS[register] {
+                continue;
+            }
+            // Find the bound independently of the fast path's lookup table.
+            let passive_end = (register..INTERNAL_REGISTER_WORDS)
+                .find(|&target| ACTS[target]).unwrap_or(INTERNAL_REGISTER_WORDS);
+            let limit = if passive_end == INTERNAL_REGISTER_WORDS { 255 } else { passive_end - register - 1 };
+            for mask in 0..16 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let extra = ((seed >> 24) as usize).min(limit);
+                for missing in [0, extra.min(2)] {
+                    let header = register as u32 | (mask << 16) | ((extra as u32) << 20) | 0x8000_0000;
+                    let mut words = vec![0, header];
+                    for i in 0..=extra - missing {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        let target = register + i;
+                        // Retain unchanged values as well as changed words,
+                        // including the fragment texture-state exclusions.
+                        let value = if i % 3 == 0 && target < INTERNAL_REGISTER_WORDS { reference.internal[target] } else { seed };
+                        if i == 0 { words[0] = value; } else { words.push(value); }
+                        reference_register_write(&mut reference, &mut reference_memory, &mut reference_renderer, target, value, mask);
+                    }
+                    if missing == 0 && !extra.is_multiple_of(2) {
+                        words.push(0xDEAD_BEEF);
+                    }
+                    for (bytes, word) in memory.0.chunks_exact_mut(4).zip(&words) {
+                        bytes.copy_from_slice(&word.to_le_bytes());
+                    }
+                    actual.run_command_list(&mut memory, &mut renderer, 0, words.len() as u32 * 4);
+                    assert_eq!(actual.internal, reference.internal, "register={register:#x}, mask={mask:#x}, extra={extra}, missing={missing}");
+                    assert_eq!(actual.resources.fragment_state, reference.resources.fragment_state);
+                }
+            }
+        }
+    }
 
     /// guest memory as one flat block starting at address zero.
     struct FlatMemory(Vec<u8>);
@@ -1930,6 +2182,35 @@ mod tests {
         assert_eq!(gpu.vertices_drawn, 3);
         for pixel in memory.0[COLOR_BUFFER as usize..][..8 * 8 * 4].chunks(4) {
             assert_eq!(ColorFormat::Rgba8.decode(pixel), [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn consecutive_state_packets_flush_immediate_vertices_before_state_changes() {
+        for register in [REG_COLOR_BUFFER_WRITE - 1, REG_FIXED_ATTRIBUTE_DATA_END] {
+            let mut memory = FlatMemory(vec![0; 0x2000]);
+            let mut renderer = SoftwareRenderer::default();
+            let mut gpu = gpu_for_immediate_draws(&mut memory, &mut renderer);
+            gpu.write_internal(&mut memory, &mut renderer, REG_FIXED_ATTRIBUTE_INDEX, 0xF, 0xF);
+            let red = [1.0, 0.0, 0.0, 1.0];
+            for position in [[-1.0, -1.0, 0.0, 1.0], [3.0, -1.0, 0.0, 1.0], [-1.0, 3.0, 0.0, 1.0]] {
+                send_vertex(&mut gpu, &mut memory, &mut renderer, &[position, red]);
+            }
+            assert_eq!(gpu.draw_calls, 0);
+            // A passive first word flushes immediately; fixed-attribute data
+            // keeps the vertices pending until the next register is written.
+            let words = [gpu.internal[register], register as u32 | 0x801F_0000, 0, 0];
+            for (bytes, word) in memory.0.chunks_exact_mut(4).zip(words) {
+                bytes.copy_from_slice(&word.to_le_bytes());
+            }
+            gpu.run_command_list(&mut memory, &mut renderer, 0, words.len() as u32 * 4);
+            assert_eq!(gpu.draw_calls, 1);
+            assert_eq!(gpu.vertices_drawn, 3);
+            assert!(gpu.immediate.vertices.is_empty());
+            assert_eq!(gpu.internal[register + 1], 0);
+            for pixel in memory.0[COLOR_BUFFER as usize..][..8 * 8 * 4].chunks(4) {
+                assert_eq!(ColorFormat::Rgba8.decode(pixel), [255, 0, 0, 255]);
+            }
         }
     }
 
@@ -2063,6 +2344,32 @@ mod tests {
         assert_eq!(gpu.internal[0x0100], 0x1111, "the sub-buffer ran");
         assert_eq!(gpu.internal[0x0102], 0x2222, "the jump back ran");
         assert_eq!(gpu.internal[0x0101], 0, "a jump does not return");
+    }
+
+    #[test]
+    fn consecutive_state_prefix_preserves_both_jump_actions() {
+        const SUB: u32 = 0x200;
+        const RETURN: u32 = 0x300;
+        let mut memory = FlatMemory(vec![0; 0x400]);
+        let main = [
+            1, REG_CMDBUF_SIZE0 as u32 | 0x805F_0000,
+            1, SUB >> 3, RETURN >> 3, 1, 1, 0,
+            0xDEAD, 0x0102 | (0xF << 16),
+        ];
+        let sub = command(0x0100, 0x1111);
+        let return_words = command(0x0101, 0x2222);
+        for (address, words) in [(0, main.as_slice()), (SUB, sub.as_slice()), (RETURN, return_words.as_slice())] {
+            for (i, word) in words.iter().enumerate() {
+                let at = address as usize + i * 4;
+                memory.0[at..at + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        let mut gpu = Gpu::new();
+        let mut renderer = SoftwareRenderer::default();
+        gpu.run_command_list(&mut memory, &mut renderer, 0, main.len() as u32 * 4);
+        assert_eq!(gpu.internal[0x0100], 0, "the second jump replaces the first");
+        assert_eq!(gpu.internal[0x0101], 0x2222);
+        assert_eq!(gpu.internal[0x0102], 0, "the packet does not fall through");
     }
 
     #[test]

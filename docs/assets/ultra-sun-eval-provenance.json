@@ -1,0 +1,50 @@
+{
+  "scope": "Diagnostic raw observations; final timing comparison rejected. No causal speedup, half-resource or handheld claim.",
+  "base_revision": "178f2b0f4f3444ed8d6af49fe5c130fe3094b598",
+  "original_runtime_sha256": "e09c0841556800fcde1ad998655518e68c5b3f38db544864f6c4414a5162aeb8",
+  "candidate_runtime_sha256": "c15e1adf5027eed3ef96e32320ac8c9dbb836a0b06eb079345873c84bc9b665d",
+  "candidate_source_archive_sha256": "d8b2912b67aea7d1de2af26e588a858b607990c8281133989b7aec2594d28b21",
+  "same_native_library_sha256": "3aa528474512976b143b1a06ed83eda44a18058d5c00960aea60c36378d1a5a8",
+  "rom_sha256": "b812dc50fdb76cc9f82ed80a3798dae11a2fced1e2fee436db02a8910fde39d1",
+  "title_id": "00040000001B5000",
+  "input_sha256": "080f0c9e20fe261437aef33af0f487b24dbda4df99843e97ab2fa7452f1b3376",
+  "harness_sha256": "7fc065749b110ad61be2833e8433479d312bb9c3cf2f28f2544d9e5236db34b6",
+  "frames": 24000,
+  "repetitions_each": 3,
+  "order": [
+    "Original",
+    "Optimized",
+    "Optimized",
+    "Original",
+    "Original",
+    "Optimized"
+  ],
+  "resolution": 1.0,
+  "clock_ms_since_1900": 4000000000000,
+  "renderer": [
+    "NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2 (OpenGL ES 3.2 NVIDIA 615.78.08)"
+  ],
+  "output_checks": {
+    "sampled_images_all_equal": true,
+    "literal_warnings_all_equal": true,
+    "guest_work_all_equal": true
+  },
+  "sampled_bmp_sha256": {
+    "frame-02999.bmp": "160b87fc697ea10d54c1abc22a4f4443061b688a0bfdcb5fdd21d3c27d324018",
+    "frame-05999.bmp": "df2761dcc65dd3faee94004726110ddad67b7127037ef059a127939b196f82ba",
+    "frame-08999.bmp": "745415868f7faf04a7bec29686658f34e6502d9d3f50cc680016dfa87261e6ea",
+    "frame-11999.bmp": "75c43d3662263769bf00ec1ab8b9face3195e5f1f051e2c96cdff49861449898",
+    "frame-14999.bmp": "4a254c18dad50ff51e03c7a195447c825760e9fae8b50fe527e7048771f1a3d3",
+    "frame-17999.bmp": "bd434fc9fc8518cb28df79f57687b92dccb0f9f557a7013107f1fecfc5293b75",
+    "frame-20999.bmp": "4f58563aa4d629a285689f9b82f25c1b2da3941818bd0f034729cca55d9943c1",
+    "frame-23999.bmp": "712c6683db737ec59530dcaf83a165fbca56436b6343c5c589a67d61e621af22"
+  },
+  "formal_noise_budget": 0.1,
+  "diagnostic_noise_budget": 0.03,
+  "comparison_errors": [
+    "baseline host busy: estimated other CPU fraction 0.1637 exceeds 0.1000"
+  ],
+  "timing_eligible": false,
+  "target_met": false,
+  "notes": "Original revision plus probe instrumentation. Candidate frozen code; final docs/portable button fixtures added afterward. Same original library means new codegen is tested independently, not timed here. Application caches fresh; host page cache uncontrolled. RSS samples use simultaneous components at sampled total peak, not summed component maxima."
+}

@@ -5,7 +5,7 @@ mod batch;
 #[cfg(feature = "gles")]
 pub(crate) mod glsl;
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use isa::{Instruction, OpCode, OperandDescriptor};
@@ -22,6 +22,7 @@ pub const TEMP_REGISTERS: usize = 16;
 
 /// a float uniform from the words that upload it, four singles, or four
 /// 24-bit floats packed most significant first across three words.
+#[inline]
 fn float_uniform(staged: &[u32], wide: bool) -> Vec4 {
     if wide {
         [f32::from_bits(staged[3]), f32::from_bits(staged[2]), f32::from_bits(staged[1]), f32::from_bits(staged[0])]
@@ -69,7 +70,7 @@ pub struct ShaderUnit {
     decoded: Option<Arc<Program>>,
     /// programs decoded before, by fingerprint. titles upload the program
     /// again each time they switch shaders, often the same few.
-    decoded_before: HashMap<u64, Arc<Program>>,
+    decoded_before: FxHashMap<u64, Arc<Program>>,
 }
 
 impl Default for ShaderUnit {
@@ -94,7 +95,7 @@ impl ShaderUnit {
             float_uniform_wide: false,
             float_uniform_staging: [0; 4],
             decoded: None,
-            decoded_before: HashMap::new(),
+            decoded_before: FxHashMap::default(),
         }
     }
 
@@ -134,7 +135,7 @@ impl ShaderUnit {
         let program = match self.decoded_before.get(&fingerprint) {
             Some(program) => program.clone(),
             None => {
-                let program = Arc::new(Program::decode(self));
+                let program = Arc::new(Program::decode_with_fingerprint(self, fingerprint));
                 if self.decoded_before.len() >= DECODED_KEPT {
                     self.decoded_before.clear();
                 }
@@ -179,10 +180,38 @@ impl ShaderUnit {
 
     /// float uniforms arrive component by component, three words carry four
     /// packed 24-bit floats, or four words carry plain singles.
-    pub fn upload_float_uniforms(&mut self, words: &[u32]) {
-        for &word in words {
-            self.upload_float_uniform(word);
+    pub fn upload_float_uniforms(&mut self, mut words: &[u32]) {
+        // Finish an upload begun by an earlier register write, then handle
+        // whole vectors without advancing the component cursor per word.
+        while self.float_uniform_component != 0 && !words.is_empty() {
+            self.upload_float_uniform(words[0]);
+            words = &words[1..];
         }
+        if words.is_empty() {
+            return;
+        }
+
+        let tail = if self.float_uniform_wide {
+            let (vectors, tail) = words.as_chunks::<4>();
+            for &staged in vectors {
+                self.finish_float_uniform_mode::<true>(staged);
+            }
+            if let Some(&last) = vectors.last() {
+                self.float_uniform_staging = last;
+            }
+            tail
+        } else {
+            let (vectors, tail) = words.as_chunks::<3>();
+            for &[a, b, c] in vectors {
+                self.finish_float_uniform_mode::<false>([a, b, c, self.float_uniform_staging[3]]);
+            }
+            if let Some(last) = vectors.last() {
+                self.float_uniform_staging[..3].copy_from_slice(last);
+            }
+            tail
+        };
+        self.float_uniform_staging[..tail.len()].copy_from_slice(tail);
+        self.float_uniform_component = tail.len();
     }
 
     /// whether uploading words from the register the raw index value names
@@ -210,15 +239,32 @@ impl ShaderUnit {
         let staged = self.float_uniform_staging;
         self.float_uniform_component = 0;
 
-        let value = float_uniform(&staged, self.float_uniform_wide);
+        self.finish_float_uniform(staged);
+    }
 
-        if value.iter().any(|c| c.is_nan()) {
+    fn finish_float_uniform(&mut self, staged: [u32; 4]) {
+        if self.float_uniform_wide {
+            self.finish_float_uniform_mode::<true>(staged);
+        } else {
+            self.finish_float_uniform_mode::<false>(staged);
+        }
+    }
+
+    // The burst loop already knows the format. Keep that knowledge through
+    // conversion instead of reloading and branching for every vector.
+    #[inline]
+    fn finish_float_uniform_mode<const WIDE: bool>(&mut self, staged: [u32; 4]) {
+        let value = float_uniform(&staged, WIDE);
+
+        if log::log_enabled!(target: "zakuro_gpu::shader::nan", log::Level::Trace)
+            && value.iter().any(|c| c.is_nan())
+        {
             log::trace!(
                 target: "zakuro_gpu::shader::nan",
                 "uniform c{} set to NaN {value:?} from {:08X?} ({} bit)",
                 self.float_uniform_index,
                 staged,
-                if self.float_uniform_wide { 32 } else { 24 },
+                if WIDE { 32 } else { 24 },
             );
         }
         if self.float_uniform_index < FLOAT_UNIFORMS {
@@ -394,6 +440,10 @@ pub struct Program {
 
 impl Program {
     fn decode(unit: &ShaderUnit) -> Program {
+        Self::decode_with_fingerprint(unit, unit.fingerprint())
+    }
+
+    fn decode_with_fingerprint(unit: &ShaderUnit, fingerprint: u64) -> Program {
         let ops: Box<[Op]> = unit.program.iter().map(|&word| Op::decode(Instruction(word), &unit.descriptors)).collect();
         let (mut inputs, mut outputs) = (0u16, 0u16);
         for op in ops.iter() {
@@ -412,7 +462,7 @@ impl Program {
                 outputs |= 1 << op.destination;
             }
         }
-        Program { ops, inputs, outputs, fingerprint: unit.fingerprint() }
+        Program { ops, inputs, outputs, fingerprint }
     }
 }
 
@@ -861,6 +911,84 @@ fn flow_condition(unit: &ShaderUnit, state: &ShaderState, instruction: Instructi
 mod tests {
     use super::*;
 
+    fn same_uniform_upload(a: &ShaderUnit, b: &ShaderUnit) {
+        for (index, (a, b)) in a.float_uniforms.iter().zip(b.float_uniforms.iter()).enumerate() {
+            assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits), "uniform c{index}");
+        }
+        assert_eq!(a.float_uniform_index, b.float_uniform_index);
+        assert_eq!(a.float_uniform_component, b.float_uniform_component);
+        assert_eq!(a.float_uniform_wide, b.float_uniform_wide);
+        assert_eq!(a.float_uniform_staging, b.float_uniform_staging);
+    }
+
+    // Frozen scalar cursor/conversion path, independent of burst finishing.
+    fn reference_float_uniform(unit: &mut ShaderUnit, word: u32) {
+        unit.float_uniform_staging[unit.float_uniform_component] = word;
+        unit.float_uniform_component += 1;
+        let needed = if unit.float_uniform_wide { 4 } else { 3 };
+        if unit.float_uniform_component == needed {
+            let value = float_uniform(&unit.float_uniform_staging, unit.float_uniform_wide);
+            if let Some(slot) = unit.float_uniforms.get_mut(unit.float_uniform_index) {
+                *slot = value;
+            }
+            unit.float_uniform_index += 1;
+            unit.float_uniform_component = 0;
+        }
+    }
+
+    #[test]
+    fn uniform_bursts_match_individual_register_writes() {
+        // Singles include signed zero, subnormals, infinities and NaN
+        // payloads; the same words also exercise packed 24-bit decoding.
+        let words = [
+            0x0000_0000, 0x8000_0000, 0x0000_0001, 0x807F_FFFF,
+            0x7F80_0000, 0xFF80_0000, 0x7FC0_1234, 0xFFC0_ABCD,
+            0x7F80_0001, 0x3F80_0000, 0xFFFF_FFFF, 0x00FF_FFFF,
+            0xC020_0000, 0x0080_0000, 0xABCD_1234, 0x7777_8888,
+            0x1111_2222,
+        ];
+        for wide in [false, true] {
+            let size = if wide { 4 } else { 3 };
+            for index in [0, 1, 94, 95, 96, 127] {
+                for prefix in 0..size {
+                    for length in 0..=words.len() {
+                        let mut burst = ShaderUnit::new();
+                        // Switching modes keeps the old staging words,
+                        // including the fourth word unused by packed floats.
+                        burst.set_float_uniform_index(0x8000_0000);
+                        burst.upload_float_uniforms(&words[8..12]);
+                        burst.set_float_uniform_index(index | if wide { 0x8000_0000 } else { 0 });
+                        for &word in &words[..prefix] {
+                            burst.upload_float_uniform(word);
+                        }
+                        let mut scalar = burst.clone();
+                        burst.upload_float_uniforms(&words[..length]);
+                        for &word in &words[..length] {
+                            reference_float_uniform(&mut scalar, word);
+                        }
+                        same_uniform_upload(&burst, &scalar);
+                        // The next upload can finish a partial vector.
+                        burst.upload_float_uniforms(&words);
+                        for &word in &words {
+                            reference_float_uniform(&mut scalar, word);
+                        }
+                        same_uniform_upload(&burst, &scalar);
+                        // Resetting the index discards a partial vector and
+                        // may switch widths without clearing staging.
+                        let raw = 95 | if wide { 0 } else { 0x8000_0000 };
+                        burst.set_float_uniform_index(raw);
+                        scalar.set_float_uniform_index(raw);
+                        burst.upload_float_uniforms(&words);
+                        for &word in &words {
+                            reference_float_uniform(&mut scalar, word);
+                        }
+                        same_uniform_upload(&burst, &scalar);
+                    }
+                }
+            }
+        }
+    }
+
     fn unit_with(program: &[u32], descriptors: &[u32]) -> ShaderUnit {
         let mut unit = ShaderUnit::new();
         for (i, &word) in program.iter().enumerate() {
@@ -1306,6 +1434,74 @@ mod tests {
         state.input[0] = [1.0; 4];
         run(&unit, &mut state);
         assert_eq!(state.output[0], ZERO, "b0 is false, so the move is skipped");
+    }
+
+    #[test]
+    fn prepared_program_cache_reuses_uploads_and_invalidates_descriptors() {
+        let mov = 0x13 << 26;
+        let mut unit = unit_with(&[mov, 0x22 << 26], &[IDENTITY]);
+        assert_eq!(unit.fingerprint(), 0x2737_5C08_BCE8_0F19, "frozen four-lane fingerprint");
+        unit.prepare();
+        let original = unit.decoded.as_ref().unwrap().clone();
+        let op = original.ops[0];
+        assert_eq!(op.opcode, OpCode::Mov);
+        assert_eq!((op.destination, op.mask), (0, 15));
+        assert_eq!(op.sources[0].register, 0);
+        assert_eq!(op.sources[0].swizzle, [0, 1, 2, 3]);
+        assert!(!op.sources[0].negate);
+        assert_eq!(original.fingerprint, 0x2737_5C08_BCE8_0F19);
+        unit.program_write_offset = 0;
+        unit.upload_program(1 << 7); // add o0, v0, v1
+        unit.prepare();
+        assert!(!Arc::ptr_eq(unit.decoded.as_ref().unwrap(), &original));
+        unit.program_write_offset = 0;
+        unit.upload_program(mov);
+        unit.prepare();
+        assert!(Arc::ptr_eq(unit.decoded.as_ref().unwrap(), &original));
+        unit.descriptor_write_offset = 0;
+        unit.upload_descriptor(IDENTITY ^ (1 << 4)); // negate the first source
+        assert!(unit.decoded.is_none());
+        unit.prepare();
+        assert!(!Arc::ptr_eq(unit.decoded.as_ref().unwrap(), &original));
+        let mut state = ShaderState::new();
+        state.input[0] = [1.0, 2.0, 3.0, 4.0];
+        run(&unit, &mut state);
+        assert_eq!(state.output[0], [-1.0, -2.0, -3.0, -4.0]);
+        unit.descriptor_write_offset = 0;
+        unit.upload_descriptor(IDENTITY);
+        unit.prepare();
+        assert!(Arc::ptr_eq(unit.decoded.as_ref().unwrap(), &original));
+        run(&unit, &mut state);
+        assert_eq!(state.output[0], [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn decoded_program_clear_boundary_preserves_leased_programs() {
+        let mut unit = unit_with(&[0x13 << 26, 0x22 << 26], &[IDENTITY]);
+        unit.prepare();
+        let leased = unit.decoded.as_ref().unwrap().clone();
+        for word in 1..DECODED_KEPT as u32 {
+            unit.program_write_offset = PROGRAM_SIZE - 1;
+            unit.upload_program(word); // distinct fingerprint, beyond the executed END
+            unit.prepare();
+        }
+        assert_eq!(unit.decoded_before.len(), DECODED_KEPT);
+        assert_eq!(Arc::strong_count(&leased), 2);
+        unit.program_write_offset = PROGRAM_SIZE - 1;
+        unit.upload_program(DECODED_KEPT as u32);
+        unit.prepare();
+        assert_eq!(unit.decoded_before.len(), 1, "the next distinct miss clears the full cache");
+        assert_eq!(Arc::strong_count(&leased), 1, "eviction releases only the cache's lease");
+        assert_eq!(leased.fingerprint, 0x2737_5C08_BCE8_0F19);
+        assert_eq!(leased.ops[0].opcode, OpCode::Mov);
+        unit.program_write_offset = PROGRAM_SIZE - 1;
+        unit.upload_program(0);
+        unit.prepare();
+        assert!(!Arc::ptr_eq(unit.decoded.as_ref().unwrap(), &leased), "cleared entry is decoded again");
+        let mut state = ShaderState::new();
+        state.input[0] = [3.0, 5.0, 7.0, 1.0];
+        run(&unit, &mut state);
+        assert_eq!(state.output[0], state.input[0]);
     }
 
     /// a program decoded ahead of time is decoded again once the command

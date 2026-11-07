@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "title": "omega-ruby",
+  "verified_gameplay": true,
+  "scene": "Route 101 southern clear path after Birch rescue, Torchic Lv5; short up/down loops, no battle or grass claim",
+  "reviewed_by": "Codex root actual eight-image inspection plus normal manual navigation",
+  "frames": 6000,
+  "input_sha256": "9e88a8aba16a277632ce634842dc28c8c143f72b23bdfc884312e8d1b943a9b7",
+  "screenshots": {
+    "frame-00749.bmp": "e14b2fa22e8651e82d65a1c3a62d26497f3ecd631ca9a1d88c13df3e48a067f8",
+    "frame-01499.bmp": "72a0603e7ba89541c4a0ba0877570154f3760033502a17b3b4a43351965b11b9",
+    "frame-02249.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+    "frame-02999.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+    "frame-03749.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+    "frame-04499.bmp": "12820764fecddf8df487e63c271655f765f4f1d008e6fb8f4e38ed66f3786b8e",
+    "frame-05249.bmp": "acaf9e40b80c39169d8f1b10276f1a7cc9f91348b527fdf234f8561c6757a1ff",
+    "frame-05999.bmp": "13c5ee8048eeb29e958df69eaad1259615a658bca913e3d1f10a85f55ca130fc"
+  },
+  "name": "omega-ruby early-route walking checkpoint",
+  "rom_sha256": "542d689ea534a1ab658d156cff1178678010b3dc6d7e00794abe477a3d75fda6",
+  "initial_state": "Private early-route save; identical font/format/save bytes per trial, fresh application caches, fixed clock, native resolution, serialized GPU; unchanged title profile, no frameskip/stand-ins/generic shaders.",
+  "input_file": "omega-ruby-usa-route101.input",
+  "limitations": "Agent-reviewed short clear-path walking with long idle periods; startup included (Omega frame749 is boot fade). No user visual signoff, battle/audio certification or handheld proof. Own matching ROM/private checkpoint required; save is not distributed.",
+  "save_sha256": "bb07343ee1415241512e27cc385732a36e77b38eddec90a744901eec22fabe84"
+}

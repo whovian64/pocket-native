@@ -13,9 +13,10 @@ path = "src/main.rs"
 [features]
 # loading a recompiled library from Rust
 host = ["recomp-abi/load"]
-# checking recompiled code against Zakuro's interpreter, which it fetches
-verify = ["host", "dep:zakuro-cpu"]
+# checking recompiled code against Zakuro's interpreter
+verify = ["host", "dep:zakuro-cpu", "dep:libc"]
 
 [dependencies]
 recomp-abi = { path = "abi", default-features = false }
 zakuro-cpu = { workspace = true, optional = true }
+libc = { version = "0.2", optional = true }

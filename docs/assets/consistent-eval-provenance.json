@@ -1,0 +1,410 @@
+{
+  "schema_version": 1,
+  "runtimes": {
+    "original": {
+      "code_parent": "178f2b0f4f3444ed8d6af49fe5c130fe3094b598",
+      "runtime_sha256": "5d8d373e04203b4b2e0cf384bfd0a70cf226494803aa56439a2ed9e065df2071",
+      "only_changed_runtime_files": [
+        "frontend/src/lib.rs",
+        "frontend/src/probe.rs"
+      ],
+      "observer_file_sha256": {
+        "frontend/src/lib.rs": "d956a6c94863f140a01a1f9f0dca7a813bd2167b222dd8db5eb8230e6f56d962",
+        "frontend/src/probe.rs": "e09810b4faa253d0ecb80cbe444f697b03883aa13fb301f0df5760950298fea0"
+      }
+    },
+    "current": {
+      "code_parent": "e6287897a2475d70b4da4066ff04e50f2b918c87",
+      "runtime_sha256": "939d92257b0e521bbd7737faef3bdf68ff055a5b92520022e5d3ab97bd6bd2f8",
+      "only_changed_runtime_files": [
+        "frontend/src/lib.rs",
+        "frontend/src/probe.rs"
+      ],
+      "observer_file_sha256": {
+        "frontend/src/lib.rs": "f63565b93b77a25e7553ef6a800601e3a6831136a59ef63defa32ee5fa1214f3",
+        "frontend/src/probe.rs": "e09810b4faa253d0ecb80cbe444f697b03883aa13fb301f0df5760950298fea0"
+      }
+    }
+  },
+  "measurement": {
+    "batches": 6000,
+    "window": [
+      1800,
+      6000
+    ],
+    "clock_ms_since_1900": 4000000000000,
+    "resolution": 1,
+    "affinity": [
+      2,
+      4,
+      6,
+      7
+    ],
+    "smt_siblings_observed": [
+      10,
+      12,
+      14,
+      15
+    ],
+    "host_policy": {
+      "cpus": [
+        2,
+        4,
+        6,
+        7
+      ],
+      "siblings": [
+        10,
+        12,
+        14,
+        15
+      ],
+      "max_busy_fraction": 0.03,
+      "max_core_fraction": 0.1,
+      "max_cpu_c": 97,
+      "max_temperature_span_c": 3,
+      "window_seconds": 2,
+      "consecutive_windows": 2,
+      "timeout_seconds": 8
+    },
+    "renderer": "NVIDIA RTX 4060 Laptop / GLES 3.2 / driver 615.78.08",
+    "boost": "enabled, observed rather than fixed",
+    "cache": "per-build immutable warmed application seeds or fresh application caches; driver disk cache requested off; OS pages warmed by identity hashing",
+    "observer": "buffered full frontend loop and nested run_frame; no new GPU synchronization; eight boundary captures; per-batch logger-reset-aware GPU-wait deltas",
+    "cpu_model": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics"
+  },
+  "campaign": {
+    "completed_processes": 87,
+    "AA_processes": 27,
+    "AB_processes": 54,
+    "warmup_processes": 6,
+    "freeze_sha256": "f488fb3e18673a44faffb883e6123fa66c9eede8d8a354faee3cb10abc56f157",
+    "execution_harness_sha256": "9fc3a59cd53284b150000ede2e6c81651b8ced45407cb66a6c7e50bc38672e45",
+    "paired_driver_sha256": "bb4a410db2ddb6d7d438326d2461ed9f5545cc737555eac8014a43fa5e8e872c",
+    "quiet_preflights_passed": 19,
+    "retained_prototype": "one earlier25-process prototype stopped at a correctly rejected cumulative-counter reset observation; no replacement/success claim drawn from it"
+  },
+  "titles": {
+    "omega-ruby": {
+      "label": "Omega Ruby Rev 2",
+      "series": {
+        "fresh-serialized": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": true,
+          "measurement_window_work_equal": true,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.1014420380497388,
+            "cpu_seconds": 0.09319478604524206,
+            "measurement_wall_seconds": 0.01928808957459702,
+            "measurement_process_cpu_seconds": 0.03737062445978811
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host activity exceeds budget",
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "candidate host busy: estimated other CPU fraction 0.1150 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "quiet/thermal preflight failed; diagnostic observations only"
+          ]
+        },
+        "warm-serialized": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": true,
+          "measurement_window_work_equal": true,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.05654930844091704,
+            "cpu_seconds": 0.05933634240386306,
+            "measurement_wall_seconds": 0.10448629835528453,
+            "measurement_process_cpu_seconds": 0.10732059469731006
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "baseline host busy: estimated other CPU fraction 0.1247 exceeds 0.1000",
+            "candidate host busy: estimated other CPU fraction 0.1100 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "quiet/thermal preflight failed; diagnostic observations only"
+          ]
+        },
+        "fresh-async": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": false,
+          "measurement_window_work_equal": false,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.06469141424938964,
+            "cpu_seconds": 0.060345991602744765,
+            "measurement_wall_seconds": 0.009330497740236624,
+            "measurement_process_cpu_seconds": 0.012405766053044547
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "asynchronous diagnostic lane; no equal-work speedup claim",
+            "baseline host busy: estimated other CPU fraction 0.1526 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "measurement-window guest work differs",
+            "quiet/thermal preflight failed; diagnostic observations only",
+            "sampled outputs, picture counts or guest instruction workloads differ across trials/builds"
+          ]
+        }
+      },
+      "serialized_correctness": {
+        "outcomes": {
+          "deterministic": true,
+          "errors": [],
+          "comparisons": [
+            {
+              "trial": "trial-01",
+              "differences": {}
+            }
+          ],
+          "scope": "captured fixed-workload outputs; rerun actual workloads after changes"
+        },
+        "traces": {
+          "deterministic": true,
+          "errors": [],
+          "comparisons": [
+            {
+              "trace": 2,
+              "last_matching_frame": 6000,
+              "first_difference": null,
+              "checkpoint_counts": [
+                20,
+                20
+              ]
+            }
+          ],
+          "scope": "sampled guest state only; exact pixels and full workload must also match"
+        }
+      },
+      "original_library_sha256": "7d4617f0f7964205a1941410631e9d204dbb489bfb1c94e3d3b1e9d9852f245f"
+    },
+    "pokemon-y": {
+      "label": "Pokémon Y",
+      "series": {
+        "fresh-serialized": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": true,
+          "measurement_window_work_equal": true,
+          "status": "held",
+          "AA_pass": true,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.04186307934118235,
+            "cpu_seconds": 0.03850839422758438,
+            "measurement_wall_seconds": 0.03147602921205489,
+            "measurement_process_cpu_seconds": 0.034748820453272024
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host observations ineligible",
+            "candidate host busy: estimated other CPU fraction 0.1630 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "quiet/thermal preflight failed; diagnostic observations only"
+          ]
+        },
+        "warm-serialized": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": true,
+          "measurement_window_work_equal": true,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.10132785413124916,
+            "cpu_seconds": 0.10991243854541159,
+            "measurement_wall_seconds": 0.17739308424378802,
+            "measurement_process_cpu_seconds": 0.18016861174355608
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "baseline host busy: estimated other CPU fraction 0.2094 exceeds 0.1000",
+            "candidate host busy: estimated other CPU fraction 0.1651 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "quiet/thermal preflight failed; diagnostic observations only"
+          ]
+        },
+        "fresh-async": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": false,
+          "measurement_window_work_equal": false,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.10152565815148804,
+            "cpu_seconds": 0.10198147453078689,
+            "measurement_wall_seconds": 0.19636900299115476,
+            "measurement_process_cpu_seconds": 0.21460719729417352
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "asynchronous diagnostic lane; no equal-work speedup claim",
+            "candidate host busy: estimated other CPU fraction 0.1591 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "measurement-window guest work differs",
+            "quiet/thermal preflight failed; diagnostic observations only",
+            "sampled outputs, picture counts or guest instruction workloads differ across trials/builds"
+          ]
+        }
+      },
+      "serialized_correctness": {
+        "outcomes": {
+          "deterministic": true,
+          "errors": [],
+          "comparisons": [
+            {
+              "trial": "trial-01",
+              "differences": {}
+            }
+          ],
+          "scope": "captured fixed-workload outputs; rerun actual workloads after changes"
+        },
+        "traces": {
+          "deterministic": true,
+          "errors": [],
+          "comparisons": [
+            {
+              "trace": 2,
+              "last_matching_frame": 6000,
+              "first_difference": null,
+              "checkpoint_counts": [
+                20,
+                20
+              ]
+            }
+          ],
+          "scope": "sampled guest state only; exact pixels and full workload must also match"
+        }
+      },
+      "original_library_sha256": "91226273798d1a2d9f7b831d01fe7b758a347273fb49f437f5ae6bd2c8853f61"
+    },
+    "ultra-sun": {
+      "label": "Ultra Sun",
+      "series": {
+        "fresh-serialized": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": true,
+          "measurement_window_work_equal": true,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.07040284043478848,
+            "cpu_seconds": 0.09339533810660455,
+            "measurement_wall_seconds": 0.3532814354482974,
+            "measurement_process_cpu_seconds": 0.36275014782838916
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "during-run thermal/power/governor/SMT observation failed",
+            "quiet/thermal preflight failed; diagnostic observations only"
+          ]
+        },
+        "warm-serialized": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": true,
+          "measurement_window_work_equal": true,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.08446871341868561,
+            "cpu_seconds": 0.0883576827317181,
+            "measurement_wall_seconds": 0.11507273017225012,
+            "measurement_process_cpu_seconds": 0.11659160990479857
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "candidate host busy: estimated other CPU fraction 0.1072 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "quiet/thermal preflight failed; diagnostic observations only"
+          ]
+        },
+        "fresh-async": {
+          "pairs": 3,
+          "AA_processes": 3,
+          "captured_work_outputs_warnings_renderer_equal": false,
+          "measurement_window_work_equal": false,
+          "status": "held",
+          "AA_pass": false,
+          "AA_span_over_mean": {
+            "wall_seconds": 0.06500370243381308,
+            "cpu_seconds": 0.04692467597572676,
+            "measurement_wall_seconds": 0.052695715132268464,
+            "measurement_process_cpu_seconds": 0.04484772177431736
+          },
+          "strict_3pct_diagnostic_pass": false,
+          "reasons": [
+            "A/A host activity exceeds budget",
+            "A/A host observations ineligible",
+            "A/A missing, unequal work or above declared spread budget",
+            "asynchronous diagnostic lane; no equal-work speedup claim",
+            "candidate host busy: estimated other CPU fraction 0.1547 exceeds 0.1000",
+            "during-run thermal/power/governor/SMT observation failed",
+            "measurement-window guest work differs",
+            "quiet/thermal preflight failed; diagnostic observations only",
+            "sampled outputs, picture counts or guest instruction workloads differ across trials/builds"
+          ]
+        }
+      },
+      "serialized_correctness": {
+        "outcomes": {
+          "deterministic": true,
+          "errors": [],
+          "comparisons": [
+            {
+              "trial": "trial-01",
+              "differences": {}
+            }
+          ],
+          "scope": "captured fixed-workload outputs; rerun actual workloads after changes"
+        },
+        "traces": {
+          "deterministic": true,
+          "errors": [],
+          "comparisons": [
+            {
+              "trace": 2,
+              "last_matching_frame": 6000,
+              "first_difference": null,
+              "checkpoint_counts": [
+                20,
+                20
+              ]
+            }
+          ],
+          "scope": "sampled guest state only; exact pixels and full workload must also match"
+        }
+      },
+      "original_library_sha256": "3aa528474512976b143b1a06ed83eda44a18058d5c00960aea60c36378d1a5a8"
+    }
+  },
+  "limits": [
+    "route walking and idle only; no battle or transition certification",
+    "uncapped probes suppress device audio; no paced/display FPS or audio proof",
+    "original/current use identical original native DSO per title",
+    "physical RG DS Plus/Mali/Android/KMS and power remain untested",
+    "held observations are not accepted speed/time/RSS improvements"
+  ]
+}

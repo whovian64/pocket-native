@@ -1,0 +1,859 @@
+{
+  "schema_version": 1,
+  "control_head": "0b17fbb4c2894cd803818957fb8a2c39abb251ab",
+  "frames_per_replay": 6000,
+  "timing_claim": "No admitted game-level timing/RSS gain; all six three-repeat runtime comparisons exceeded the predefined10% host activity gate. All exceeded3%.",
+  "protocol": "Same original native library per title; fixed clock/seed/input/profile; native resolution; serializedGPU; no frameskip/genericlighting/genericshaders/stand-ins; eight captures and guest traces every300frames. Outdoor walking/idle with startup included.",
+  "structural": {
+    "ultra-sun": {
+      "lighting": {
+        "hits": 215707,
+        "misses": 72030,
+        "disabled": 2,
+        "decoded_light_vecs": 72030,
+        "decoded_light_capacity_bytes": 8067360
+      },
+      "ipc_requests": 117586,
+      "name_clones_avoided_by_source_analysis": 235172,
+      "readback": {
+        "attempted": 3,
+        "actual": 3,
+        "full_rgba_bytes": 1355776,
+        "unscaled_color": 3,
+        "eligible_partial": 1,
+        "eligible_full_bytes": 524288,
+        "eligible_partial_bytes": 131072
+      }
+    },
+    "omega-ruby": {
+      "lighting": {
+        "hits": 75716,
+        "misses": 28782,
+        "disabled": 2964,
+        "decoded_light_vecs": 28782,
+        "decoded_light_capacity_bytes": 3223584
+      },
+      "ipc_requests": 94930,
+      "name_clones_avoided_by_source_analysis": 189860,
+      "readback": {
+        "attempted": 3,
+        "actual": 3,
+        "full_rgba_bytes": 1138688,
+        "unscaled_color": 3
+      }
+    },
+    "pokemon-y": {
+      "lighting": {
+        "hits": 167296,
+        "misses": 129923,
+        "disabled": 19418,
+        "decoded_light_vecs": 129923,
+        "decoded_light_capacity_bytes": 47089952
+      },
+      "ipc_requests": 132826,
+      "name_clones_avoided_by_source_analysis": 265652,
+      "readback": {
+        "attempted": 1,
+        "actual": 1,
+        "full_rgba_bytes": 307200,
+        "unscaled_color": 1
+      }
+    }
+  },
+  "observations": [
+    {
+      "title": "ultra-sun",
+      "variant": "lighting-v2",
+      "repeats": [
+        3,
+        3
+      ],
+      "baseline": {
+        "wall_seconds": {
+          "median": 15.107536101999358,
+          "range": [
+            14.140785908000908,
+            15.183134984999924
+          ]
+        },
+        "cpu_seconds": {
+          "median": 17.634927,
+          "range": [
+            16.44028,
+            17.687008000000002
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 427312,
+          "range": [
+            426516,
+            428224
+          ]
+        },
+        "background_cpu_range": [
+          0.09131264049966388,
+          0.13387795089803123
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 160448,
+            "RssFile": 151600,
+            "RssShmem": 117092,
+            "VmRSS": 429140,
+            "elapsed_seconds": 5.913374252999347
+          },
+          {
+            "RssAnon": 159492,
+            "RssFile": 151532,
+            "RssShmem": 117092,
+            "VmRSS": 428116,
+            "elapsed_seconds": 5.838425017000191
+          },
+          {
+            "RssAnon": 158528,
+            "RssFile": 151476,
+            "RssShmem": 118036,
+            "VmRSS": 428040,
+            "elapsed_seconds": 6.130951054999969
+          }
+        ]
+      },
+      "candidate": {
+        "wall_seconds": {
+          "median": 14.778392101999998,
+          "range": [
+            13.969222006000564,
+            15.600582945999122
+          ]
+        },
+        "cpu_seconds": {
+          "median": 17.070946,
+          "range": [
+            16.258818,
+            18.215949000000002
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 429576,
+          "range": [
+            429432,
+            429752
+          ]
+        },
+        "background_cpu_range": [
+          0.08286602321179784,
+          0.1431599187819302
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 160940,
+            "RssFile": 151844,
+            "RssShmem": 117884,
+            "VmRSS": 430668,
+            "elapsed_seconds": 6.356792713999312
+          },
+          {
+            "RssAnon": 156200,
+            "RssFile": 153868,
+            "RssShmem": 120540,
+            "VmRSS": 430608,
+            "elapsed_seconds": 6.732799347999389
+          },
+          {
+            "RssAnon": 156448,
+            "RssFile": 153996,
+            "RssShmem": 120540,
+            "VmRSS": 430984,
+            "elapsed_seconds": 6.4050554069999635
+          }
+        ]
+      },
+      "exact_outcomes": true,
+      "exact_traces": true,
+      "formal_10_percent_gate": "incomparable",
+      "strict_3_percent_host_gate": false,
+      "same_dso_sha256": "3aa528474512976b143b1a06ed83eda44a18058d5c00960aea60c36378d1a5a8",
+      "control_runtime_sha256": "c12751ea332c81d26bcb6bfff61948311d07919ae9f24995713bb28832850e2d",
+      "candidate_runtime_sha256": "ac05f5113dd2b7f9ff70dd62bd56b4d22391700cc448f8e4266e6cb87a2abb46"
+    },
+    {
+      "title": "ultra-sun",
+      "variant": "dispatch-v3",
+      "repeats": [
+        3,
+        3
+      ],
+      "baseline": {
+        "wall_seconds": {
+          "median": 15.107536101999358,
+          "range": [
+            14.140785908000908,
+            15.183134984999924
+          ]
+        },
+        "cpu_seconds": {
+          "median": 17.634927,
+          "range": [
+            16.44028,
+            17.687008000000002
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 427312,
+          "range": [
+            426516,
+            428224
+          ]
+        },
+        "background_cpu_range": [
+          0.09131264049966388,
+          0.13387795089803123
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 160448,
+            "RssFile": 151600,
+            "RssShmem": 117092,
+            "VmRSS": 429140,
+            "elapsed_seconds": 5.913374252999347
+          },
+          {
+            "RssAnon": 159492,
+            "RssFile": 151532,
+            "RssShmem": 117092,
+            "VmRSS": 428116,
+            "elapsed_seconds": 5.838425017000191
+          },
+          {
+            "RssAnon": 158528,
+            "RssFile": 151476,
+            "RssShmem": 118036,
+            "VmRSS": 428040,
+            "elapsed_seconds": 6.130951054999969
+          }
+        ]
+      },
+      "candidate": {
+        "wall_seconds": {
+          "median": 14.221471001999817,
+          "range": [
+            14.142984867999985,
+            15.662793726000018
+          ]
+        },
+        "cpu_seconds": {
+          "median": 16.462977,
+          "range": [
+            16.424074,
+            18.256899999999998
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 427184,
+          "range": [
+            426840,
+            427656
+          ]
+        },
+        "background_cpu_range": [
+          0.09229808185353716,
+          0.12957897457533035
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 158048,
+            "RssFile": 151592,
+            "RssShmem": 118480,
+            "VmRSS": 428120,
+            "elapsed_seconds": 6.2205920840006
+          },
+          {
+            "RssAnon": 158548,
+            "RssFile": 151560,
+            "RssShmem": 118344,
+            "VmRSS": 428452,
+            "elapsed_seconds": 6.0472672959986085
+          },
+          {
+            "RssAnon": 159280,
+            "RssFile": 151524,
+            "RssShmem": 118348,
+            "VmRSS": 429152,
+            "elapsed_seconds": 6.029676304000532
+          }
+        ]
+      },
+      "exact_outcomes": true,
+      "exact_traces": true,
+      "formal_10_percent_gate": "incomparable",
+      "strict_3_percent_host_gate": false,
+      "same_dso_sha256": "3aa528474512976b143b1a06ed83eda44a18058d5c00960aea60c36378d1a5a8",
+      "control_runtime_sha256": "c12751ea332c81d26bcb6bfff61948311d07919ae9f24995713bb28832850e2d",
+      "candidate_runtime_sha256": "5c444cb8030426525db462d7ab3cda64c87e7f1356181616a25e5454d21df39f"
+    },
+    {
+      "title": "omega-ruby",
+      "variant": "lighting-v2",
+      "repeats": [
+        3,
+        3
+      ],
+      "baseline": {
+        "wall_seconds": {
+          "median": 12.215417427998545,
+          "range": [
+            12.20822403800048,
+            12.520018265000544
+          ]
+        },
+        "cpu_seconds": {
+          "median": 13.455217000000001,
+          "range": [
+            13.418643999999999,
+            13.738919
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 471276,
+          "range": [
+            470296,
+            471612
+          ]
+        },
+        "background_cpu_range": [
+          0.12126763237780827,
+          0.13783466812697379
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 137424,
+            "RssFile": 207080,
+            "RssShmem": 128412,
+            "VmRSS": 472916,
+            "elapsed_seconds": 12.44782203700015
+          },
+          {
+            "RssAnon": 136016,
+            "RssFile": 207184,
+            "RssShmem": 128412,
+            "VmRSS": 471612,
+            "elapsed_seconds": 12.136058488000344
+          },
+          {
+            "RssAnon": 137464,
+            "RssFile": 206820,
+            "RssShmem": 128440,
+            "VmRSS": 472724,
+            "elapsed_seconds": 12.143334291999054
+          }
+        ]
+      },
+      "candidate": {
+        "wall_seconds": {
+          "median": 12.123829185000432,
+          "range": [
+            11.892569025998455,
+            12.476718439000251
+          ]
+        },
+        "cpu_seconds": {
+          "median": 13.303158,
+          "range": [
+            13.068323,
+            13.858038
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 471568,
+          "range": [
+            471488,
+            471736
+          ]
+        },
+        "background_cpu_range": [
+          0.12262442849651113,
+          0.13055251637437093
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 137380,
+            "RssFile": 207060,
+            "RssShmem": 128412,
+            "VmRSS": 472852,
+            "elapsed_seconds": 12.062159736000467
+          },
+          {
+            "RssAnon": 138016,
+            "RssFile": 206908,
+            "RssShmem": 128440,
+            "VmRSS": 473364,
+            "elapsed_seconds": 11.820296600999427
+          },
+          {
+            "RssAnon": 138144,
+            "RssFile": 206840,
+            "RssShmem": 128440,
+            "VmRSS": 473424,
+            "elapsed_seconds": 12.394192273999579
+          }
+        ]
+      },
+      "exact_outcomes": true,
+      "exact_traces": true,
+      "formal_10_percent_gate": "incomparable",
+      "strict_3_percent_host_gate": false,
+      "same_dso_sha256": "7d4617f0f7964205a1941410631e9d204dbb489bfb1c94e3d3b1e9d9852f245f",
+      "control_runtime_sha256": "c12751ea332c81d26bcb6bfff61948311d07919ae9f24995713bb28832850e2d",
+      "candidate_runtime_sha256": "ac05f5113dd2b7f9ff70dd62bd56b4d22391700cc448f8e4266e6cb87a2abb46"
+    },
+    {
+      "title": "omega-ruby",
+      "variant": "dispatch-v3",
+      "repeats": [
+        3,
+        3
+      ],
+      "baseline": {
+        "wall_seconds": {
+          "median": 12.215417427998545,
+          "range": [
+            12.20822403800048,
+            12.520018265000544
+          ]
+        },
+        "cpu_seconds": {
+          "median": 13.455217000000001,
+          "range": [
+            13.418643999999999,
+            13.738919
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 471276,
+          "range": [
+            470296,
+            471612
+          ]
+        },
+        "background_cpu_range": [
+          0.12126763237780827,
+          0.13783466812697379
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 137424,
+            "RssFile": 207080,
+            "RssShmem": 128412,
+            "VmRSS": 472916,
+            "elapsed_seconds": 12.44782203700015
+          },
+          {
+            "RssAnon": 136016,
+            "RssFile": 207184,
+            "RssShmem": 128412,
+            "VmRSS": 471612,
+            "elapsed_seconds": 12.136058488000344
+          },
+          {
+            "RssAnon": 137464,
+            "RssFile": 206820,
+            "RssShmem": 128440,
+            "VmRSS": 472724,
+            "elapsed_seconds": 12.143334291999054
+          }
+        ]
+      },
+      "candidate": {
+        "wall_seconds": {
+          "median": 12.579341774999193,
+          "range": [
+            12.29002671300077,
+            12.68622182999934
+          ]
+        },
+        "cpu_seconds": {
+          "median": 13.869155,
+          "range": [
+            13.566038,
+            13.972114
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 471276,
+          "range": [
+            467176,
+            471904
+          ]
+        },
+        "background_cpu_range": [
+          0.1388230675130148,
+          0.1506451566597034
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 137960,
+            "RssFile": 204704,
+            "RssShmem": 126392,
+            "VmRSS": 469056,
+            "elapsed_seconds": 12.538982199999737
+          },
+          {
+            "RssAnon": 137604,
+            "RssFile": 199676,
+            "RssShmem": 128440,
+            "VmRSS": 465720,
+            "elapsed_seconds": 9.770601262000127
+          },
+          {
+            "RssAnon": 138056,
+            "RssFile": 206852,
+            "RssShmem": 128412,
+            "VmRSS": 473320,
+            "elapsed_seconds": 12.507100410999556
+          }
+        ]
+      },
+      "exact_outcomes": true,
+      "exact_traces": true,
+      "formal_10_percent_gate": "incomparable",
+      "strict_3_percent_host_gate": false,
+      "same_dso_sha256": "7d4617f0f7964205a1941410631e9d204dbb489bfb1c94e3d3b1e9d9852f245f",
+      "control_runtime_sha256": "c12751ea332c81d26bcb6bfff61948311d07919ae9f24995713bb28832850e2d",
+      "candidate_runtime_sha256": "5c444cb8030426525db462d7ab3cda64c87e7f1356181616a25e5454d21df39f"
+    },
+    {
+      "title": "pokemon-y",
+      "variant": "lighting-v2",
+      "repeats": [
+        3,
+        3
+      ],
+      "baseline": {
+        "wall_seconds": {
+          "median": 14.648167200999524,
+          "range": [
+            14.416991273999884,
+            14.67416791299911
+          ]
+        },
+        "cpu_seconds": {
+          "median": 17.232436,
+          "range": [
+            16.9145,
+            17.340011
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 472404,
+          "range": [
+            471992,
+            473664
+          ]
+        },
+        "background_cpu_range": [
+          0.08984841048881462,
+          0.10443953356127791
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 140500,
+            "RssFile": 207524,
+            "RssShmem": 126616,
+            "VmRSS": 474640,
+            "elapsed_seconds": 14.344789856999341
+          },
+          {
+            "RssAnon": 139620,
+            "RssFile": 207400,
+            "RssShmem": 126616,
+            "VmRSS": 473636,
+            "elapsed_seconds": 14.576258052000412
+          },
+          {
+            "RssAnon": 139348,
+            "RssFile": 207656,
+            "RssShmem": 126616,
+            "VmRSS": 473620,
+            "elapsed_seconds": 14.601858563999485
+          }
+        ]
+      },
+      "candidate": {
+        "wall_seconds": {
+          "median": 16.1404784740007,
+          "range": [
+            14.469039911999062,
+            17.68868014799955
+          ]
+        },
+        "cpu_seconds": {
+          "median": 19.075297,
+          "range": [
+            16.731903000000003,
+            20.98483
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 472924,
+          "range": [
+            468648,
+            473388
+          ]
+        },
+        "background_cpu_range": [
+          0.10703067182887042,
+          0.1730809251670617
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 140556,
+            "RssFile": 200160,
+            "RssShmem": 126616,
+            "VmRSS": 467332,
+            "elapsed_seconds": 13.199336206000226
+          },
+          {
+            "RssAnon": 140392,
+            "RssFile": 207500,
+            "RssShmem": 126600,
+            "VmRSS": 474492,
+            "elapsed_seconds": 16.0680778549995
+          },
+          {
+            "RssAnon": 139880,
+            "RssFile": 198296,
+            "RssShmem": 124568,
+            "VmRSS": 462744,
+            "elapsed_seconds": 15.950674354999137
+          }
+        ]
+      },
+      "exact_outcomes": true,
+      "exact_traces": true,
+      "formal_10_percent_gate": "incomparable",
+      "strict_3_percent_host_gate": false,
+      "same_dso_sha256": "91226273798d1a2d9f7b831d01fe7b758a347273fb49f437f5ae6bd2c8853f61",
+      "control_runtime_sha256": "c12751ea332c81d26bcb6bfff61948311d07919ae9f24995713bb28832850e2d",
+      "candidate_runtime_sha256": "ac05f5113dd2b7f9ff70dd62bd56b4d22391700cc448f8e4266e6cb87a2abb46"
+    },
+    {
+      "title": "pokemon-y",
+      "variant": "dispatch-v3",
+      "repeats": [
+        3,
+        3
+      ],
+      "baseline": {
+        "wall_seconds": {
+          "median": 14.648167200999524,
+          "range": [
+            14.416991273999884,
+            14.67416791299911
+          ]
+        },
+        "cpu_seconds": {
+          "median": 17.232436,
+          "range": [
+            16.9145,
+            17.340011
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 472404,
+          "range": [
+            471992,
+            473664
+          ]
+        },
+        "background_cpu_range": [
+          0.08984841048881462,
+          0.10443953356127791
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 140500,
+            "RssFile": 207524,
+            "RssShmem": 126616,
+            "VmRSS": 474640,
+            "elapsed_seconds": 14.344789856999341
+          },
+          {
+            "RssAnon": 139620,
+            "RssFile": 207400,
+            "RssShmem": 126616,
+            "VmRSS": 473636,
+            "elapsed_seconds": 14.576258052000412
+          },
+          {
+            "RssAnon": 139348,
+            "RssFile": 207656,
+            "RssShmem": 126616,
+            "VmRSS": 473620,
+            "elapsed_seconds": 14.601858563999485
+          }
+        ]
+      },
+      "candidate": {
+        "wall_seconds": {
+          "median": 14.94969687199955,
+          "range": [
+            14.309840539999641,
+            20.15886480900008
+          ]
+        },
+        "cpu_seconds": {
+          "median": 17.364904999999997,
+          "range": [
+            16.843984,
+            23.864852999999997
+          ]
+        },
+        "peak_rss_kib": {
+          "median": 472724,
+          "range": [
+            472508,
+            473468
+          ]
+        },
+        "background_cpu_range": [
+          0.08676728413075882,
+          0.2330399916865667
+        ],
+        "rss_observations": [
+          {
+            "RssAnon": 140448,
+            "RssFile": 207356,
+            "RssShmem": 126588,
+            "VmRSS": 474392,
+            "elapsed_seconds": 20.076061273999585
+          },
+          {
+            "RssAnon": 140220,
+            "RssFile": 207384,
+            "RssShmem": 126616,
+            "VmRSS": 474220,
+            "elapsed_seconds": 14.877612420999867
+          },
+          {
+            "RssAnon": 140580,
+            "RssFile": 207500,
+            "RssShmem": 126616,
+            "VmRSS": 474696,
+            "elapsed_seconds": 14.23783066299984
+          }
+        ]
+      },
+      "exact_outcomes": true,
+      "exact_traces": true,
+      "formal_10_percent_gate": "incomparable",
+      "strict_3_percent_host_gate": false,
+      "same_dso_sha256": "91226273798d1a2d9f7b831d01fe7b758a347273fb49f437f5ae6bd2c8853f61",
+      "control_runtime_sha256": "c12751ea332c81d26bcb6bfff61948311d07919ae9f24995713bb28832850e2d",
+      "candidate_runtime_sha256": "5c444cb8030426525db462d7ab3cda64c87e7f1356181616a25e5454d21df39f"
+    }
+  ],
+  "runtime_builds": {
+    "control": {
+      "runtime_sha256": "c12751ea332c81d26bcb6bfff61948311d07919ae9f24995713bb28832850e2d",
+      "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_sha256": {
+        "engine/core/src/kernel/object.rs": "87585faf4cbe59c46555030fdeeb685920b3ee6f5b81f55177ef30e03d63ece7",
+        "engine/core/src/kernel/svc.rs": "bed5e25f129eedcafb217ed115e491bd580f6a4ef9f56ab334506135732b6062",
+        "engine/core/src/services/mod.rs": "0a3b57e6a24eff1160a1a5f20838fcd295e0391edb45452e1c67df2d8452d0e7",
+        "engine/core/src/services/srv.rs": "387891cc2f2a19b5d69de31fcf759057c05d2d06ea41e58bbb1761e9d0b351cf",
+        "engine/gpu/src/lighting.rs": "b4aee9a4ca2a8823d81eb96e1aae8356ecafb0f0e5dc5670cba0613dba718cb7",
+        "engine/gpu/src/raster.rs": "fdb492d8ee0af6a35fdbe40571c804cbeae353cce2bc4cdbd6e1dfb098ddf868",
+        "engine/gpu/src/raster/gles.rs": "b9d74310ffdb4e76434a2e0746fc29413900c05f888bc97b1257de895232df7d"
+      }
+    },
+    "lighting-v2": {
+      "runtime_sha256": "ac05f5113dd2b7f9ff70dd62bd56b4d22391700cc448f8e4266e6cb87a2abb46",
+      "source_patch_sha256": "14d095925fac2df5a4f11598de91cdcaf0f19ab43ed8fe67ad567e9a69db17a4",
+      "source_sha256": {
+        "engine/core/src/kernel/object.rs": "87585faf4cbe59c46555030fdeeb685920b3ee6f5b81f55177ef30e03d63ece7",
+        "engine/core/src/kernel/svc.rs": "bed5e25f129eedcafb217ed115e491bd580f6a4ef9f56ab334506135732b6062",
+        "engine/core/src/services/mod.rs": "0a3b57e6a24eff1160a1a5f20838fcd295e0391edb45452e1c67df2d8452d0e7",
+        "engine/core/src/services/srv.rs": "387891cc2f2a19b5d69de31fcf759057c05d2d06ea41e58bbb1761e9d0b351cf",
+        "engine/gpu/src/lighting.rs": "e4a79d9cff8a097c8390ae3d9f7613f75de425bbd73b615d40b999c09b2a6c88",
+        "engine/gpu/src/raster.rs": "53b4726510961aaebe492c3d47474bb9617b89e0279677a48a4461acb8260453",
+        "engine/gpu/src/raster/gles.rs": "b9d74310ffdb4e76434a2e0746fc29413900c05f888bc97b1257de895232df7d"
+      }
+    },
+    "dispatch-v3": {
+      "runtime_sha256": "5c444cb8030426525db462d7ab3cda64c87e7f1356181616a25e5454d21df39f",
+      "source_patch_sha256": "a31d14014d2aa548fc3e154c2a707c9e71125b8db52726c003eaee1856f8ab04",
+      "source_sha256": {
+        "engine/core/src/kernel/object.rs": "2c6761a3be15b0caace458ebaf539d5bed7551a391adf22156d324e2f637ea76",
+        "engine/core/src/kernel/svc.rs": "10569c0c56c8de657d8f62628a68741a01d239ab7a470694ef7c3ad2d6ce6dd1",
+        "engine/core/src/services/mod.rs": "fb6e5dccc322aaaeb5df9bca26f8e5ffef4c0bff33b452f5f26c970dcb100b37",
+        "engine/core/src/services/srv.rs": "593613347a382730c9c6dcb7ad0e9f15be0077bcd238ed8cfa648807d121d601",
+        "engine/gpu/src/lighting.rs": "b4aee9a4ca2a8823d81eb96e1aae8356ecafb0f0e5dc5670cba0613dba718cb7",
+        "engine/gpu/src/raster.rs": "fdb492d8ee0af6a35fdbe40571c804cbeae353cce2bc4cdbd6e1dfb098ddf868",
+        "engine/gpu/src/raster/gles.rs": "b9d74310ffdb4e76434a2e0746fc29413900c05f888bc97b1257de895232df7d"
+      }
+    },
+    "readback-v3": {
+      "runtime_sha256": "5ebac1afc905a2c1297d25a804459746974bb370e8be437c9ed9610d7cb901f2",
+      "source_patch_sha256": "bb25283b7ad3cdf69ad1b8b5af080a61df9401cc9bc24ab993cce24a3646baac",
+      "source_sha256": {
+        "engine/core/src/kernel/object.rs": "87585faf4cbe59c46555030fdeeb685920b3ee6f5b81f55177ef30e03d63ece7",
+        "engine/core/src/kernel/svc.rs": "bed5e25f129eedcafb217ed115e491bd580f6a4ef9f56ab334506135732b6062",
+        "engine/core/src/services/mod.rs": "0a3b57e6a24eff1160a1a5f20838fcd295e0391edb45452e1c67df2d8452d0e7",
+        "engine/core/src/services/srv.rs": "387891cc2f2a19b5d69de31fcf759057c05d2d06ea41e58bbb1761e9d0b351cf",
+        "engine/gpu/src/lighting.rs": "b4aee9a4ca2a8823d81eb96e1aae8356ecafb0f0e5dc5670cba0613dba718cb7",
+        "engine/gpu/src/raster.rs": "fdb492d8ee0af6a35fdbe40571c804cbeae353cce2bc4cdbd6e1dfb098ddf868",
+        "engine/gpu/src/raster/gles.rs": "cf7a576087126b64c62a42a142773eaeefa273912a1a1ffe2a4ae8de7bd6f3e2"
+      }
+    }
+  },
+  "final_runtime_build": {
+    "source_patch_sha256": "54442094fed63760cd8f4f73ddb5ce0c8c8eef8db31a68b622516cf2d8337c05",
+    "source_sha256": {
+      "engine/core/src/kernel/object.rs": "2c6761a3be15b0caace458ebaf539d5bed7551a391adf22156d324e2f637ea76",
+      "engine/core/src/kernel/svc.rs": "10569c0c56c8de657d8f62628a68741a01d239ab7a470694ef7c3ad2d6ce6dd1",
+      "engine/core/src/services/mod.rs": "fb6e5dccc322aaaeb5df9bca26f8e5ffef4c0bff33b452f5f26c970dcb100b37",
+      "engine/core/src/services/srv.rs": "593613347a382730c9c6dcb7ad0e9f15be0077bcd238ed8cfa648807d121d601",
+      "engine/gpu/src/lighting.rs": "e4a79d9cff8a097c8390ae3d9f7613f75de425bbd73b615d40b999c09b2a6c88",
+      "engine/gpu/src/raster.rs": "53b4726510961aaebe492c3d47474bb9617b89e0279677a48a4461acb8260453",
+      "engine/gpu/src/raster/gles.rs": "b9d74310ffdb4e76434a2e0746fc29413900c05f888bc97b1257de895232df7d"
+    },
+    "runtime_sha256": "b2840b299f4700f3092f47c0ebe271d5cfeee0f122b76f7819379e5cc42ddec3"
+  },
+  "final_replay_equality": {
+    "ultra-sun": {
+      "exact_outcomes": true,
+      "exact_guest_traces": true,
+      "same_original_library_sha256": "3aa528474512976b143b1a06ed83eda44a18058d5c00960aea60c36378d1a5a8"
+    },
+    "omega-ruby": {
+      "exact_outcomes": true,
+      "exact_guest_traces": true,
+      "same_original_library_sha256": "7d4617f0f7964205a1941410631e9d204dbb489bfb1c94e3d3b1e9d9852f245f"
+    },
+    "pokemon-y": {
+      "exact_outcomes": true,
+      "exact_guest_traces": true,
+      "same_original_library_sha256": "91226273798d1a2d9f7b831d01fe7b758a347273fb49f437f5ae6bd2c8853f61"
+    }
+  },
+  "late_test_only_cleanup": {
+    "path": "engine/gpu/src/raster/gles.rs",
+    "before_sha256": "b9d74310ffdb4e76434a2e0746fc29413900c05f888bc97b1257de895232df7d",
+    "after_sha256": "61334ed7f7d7d002767c866a776514186b589614a593a9ce3d600b8c1e2a7655",
+    "production_prefix_sha256": "4ec2f91dc0242614b37056536da6871b11c4124f91821944564fef5375fbe07d",
+    "production_prefix_unchanged": true,
+    "scope": "Only retirement fixture stop calls/comment; accepted runtime/ARM/manual production bytes unchanged."
+  },
+  "validation": {
+    "workspace_reported_passed": 432,
+    "explicit_ignored": 8,
+    "python_passed": 34,
+    "aarch64_linux_check_exit": 0,
+    "arm64_android_release_link_exit": 0,
+    "independent_replays": 30,
+    "final_combined_replays": 3,
+    "monolithic_fixtures_explicitly_exercised": 2,
+    "note": "Full suite/cross builds preceded the final test-only stop calls; unchanged production prefix is hash-bound. Fixture skip and exercise branches checked separately afterward.",
+    "fixture_cleanup_both_modes_passed": true
+  }
+}
