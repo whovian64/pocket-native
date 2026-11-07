@@ -25,6 +25,7 @@ const DISABLE: [u32; 6] = [20, 21, 22, 16, 17, 19];
 /// the scene's fog, which the titles set from their own code.
 const FOG_MODES: [u32; 2] = [0, 5];
 const ETC1A4: u32 = 13;
+const FRAGMENT_LIGHT: u32 = 0x4000_00A2;
 
 /// a lookup table's input and scale, and its set's name and its own.
 type Table = (u32, u32, (String, String));
@@ -47,6 +48,8 @@ struct Found {
     formats: HashMap<String, u32>,
     absolute: HashMap<(String, String), BTreeSet<bool>>,
     shaders: Vec<(String, Shbin)>,
+    /// how many fragment lights the title's light sets have.
+    light_counts: BTreeSet<u32>,
 }
 
 /// writes precache.txt into dir, each line a vertex shader of the list
@@ -107,7 +110,8 @@ fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> BTreeSet<St
         let lit = material.flags & 1;
         let split = (0..3).filter(|&unit| material.textures[unit].as_ref().and_then(|name| seen.formats.get(name)) == Some(&ETC1A4)).fold(0, |bits, unit| bits | 1 << unit);
         let flags = enabled | split << 4 | 2 << 12 | lit << 17;
-        let lightings = if lit != 0 { lighting(material, &seen.absolute) } else { vec![BTreeMap::new()] };
+        let counts = if seen.light_counts.is_empty() { BTreeSet::from([1, 2]) } else { seen.light_counts.clone() };
+        let lightings = if lit != 0 { lighting(material, &seen.absolute, &counts) } else { vec![BTreeMap::new()] };
         for light in &lightings {
             for fog in FOG_MODES {
                 out.insert(0xE0, r(0xE0) & 0xFF00 | fog);
@@ -122,8 +126,8 @@ fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> BTreeSet<St
 }
 
 /// the lighting the library sets up for a material: its tables, fresnel
-/// and bump, under one or two directional lights from the scene.
-fn lighting(material: &Material, absolute: &HashMap<(String, String), BTreeSet<bool>>) -> Vec<BTreeMap<usize, u32>> {
+/// and bump, under as many directional lights as the title's scenes have.
+fn lighting(material: &Material, absolute: &HashMap<(String, String), BTreeSet<bool>>, counts: &BTreeSet<u32>) -> Vec<BTreeMap<usize, u32>> {
     let [flags, layer, fresnel, bump_unit, bump, renormalize] = material.lighting;
     let used = [flags >> 5 & 1 != 0, flags >> 5 & 1 != 0, flags >> 5 & 1 != 0, flags >> 1 & 1 != 0, flags >> 2 & 1 != 0, fresnel != 0];
     let mut config0 = 0x8000_0400 | (layer & 0xF) << 4 | (fresnel & 1) << 2 | (fresnel >> 1 & 1) << 3 | (flags & 1) << 27 | (bump_unit & 3) << 22 | (bump & 3) << 28;
@@ -146,11 +150,12 @@ fn lighting(material: &Material, absolute: &HashMap<(String, String), BTreeSet<b
     }
     let light = 1 | (flags >> 3 & 1) << 2 | (flags >> 4 & 1) << 3;
     let mut out = Vec::new();
-    for count in [1, 2] {
+    for &count in counts {
         for &bits in &absolutes {
-            let mut regs = BTreeMap::from([(0x8F, 1), (0x1C2, count - 1), (0x1C3, config0), (0x1C4, config1), (0x1D0, bits), (0x1D1, inputs), (0x1D2, scales), (0x1D9, if count == 2 { 0x10 } else { 0 })]);
+            let slots = (0..count).fold(0, |slots, slot| slots | slot << (4 * slot));
+            let mut regs = BTreeMap::from([(0x8F, 1), (0x1C2, count - 1), (0x1C3, config0), (0x1C4, config1), (0x1D0, bits), (0x1D1, inputs), (0x1D2, scales), (0x1D9, slots)]);
             for slot in 0..8 {
-                regs.insert(0x149 + 0x10 * slot, if slot < 2 { light } else { 1 });
+                regs.insert(0x149 + 0x10 * slot, if slot < count as usize { light } else { 1 });
             }
             out.push(regs);
         }
@@ -185,6 +190,10 @@ fn read(d: &[u8], source: &str, seen: &mut Found) {
                 seen.absolute.entry((set.clone(), table)).or_default().insert(word & 1 != 0);
             }
         }
+    }
+    let lights = dict(d, rel(d, data + 0x3C)).iter().filter(|&&(_, at)| u32_at(d, at) == Some(FRAGMENT_LIGHT)).count() as u32;
+    if lights > 0 {
+        seen.light_counts.insert(lights.min(8));
     }
     for (name, at) in dict(d, rel(d, data + 0x2C)) {
         if let Some(shbin) = rel(d, at + 0x1C).and_then(|binary| d.get(binary..)).filter(|binary| binary.starts_with(b"DVLB")).and_then(|binary| shaders::dvlb(binary, source)) {
@@ -304,7 +313,7 @@ mod tests {
             tables: [None, None, None, Some((0, 0, names("body_D0"))), Some((2, 1, names("body_D1"))), None],
         };
         let absolute = HashMap::from([(names("body_D0"), BTreeSet::from([true])), (names("body_D1"), BTreeSet::from([true]))]);
-        let setups = lighting(&material, &absolute);
+        let setups = lighting(&material, &absolute, &BTreeSet::from([1, 2]));
         assert_eq!(setups.len(), 2);
         let two = &setups[1];
         let expected = [(0x1C2, 1), (0x1C3, 0x8000_0420), (0x1C4, 0xFF7C_FFFF), (0x1D0, 0), (0x1D1, 0x20), (0x1D2, 0x10), (0x1D9, 0x10), (0x149, 9), (0x159, 9)];
