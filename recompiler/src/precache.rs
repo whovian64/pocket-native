@@ -11,6 +11,9 @@ use crate::rom::Title;
 use crate::shaders::{self, Shbin};
 
 pub const HEADER: &str = "pocket-native precache 1";
+/// a title's list: setups a run of the game used, each with its vertex
+/// shader by the binary's key and where the shader starts in it.
+pub const TITLE_HEADER: &str = "pocket-native title shaders 1";
 
 const STAGES: [usize; 6] = [0xC0, 0xC8, 0xD0, 0xD8, 0xF0, 0xF8];
 const UNIT_PARAMS: [usize; 3] = [0x83, 0x93, 0x9B];
@@ -26,6 +29,7 @@ const DISABLE: [u32; 6] = [20, 21, 22, 16, 17, 19];
 const FOG_MODES: [u32; 2] = [0, 5];
 const ETC1A4: u32 = 13;
 const FRAGMENT_LIGHT: u32 = 0x4000_00A2;
+const CAMERA: u32 = 0x4000_000A;
 /// at most this many, those the most materials share first: a Mali-G31 takes
 /// about a third of a second a program the first time.
 const MOST: usize = 2000;
@@ -58,13 +62,17 @@ struct Found {
     shaders: Vec<(String, String, Shbin)>,
     /// how many fragment lights the title's light sets have.
     light_counts: BTreeSet<u32>,
+    /// a camera of the title's with a w scale, which draws with the depth
+    /// the fragment shader writes.
+    w_buffer: bool,
 }
 
 /// writes precache.txt into dir, each line a vertex shader of the list
 /// write_vertex_list made from found, file:entry, and a setup as the
-/// engine's own list keeps them, the most shared first. how many lines,
-/// none for a title without NintendoWare models, which writes nothing.
-pub fn write(title: &Title, found: &[Shbin], dir: &Path) -> std::io::Result<usize> {
+/// engine's own list keeps them: the title's list first, where there is
+/// one, then the most shared. how many lines, none for a title with neither
+/// a list nor NintendoWare models, which writes nothing.
+pub fn write(title: &Title, found: &[Shbin], dir: &Path, titled: Option<&Path>) -> std::io::Result<usize> {
     let mut seen = Found::default();
     shaders::files(title, &mut |data, source| {
         if data.starts_with(b"CGFX") {
@@ -73,6 +81,26 @@ pub fn write(title: &Title, found: &[Shbin], dir: &Path) -> std::io::Result<usiz
     });
     let named: HashSet<Vec<u8>> = title.code().map(|code| code.split(|&byte| byte == 0).map(<[u8]>::to_vec).collect()).unwrap_or_default();
     let mut lines: Vec<(String, usize)> = lines(&seen, found, &named).into_iter().collect();
+    if let Some(text) = titled.and_then(|path| std::fs::read_to_string(path).ok()).filter(|text| text.lines().next() == Some(TITLE_HEADER)) {
+        let files: HashMap<String, usize> = found.iter().enumerate().map(|(n, shbin)| (format!("{:016x}", shbin.key()), n)).collect();
+        let (mut known, mut other) = (0, 0);
+        for line in text.lines().skip(1) {
+            let Some((vertex, setup)) = line.split_once(' ') else { continue };
+            let at = match vertex.split_once(':') {
+                None if vertex == "0" => Some("0".to_owned()),
+                Some((key, entry)) => files.get(key).map(|n| format!("{n}:{entry}")),
+                None => None,
+            };
+            match at {
+                Some(at) => {
+                    known += 1;
+                    lines.push((format!("{at} {setup}"), usize::MAX));
+                }
+                None => other += 1,
+            }
+        }
+        println!("{known} shaders from the title's list{}", if other > 0 { format!(", {other} for shaders this copy has not") } else { String::new() });
+    }
     if lines.is_empty() {
         return Ok(0);
     }
@@ -146,7 +174,9 @@ fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> HashMap<Str
         out.insert(0x113, 0xF);
         let lit = material.flags & 1;
         let split = (0..3).filter(|&unit| material.textures[unit].as_ref().and_then(|name| seen.formats.get(name)) == Some(&ETC1A4)).fold(0, |bits, unit| bits | 1 << unit);
-        let flags = enabled | split << 4 | 2 << 12 | lit << 17;
+        let flags = enabled | split << 4 | lit << 17;
+        // shaded, and with the w buffer where a camera has one
+        let depths: &[u32] = if seen.w_buffer { &[2 << 12, 3 << 12 | 1 << 16] } else { &[2 << 12] };
         // one light, which titles set up themselves as often as not, and two
         // where their light sets have two; sets of more are scenes' lights a
         // draw takes one or two of
@@ -158,7 +188,9 @@ fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> HashMap<Str
                 out.insert(0xE0, r(0xE0) & 0xFF00 | fog);
                 let regs: Vec<String> = out.iter().chain(light).filter(|&(&register, &value)| value != 0 && register < 0x300).map(|(register, value)| format!("{register:x}={value:x}")).collect();
                 for vertex in &vertices {
-                    own.insert(format!("{vertex} {flags:x} {}", regs.join(" ")));
+                    for depth in depths {
+                        own.insert(format!("{vertex} {:x} {}", flags | depth, regs.join(" ")));
+                    }
                 }
             }
         }
@@ -166,8 +198,44 @@ fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> HashMap<Str
             *lines.entry(line).or_default() += 1;
         }
     }
-    println!("{} NintendoWare materials, their shaders {paired:?}, light sets of {:?}", seen.materials.len(), seen.light_counts);
+    println!("{} NintendoWare materials, their shaders {paired:?}, light sets of {:?}{}", seen.materials.len(), seen.light_counts, if seen.w_buffer { ", a w buffer" } else { "" });
     lines
+}
+
+/// a run's shaders.txt, with the vertex programs it kept beside it, as a
+/// title's list: each line's vertex program found among the title's shader
+/// binaries and named by its key. the lines and how many had a program none
+/// of found's is.
+pub fn learn(found: &[Shbin], recorded: &Path) -> std::io::Result<(BTreeSet<String>, usize)> {
+    let text = std::fs::read_to_string(recorded)?;
+    let mut vertex_dir = recorded.as_os_str().to_owned();
+    vertex_dir.push(".vertex");
+    let vertex_dir = std::path::PathBuf::from(vertex_dir);
+    let mut keys: HashMap<String, Option<u64>> = HashMap::new();
+    let (mut lines, mut unknown) = (BTreeSet::new(), 0);
+    for line in text.lines().skip(1) {
+        let Some((vertex, setup)) = line.split_once(' ') else { continue };
+        if vertex == "0" {
+            lines.insert(line.to_owned());
+            continue;
+        }
+        let mut parts = vertex.split(':');
+        let (Some(fingerprint), Some(entry)) = (parts.next(), parts.next()) else { continue };
+        // the program memory the run saw: the binary at its start, and what
+        // an earlier, longer one left after it
+        let key = *keys.entry(fingerprint.to_owned()).or_insert_with(|| {
+            let fingerprint = u64::from_str_radix(fingerprint, 16).ok()?;
+            let bytes = std::fs::read(vertex_dir.join(format!("{fingerprint:016x}.pica"))).ok()?;
+            let words: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|chunk| u32::from_le_bytes(*chunk)).collect();
+            let (program, descriptors) = words.split_at_checked(4096)?;
+            found.iter().filter(|shbin| program.starts_with(&shbin.code) && descriptors.starts_with(&shbin.descriptors)).max_by_key(|shbin| shbin.code.len()).map(Shbin::key)
+        });
+        match key {
+            Some(key) => _ = lines.insert(format!("{key:016x}:{entry} {setup}")),
+            None => unknown += 1,
+        }
+    }
+    Ok((lines, unknown))
 }
 
 /// the lighting the library sets up for a material: its tables, fresnel
@@ -236,6 +304,7 @@ fn read(d: &[u8], source: &str, seen: &mut Found) {
             }
         }
     }
+    seen.w_buffer |= dict(d, rel(d, data + 0x34)).iter().any(|&(_, at)| u32_at(d, at) == Some(CAMERA) && u32_at(d, at + 0xC4).is_some_and(|scale| f32::from_bits(scale) != 0.0));
     let lights = dict(d, rel(d, data + 0x3C)).iter().filter(|&&(_, at)| u32_at(d, at) == Some(FRAGMENT_LIGHT)).count() as u32;
     if lights > 0 {
         seen.light_counts.insert(lights.min(8));

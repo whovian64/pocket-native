@@ -1932,6 +1932,7 @@ impl Gles {
             let mut fields = line.split_whitespace();
             let Some(at) = fields.next() else { continue };
             let stage = match precache.stages.get(at) {
+                _ if at == "0" => Some(0),
                 Some(&stage) => stage,
                 None => {
                     let found = precache.listed.get(at).map(|fields| fields.iter().map(String::as_str).collect::<Vec<&str>>());

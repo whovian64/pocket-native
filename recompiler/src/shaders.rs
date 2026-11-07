@@ -23,6 +23,14 @@ pub struct Entry {
     pub outputs: Vec<(u16, u16, u32)>,
 }
 
+impl Shbin {
+    /// what a title's list knows the binary by, the same in every copy of
+    /// the game: FNV-1a over its program and its descriptors.
+    pub fn key(&self) -> u64 {
+        self.code.iter().chain(&self.descriptors).flat_map(|word| word.to_le_bytes()).fold(0xCBF2_9CE4_8422_2325, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x100_0000_01B3))
+    }
+}
+
 impl Entry {
     /// the output map a game sets for the entry, worked out from its table
     /// as libctru's shader programs do: the output registers used, how many,
@@ -433,6 +441,24 @@ mod tests {
         // position in o0, color in o1, texcoord0 in o2's xy
         let entry = Entry { geometry: false, main: 0, end: 0, outputs: vec![(0, 0, 0xF), (2, 1, 0xF), (3, 2, 0x3)] };
         assert_eq!(entry.outmap(), (0b111, 3, [0x0302_0100, 0x0B0A_0908, 0x1F1F_0D0C, 0x1F1F_1F1F, 0x1F1F_1F1F, 0x1F1F_1F1F, 0x1F1F_1F1F]));
+    }
+
+    #[test]
+    fn a_run_s_vertex_program_is_found_by_its_binary() {
+        let shbin = |code: Vec<u32>| Shbin { source: String::new(), code, descriptors: vec![7], entries: Vec::new() };
+        let found = [shbin(vec![1, 2]), shbin(vec![1, 2, 3])];
+        let dir = std::env::temp_dir().join(format!("pn-learn-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("shaders.txt.vertex")).unwrap();
+        // the program memory holds the longer binary and what was left after it
+        let mut words = vec![0u32; 4096 + 128];
+        words[..4].copy_from_slice(&[1, 2, 3, 9]);
+        words[4096] = 7;
+        std::fs::write(dir.join("shaders.txt.vertex").join("00000000000000ab.pica"), words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        std::fs::write(dir.join("shaders.txt"), "zakuro-gles 5\nab:1c:0:1 1 c0=f\ncd:0:0:1 1 c0=e\n0 2 c0=d\n").unwrap();
+        let (lines, unknown) = crate::precache::learn(&found, &dir.join("shaders.txt")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(unknown, 1);
+        assert_eq!(lines.into_iter().collect::<Vec<_>>(), vec!["0 2 c0=d".to_owned(), format!("{:016x}:1c 1 c0=f", found[1].key())]);
     }
 
     #[test]
