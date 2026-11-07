@@ -30,6 +30,12 @@ _PROFILE_SPEC.loader.exec_module(profile_rules)
 _BATCH_SPEC = importlib.util.spec_from_file_location("batch_metrics", Path(__file__).with_name("batch_metrics.py"))
 batch_metrics = importlib.util.module_from_spec(_BATCH_SPEC)
 _BATCH_SPEC.loader.exec_module(batch_metrics)
+_DIAGNOSTIC_SPEC = importlib.util.spec_from_file_location("diagnostic_profiles", Path(__file__).with_name("diagnostic_profiles.py"))
+diagnostic_rules = importlib.util.module_from_spec(_DIAGNOSTIC_SPEC)
+_DIAGNOSTIC_SPEC.loader.exec_module(diagnostic_rules)
+_RENDER_SPEC = importlib.util.spec_from_file_location("render_profiles", Path(__file__).with_name("render_profiles.py"))
+render_rules = importlib.util.module_from_spec(_RENDER_SPEC)
+_RENDER_SPEC.loader.exec_module(render_rules)
 
 SCHEMA = 1
 BUTTONS = set("A B X Y L R START SELECT UP DOWN LEFT RIGHT CUP CDOWN CLEFT CRIGHT".split())
@@ -148,6 +154,14 @@ def write_json(path: Path, value: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
     temporary.replace(path)
+
+
+def validate_resolution(value: float) -> None:
+    # GLES draws whole quarter steps, clamped to 1x..4x. Reject requests
+    # that would label a different amount of raster work in the receipt.
+    if (type(value) not in (int, float) or not math.isfinite(value)
+            or not 1 <= value <= 4 or not float(value * 4).is_integer()):
+        raise ValueError("resolution must be a whole quarter step from 1x through 4x")
 
 
 def validate_input(spec: str) -> str:
@@ -443,8 +457,13 @@ def probe_result(trial: Path, frames: int) -> dict:
                 trace_receipt = {"path": str(trace_path), "sha256": digest(trace_path),
                                  "sampling_interval_frames": every, "checkpoint_count": len(checkpoints)}
         # A stopped/black boot can be fast and deterministic; require scene review separately.
-        return {"valid": not errors, "errors": errors, "report": report, "screenshots": screenshots,
-                "warnings_errors": warnings, "guest_trace": trace_receipt, "report_sha256": digest(report_path)}
+        result = {"valid": not errors, "errors": errors, "report": report, "screenshots": screenshots,
+                  "warnings_errors": warnings, "guest_trace": trace_receipt, "report_sha256": digest(report_path)}
+        artifacts = sorted(path.name for name in ("packet-census.toml", "render-geometry.toml")
+                           if (path := report_path.with_name(name)).is_file())
+        if artifacts:
+            result["diagnostic_artifacts"] = artifacts
+        return result
     except (OSError, ValueError, TypeError) as error:
         return {"valid": False, "errors": [f"unreadable probe: {error}"]}
 
@@ -469,13 +488,22 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("--max-other-cpu-fraction must be finite and between 0 and 1")
     if args.trace_every is not None and (not 1 <= args.trace_every <= args.frames or args.frames // args.trace_every > 100000):
         raise ValueError("--trace-every must produce between 1 and 100000 checkpoints")
-    if not math.isfinite(args.resolution) or args.resolution <= 0 or not 0 <= args.clock < 2**64:
-        raise ValueError("resolution must be finite and positive, clock must be nonnegative")
+    validate_resolution(args.resolution)
+    if not 0 <= args.clock < 2**64:
+        raise ValueError("clock must be nonnegative and fit u64")
     validate_input(args.input)
     if args.batch_telemetry and not 0 <= args.measure_start < (args.measure_end or args.frames) <= args.frames <= 100000:
         raise ValueError("batch telemetry requires 0 <= start < end <= frames <= 100000")
     if not args.batch_telemetry and (args.measure_start != 0 or args.measure_end is not None):
         raise ValueError("measurement ranges require --batch-telemetry")
+    diagnostic = diagnostic_source = diagnostic_data = diagnostic_backend = None
+    diagnostic_path = getattr(args, "diagnostic_profile", None)
+    if diagnostic_path:
+        diagnostic_path = diagnostic_path.resolve(strict=True)
+        diagnostic, diagnostic_source, diagnostic_data = diagnostic_rules.load(diagnostic_path)
+        diagnostic_backend = diagnostic_rules.backend_inputs(diagnostic)
+        if diagnostic.get("packet_window_start", 0) >= args.frames:
+            raise ValueError("packet window start must be within the executed frame range")
     implementation = None
     implementation_source = None
     allocator_before = None
@@ -490,6 +518,8 @@ def run(args: argparse.Namespace) -> int:
             if allocator_before["sha256"] != allocator["sha256"]:
                 raise ValueError("implementation-profile allocator differs from its required SHA-256")
             allocator["path"] = str(allocator_path)
+    render_path = getattr(args, "render_profile", None)
+    render, render_source = render_rules.load(render_path.absolute()) if render_path else (None, None)
     for key in ("rom", "executable", "library"):
         path = getattr(args, key).resolve(strict=True)
         if not path.is_file():
@@ -514,9 +544,19 @@ def run(args: argparse.Namespace) -> int:
     profiles = tree_identity(args.titles)
     config = tree_identity(args.seed_config)
     cache = tree_identity(args.seed_cache)
+    if render:
+        render_rules.check_run(render, resolution=args.resolution, frames=args.frames, diagnostic=diagnostic,
+            seeded_config=[item["path"] for item in config],
+            implementation_settings=profile_rules.settings(implementation) if implementation else None,
+            implementation_environment=profile_rules.environment(implementation) if implementation else None)
     if implementation and any(Path(item["path"]).name == "settings.toml" for item in seed + config):
         raise ValueError("profile mode generates settings.toml; remove seeded settings.toml to avoid undeclared overrides")
     cgroup_start = cgroup_envelope()
+    renderer_environment = {key: os.environ[key] for key in RENDERER_ENV if key in os.environ}
+    if diagnostic:
+        renderer_environment.pop("XDG_RUNTIME_DIR", None)
+        if runtime := (diagnostic.get("audio_backend") or {}).get("xdg_runtime_dir"):
+            renderer_environment["XDG_RUNTIME_DIR"] = runtime["path"]
     experiment = {"frames": args.frames, "clock_ms_since_1900": args.clock, "input": args.input,
                   "resolution": args.resolution, "cpu_affinity": affinity or allowed,
                   "rss_watchdog_limit_mib": args.rss_limit_mib, "seed_data": seed,
@@ -528,7 +568,7 @@ def run(args: argparse.Namespace) -> int:
                   "seed_cache": cache, "driver_cache": args.driver_cache,
                   "probe_observer": {"batch_telemetry": args.batch_telemetry, "capture": args.capture,
                                      "measure_start": args.measure_start, "measure_end": args.measure_end or args.frames},
-                  "renderer_environment": {key: os.environ[key] for key in RENDERER_ENV if key in os.environ}}
+                  "renderer_environment": renderer_environment}
     if implementation:
         experiment["implementation_constraints"] = implementation["constraints"]
     manifest = {"schema_version": SCHEMA, "rom": identity(args.rom), "executable": identity(args.executable),
@@ -549,6 +589,21 @@ def run(args: argparse.Namespace) -> int:
             "declaration_sha256": profile_rules.declaration_hash(implementation),
             "source": implementation_source, "allocator_before": allocator_before}
         shutil.copy2(args.implementation_profile, args.output / "implementation-profile.json")
+    if diagnostic:
+        experiment["diagnostic_profile"] = diagnostic
+        manifest["evidence_class"] = diagnostic_rules.NON_TIMING
+        manifest["diagnostic_profile"] = {"declaration": diagnostic,
+            "declaration_sha256": diagnostic_rules.declaration_hash(diagnostic),
+            "source": diagnostic_source, "backend_before": diagnostic_backend}
+        manifest["harness"]["diagnostic_profiles_sha256"] = digest(Path(diagnostic_rules.__file__))
+        (args.output / "diagnostic-profile.json").write_bytes(diagnostic_data)
+    if render:
+        experiment["render_profile"] = render
+        manifest["render_profile"] = {"declaration": render,
+            "declaration_sha256": render_rules.declaration_hash(render), "source": render_source}
+        manifest["harness"]["render_profiles_sha256"] = digest(Path(render_rules.__file__))
+        if not render_rules.timing_eligible(render):
+            manifest["evidence_class"] = diagnostic_rules.NON_TIMING
     write_json(args.output / "manifest.json", manifest)
     manifest["harness"]["batch_metrics_sha256"] = digest(Path(batch_metrics.__file__))
     for index in range(args.repeats):
@@ -566,8 +621,11 @@ def run(args: argparse.Namespace) -> int:
                 (trial / name).mkdir()
         if implementation:
             (trial / "data/settings.toml").write_text(profile_rules.settings(implementation))
-        env = {key: os.environ[key] for key in ("PATH", *RENDERER_ENV)
-               if key in os.environ}
+        render_text = render_rules.config_settings(render) if render else None
+        if render_text is not None:
+            with (trial / "config/settings.toml").open("x") as target:
+                target.write(render_text)
+        env = {**({"PATH": os.environ["PATH"]} if "PATH" in os.environ else {}), **renderer_environment}
         env.update({"HOME": str(trial / "home"), "XDG_CONFIG_HOME": str(trial / "config"),
                     "XDG_CACHE_HOME": str(trial / "cache"), "XDG_DATA_HOME": str(trial / "xdg-data"),
                     "TMPDIR": str(trial / "tmp"), "POCKET_NATIVE_CONFIG": str(trial / "config"),
@@ -589,11 +647,19 @@ def run(args: argparse.Namespace) -> int:
                         "MESA_SHADER_CACHE_DIR": str(trial / "cache/driver-mesa")})
         if implementation:
             env.update(profile_rules.environment(implementation))
+        if diagnostic:
+            env.update(diagnostic_rules.environment(diagnostic))
+        if render:
+            env.update(render_rules.environment(render, trial))
         result = {"trial": trial.name, "command": command, "environment": env}
+        if render:
+            result["render_settings"] = identity(trial / "config/settings.toml") if render_text is not None else None
         if implementation:
             result["generated_settings_sha256"] = digest(trial / "data/settings.toml")
         result["resource_envelope"] = cgroup_envelope()["comparable"]
         try:
+            if diagnostic:
+                result["diagnostic_backend"] = diagnostic_rules.stage_backend(diagnostic, trial)
             preload_path = Path(implementation["knobs"]["allocator"]["path"]) if allocator_before else None
             result["metrics"] = measure(command, trial, env, args.timeout, affinity, args.rss_limit_mib, preload_path)
             result["host_activity"] = result["metrics"].pop("host_activity")
@@ -608,10 +674,29 @@ def run(args: argparse.Namespace) -> int:
             if (args.trace_every is not None and (result["probe"].get("guest_trace") or {}).get("sampling_interval_frames") != args.trace_every):
                 result["probe"]["errors"].append("requested guest trace missing or using a different interval")
                 result["probe"]["valid"] = False
-            result["renderer_log_lines"] = [line for line in (trial / "stderr.log").read_text(errors="replace").splitlines()
+            stderr_text = (trial / "stderr.log").read_text(errors="replace")
+            if (diagnostic or result["probe"].get("diagnostic_artifacts")
+                    or any(key in result["probe"].get("report", {}) for key in ("audio", "render_geometry_file"))
+                    or "texture cache stats" in stderr_text):
+                result["diagnostics"] = diagnostic_rules.collect(trial, result["probe"].get("report", {}),
+                    result["probe"].get("screenshots", {}), diagnostic)
+                manifest["evidence_class"] = diagnostic_rules.NON_TIMING
+                manifest["harness"].setdefault("diagnostic_profiles_sha256", digest(Path(diagnostic_rules.__file__)))
+                if reader_source := result["diagnostics"].get("gpu_reader_source"):
+                    initial = manifest["harness"].setdefault("diagnostic_gpu_reader_sha256", reader_source["sha256"])
+                    if initial != reader_source["sha256"]:
+                        result["diagnostics"]["valid"] = False
+                        result["diagnostics"]["errors"].append("GPU census reader changed between trials")
+            result["renderer_log_lines"] = [line for line in stderr_text.splitlines()
                                             if re.search(r"renderer|vendor|OpenGL|Vulkan|EGL|llvmpipe", line, re.IGNORECASE)][:30]
             result["renderer_identity"] = sorted({match[1].strip() for line in result["renderer_log_lines"]
                                                   if (match := re.search(r"drawing with OpenGL ES on (.+)", line))})
+            if render:
+                result["render_observation"] = render_rules.observe(render,
+                    geometry=(result.get("diagnostics") or {}).get("geometry", {}).get("record"),
+                    renderer_log_lines=result["renderer_log_lines"], trial=trial)
+                if render_text is not None:
+                    result["render_settings_after"] = identity(trial / "config/settings.toml")
             if implementation:
                 result["implementation_profile_proof"] = profile_rules.proof(implementation,
                     (trial / "stderr.log").read_text(errors="replace").splitlines(), result["metrics"]["preload_proof"])
@@ -625,6 +710,12 @@ def run(args: argparse.Namespace) -> int:
                                and result["probe"]["valid"])
             if implementation:
                 result["valid"] &= result["implementation_profile_proof"]["verified"]
+            if render:
+                result["valid"] &= result["render_observation"]["admitted"]
+                if render_text is not None:
+                    result["valid"] &= result["render_settings_after"] == result["render_settings"]
+            if "diagnostics" in result:
+                result["valid"] &= result["diagnostics"]["valid"]
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             result.update(valid=False, error=str(error))
         write_json(trial / "result.json", result)
@@ -646,6 +737,30 @@ def run(args: argparse.Namespace) -> int:
                 changed.append("implementation_allocator")
     if digest(Path(batch_metrics.__file__)) != manifest["harness"]["batch_metrics_sha256"]:
         changed.append("batch_metrics_support")
+    if diagnostic or "diagnostic_profiles_sha256" in manifest["harness"]:
+        if digest(Path(diagnostic_rules.__file__)) != manifest["harness"]["diagnostic_profiles_sha256"]:
+            changed.append("diagnostic_profile_support")
+    if "diagnostic_gpu_reader_sha256" in manifest["harness"]:
+        try:
+            if digest(Path(__file__).with_name("gpu_census.py")) != manifest["harness"]["diagnostic_gpu_reader_sha256"]:
+                changed.append("diagnostic_gpu_reader")
+        except OSError:
+            changed.append("diagnostic_gpu_reader")
+    if diagnostic:
+        if identity(diagnostic_path) != diagnostic_source:
+            changed.append("diagnostic_profile")
+        try:
+            manifest["diagnostic_profile"]["backend_after"] = diagnostic_rules.backend_inputs(diagnostic)
+            if manifest["diagnostic_profile"]["backend_after"] != diagnostic_backend:
+                changed.append("diagnostic_backend")
+        except (OSError, ValueError) as error:
+            manifest["diagnostic_profile"]["backend_after_error"] = str(error)
+            changed.append("diagnostic_backend")
+    if render:
+        if identity(Path(render_source["path"])) != render_source:
+            changed.append("render_profile")
+        if digest(Path(render_rules.__file__)) != manifest["harness"]["render_profiles_sha256"]:
+            changed.append("render_profile_support")
     for key, initial in (("seed_data", seed), ("seed_config", config), ("seed_cache", cache), ("titles", profiles)):
         if tree_identity(getattr(args, key)) != initial:
             changed.append(key)
@@ -674,6 +789,7 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
         return ["missing/invalid fixed experiment workload"]
     try:
         validate_input(script)
+        validate_resolution(resolution)
     except ValueError as error:
         errors.append(str(error))
     metrics = trial.get("metrics", {})
@@ -775,6 +891,65 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
             allowed.update(profile_rules.environment(profile_rules.validate(receipt["declaration"])))
         except (ValueError, KeyError, TypeError):
             errors.append("cannot derive declared implementation environment")
+    receipt = manifest.get("diagnostic_profile")
+    if receipt is not None:
+        try:
+            declaration = diagnostic_rules.validate(receipt["declaration"])
+            diagnostic_env = diagnostic_rules.environment(declaration)
+            allowed.update(diagnostic_env)
+            if (receipt.get("declaration_sha256") != diagnostic_rules.declaration_hash(declaration)
+                    or experiment.get("diagnostic_profile") != declaration
+                    or any(env.get(key) != value for key, value in diagnostic_env.items())
+                    or set(env).intersection(diagnostic_rules.ENV_KEYS) != set(diagnostic_env)
+                    or trial.get("diagnostics", {}).get("valid") is not True
+                    or trial.get("diagnostics", {}).get("requested") != declaration
+                    or trial.get("diagnostics", {}).get("timing_eligible") is not False):
+                errors.append("diagnostic declaration/environment/receipt mismatch")
+        except (ValueError, KeyError, TypeError):
+            errors.append("cannot derive declared diagnostic environment")
+    receipt = manifest.get("render_profile")
+    if receipt is not None:
+        try:
+            declaration = render_rules.validate(receipt["declaration"])
+            implementation_receipt = manifest.get("implementation_profile")
+            implementation = (profile_rules.validate(implementation_receipt["declaration"])
+                              if implementation_receipt else None)
+            diagnostic_receipt = manifest.get("diagnostic_profile")
+            diagnostic = (diagnostic_rules.validate(diagnostic_receipt["declaration"])
+                          if diagnostic_receipt else None)
+            render_rules.check_run(declaration, resolution=resolution, frames=frames, diagnostic=diagnostic,
+                seeded_config=[item["path"] for item in experiment.get("seed_config", [])],
+                implementation_settings=profile_rules.settings(implementation) if implementation else None,
+                implementation_environment=profile_rules.environment(implementation) if implementation else None)
+            trial_path = Path(env.get("ZAKURO_DATA", "")).parent
+            if (not trial_path.is_absolute()
+                    or env.get("POCKET_NATIVE_CONFIG") != str(trial_path / "config")):
+                raise ValueError("render trial data/config paths are not isolated siblings")
+            render_env = render_rules.environment(declaration, trial_path)
+            allowed.update(render_env)
+            observation = render_rules.observe(declaration,
+                geometry=(trial.get("diagnostics") or {}).get("geometry", {}).get("record"),
+                renderer_log_lines=renderer_lines, trial=trial_path)
+            text = render_rules.config_settings(declaration)
+            settings_receipt = trial.get("render_settings")
+            settings_ok = settings_receipt is None if text is None else (
+                isinstance(settings_receipt, dict)
+                and settings_receipt.get("path") == str(trial_path / "config/settings.toml")
+                and settings_receipt.get("sha256") == hashlib.sha256(text.encode()).hexdigest()
+                and settings_receipt.get("bytes") == len(text.encode())
+                and trial.get("render_settings_after") == settings_receipt)
+            if (receipt.get("declaration_sha256") != render_rules.declaration_hash(declaration)
+                    or experiment.get("render_profile") != declaration
+                    or any(env.get(key) != value for key, value in render_env.items())
+                    or set(env).intersection(render_rules.ENV_KEYS) != set(render_env)
+                    or trial.get("render_observation") != observation or observation["admitted"] is not True
+                    or "render_settings" not in trial or not settings_ok):
+                errors.append("render declaration/environment/observation/settings receipt mismatch")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            errors.append(f"cannot derive declared render receipt: {error}")
+    elif (set(env).intersection(render_rules.ENV_KEYS) or "render_profile" in experiment
+            or "render_observation" in trial or "render_settings" in trial):
+        errors.append("undeclared render profile/environment/observation")
     if not isinstance(env, dict) or set(env) - allowed:
         errors.append("undeclared process environment variables")
     return errors
@@ -782,6 +957,27 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
 
 def compare_values(baseline: dict, candidate: dict) -> dict:
     errors, implementation_report = profile_rules.compare(baseline, candidate)
+    left_render, right_render = baseline.get("render_profile"), candidate.get("render_profile")
+    if any(receipt is not None and not isinstance(receipt, dict) for receipt in (left_render, right_render)):
+        errors.append("invalid render profile receipt shape")
+    if ((left_render is None) != (right_render is None)
+            or isinstance(left_render, dict) and isinstance(right_render, dict)
+            and left_render.get("declaration_sha256") != right_render.get("declaration_sha256")):
+        errors.append("different render profile declarations; scale/aspect/layout are independent workload axes")
+    if left_render is not None or right_render is not None:
+        left_support = baseline.get("harness", {}).get("render_profiles_sha256")
+        if (not isinstance(left_support, str) or not re.fullmatch(r"[0-9a-f]{64}", left_support)
+                or left_support != candidate.get("harness", {}).get("render_profiles_sha256")):
+            errors.append("missing or different render-profile support SHA-256")
+    for name, value in (("baseline", baseline), ("candidate", candidate)):
+        receipt = value.get("render_profile")
+        render = receipt.get("declaration") if isinstance(receipt, dict) else None
+        if (isinstance(render, dict) and render.get("presentation_capture") is not None
+                or any(set(trial.get("environment", {})).intersection(render_rules.ENV_KEYS)
+                       for trial in value.get("trials", []))):
+            errors.append(f"{name}: {render_rules.NON_TIMING}")
+        if reasons := diagnostic_rules.timing_reasons(value):
+            errors.append(f"{name}: {diagnostic_rules.NON_TIMING}: {', '.join(reasons)}")
     if any(type(value.get("schema_version")) is not int or value["schema_version"] != SCHEMA for value in (baseline, candidate)):
         errors.append("missing, unsupported or different manifest schema_version")
     harness = baseline.get("harness", {}).get("sha256")
@@ -912,12 +1108,16 @@ def main() -> int:
         runner.add_argument(f"--{name}", type=Path, required=True)
     for name in ("seed-data", "seed-config", "titles", "build-metadata", "scene-evidence", "implementation-profile"):
         runner.add_argument(f"--{name}", type=Path)
+    runner.add_argument("--diagnostic-profile", type=Path,
+                        help="closed JSON observer declaration; every diagnostic replay is NON-TIMING evidence")
+    runner.add_argument("--render-profile", type=Path,
+                        help="closed scale/aspect/layout declaration; offscreen panel captures are NON-TIMING")
     runner.add_argument("--frames", type=int, default=600)
     runner.add_argument("--repeats", type=int, default=3)
     runner.add_argument("--timeout", type=float, default=600)
     runner.add_argument("--clock", type=int, default=4000000000000)
     runner.add_argument("--input", default="0:A")
-    runner.add_argument("--resolution", type=float, default=1.0)
+    runner.add_argument("--resolution", type=float, default=1.0, help="internal raster request: quarter steps 1x..4x; effective renderer geometry must be checked separately")
     runner.add_argument("--cpu-affinity", default="", help="comma-separated allowed Linux CPU IDs")
     runner.add_argument("--rss-limit-mib", type=int, help="sampled child RSS watchdog; may overshoot; no virtual-address-space limit")
     runner.add_argument("--max-other-cpu-fraction", type=float, default=0.15,

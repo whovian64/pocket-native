@@ -53,6 +53,122 @@ def scale_metrics(trial: dict, factor: float) -> None:
         trial["metrics"][key] *= factor
 
 
+class ResolutionTests(unittest.TestCase):
+    def test_only_actual_quarter_step_requests_are_labeled(self):
+        for value in (1, 1.25, 1.5, 1.75, 2, 3.5, 4):
+            evaluate.validate_resolution(value)
+        for value in (0.5, 1.3, 4.25, float("nan"), float("inf"), True, "1.5"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                evaluate.validate_resolution(value)
+
+    def test_matching_mislabeled_receipts_still_cannot_compare(self):
+        baseline, candidate = fixture(), fixture()
+        for manifest in (baseline, candidate):
+            manifest["experiment"]["resolution"] = 1.3
+            for trial in manifest["trials"]:
+                trial["environment"]["ZAKURO_RESOLUTION"] = "1.3"
+        result = evaluate.compare_values(baseline, candidate)
+        self.assertEqual(result["status"], "incomparable")
+        self.assertTrue(any("quarter step" in error for error in result["errors"]))
+
+
+class DiagnosticComparisonTests(unittest.TestCase):
+    def test_identical_diagnostics_cannot_become_throughput_wins(self):
+        for marker in ("profile", "packet_artifact", "audio_report", "diagnostic_receipt", "environment"):
+            with self.subTest(marker=marker):
+                baseline, candidate = fixture(), fixture()
+                for manifest in (baseline, candidate):
+                    if marker == "profile":
+                        manifest["diagnostic_profile"] = {"declaration": {"schema_version": 1}}
+                    for trial in manifest["trials"]:
+                        if marker == "packet_artifact":
+                            trial["probe"]["diagnostic_artifacts"] = ["packet-census.toml"]
+                        elif marker == "audio_report":
+                            trial["probe"]["report"]["audio"] = {"requested": "paced"}
+                        elif marker == "diagnostic_receipt":
+                            trial["diagnostics"] = {"valid": True, "timing_eligible": False}
+                        elif marker == "environment":
+                            trial["environment"]["ZAKURO_PROBE_AUDIO"] = "off"
+                for trial in candidate["trials"]:
+                    scale_metrics(trial, .1)
+                result = evaluate.compare_values(baseline, candidate)
+                self.assertEqual(result["status"], "incomparable")
+                self.assertFalse(result["target_met"])
+                self.assertTrue(any("NON-TIMING" in error for error in result["errors"]))
+
+    def test_no_profile_or_artifact_preserves_ordinary_comparison(self):
+        baseline, candidate = fixture(), fixture()
+        for trial in candidate["trials"]:
+            scale_metrics(trial, .49)
+        self.assertEqual(evaluate.diagnostic_rules.timing_reasons(baseline), [])
+        self.assertTrue(evaluate.compare_values(baseline, candidate)["target_met"])
+
+
+def render_profile(scale=1.5):
+    return evaluate.render_rules.validate({"schema_version": 1, "id": "scale-cell", "internal_scale": scale,
+        "layout": "BigTop", "aspect": "Original", "swapped": False, "stretched": "Off",
+        "presentation_capture": None})
+
+
+def with_render_receipts(manifest, profile):
+    manifest["render_profile"] = {"declaration": profile,
+        "declaration_sha256": evaluate.render_rules.declaration_hash(profile)}
+    manifest["harness"]["render_profiles_sha256"] = evaluate.digest(Path(evaluate.render_rules.__file__))
+    manifest["experiment"]["render_profile"] = profile
+    manifest["experiment"]["resolution"] = profile["internal_scale"]
+    for trial in manifest["trials"]:
+        trial["environment"].update(ZAKURO_RESOLUTION=str(profile["internal_scale"]),
+            ZAKURO_DATA="/synthetic/trial/data", POCKET_NATIVE_CONFIG="/synthetic/trial/config")
+        trial["renderer_log_lines"].append(f"drawing on synthetic at {profile['internal_scale']:g}x through OpenGL ES")
+        trial["render_settings"] = None
+        trial["render_observation"] = evaluate.render_rules.observe(profile,
+            renderer_log_lines=trial["renderer_log_lines"], trial=Path("/synthetic/trial"))
+    return manifest
+
+
+class RenderReceiptTests(unittest.TestCase):
+    def test_scale_only_receipt_can_compare_when_actual_scale_is_proven(self):
+        baseline = with_render_receipts(fixture(), render_profile())
+        candidate = copy.deepcopy(baseline)
+        for trial in candidate["trials"]:
+            scale_metrics(trial, .49)
+        result = evaluate.compare_values(baseline, candidate)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["target_met"])
+
+    def test_admitted_flag_cannot_override_missing_or_conflicting_scale_evidence(self):
+        for mutation in ("missing-log", "wrong-log", "hash", "declaration", "settings", "env", "observation"):
+            with self.subTest(mutation=mutation):
+                manifest = with_render_receipts(fixture(), render_profile())
+                trial = manifest["trials"][0]
+                if mutation == "missing-log": trial["renderer_log_lines"].pop()
+                elif mutation == "wrong-log": trial["renderer_log_lines"][-1] = "drawing on synthetic at 1x through OpenGL ES"
+                elif mutation == "hash": manifest["render_profile"]["declaration_sha256"] = "f" * 64
+                elif mutation == "declaration": manifest["experiment"]["render_profile"] = render_profile(2)
+                elif mutation == "settings": trial["render_settings"] = {"sha256": "f" * 64}
+                elif mutation == "env": trial["environment"]["ZAKURO_PANEL_SHOT"] = "/tmp/foreign.ppm"
+                else: trial["render_observation"]["scanout"] = "observed"
+                self.assertTrue(evaluate.validate_trial_receipt(manifest, trial))
+
+    def test_distinct_or_missing_profiles_and_support_cannot_compare(self):
+        baseline = with_render_receipts(fixture(), render_profile())
+        for candidate in (fixture(), with_render_receipts(fixture(), render_profile(2))):
+            result = evaluate.compare_values(baseline, candidate)
+            self.assertTrue(any("different render profile" in error for error in result["errors"]))
+        candidate = copy.deepcopy(baseline)
+        candidate["harness"]["render_profiles_sha256"] = "f" * 64
+        self.assertTrue(any("support SHA-256" in error for error in evaluate.compare_values(baseline, candidate)["errors"]))
+
+    def test_panel_environment_is_non_timing_even_without_declaration(self):
+        baseline, candidate = fixture(), fixture()
+        for manifest in (baseline, candidate):
+            for trial in manifest["trials"]:
+                trial["environment"]["ZAKURO_PANEL_SHOT"] = "/tmp/panel.ppm"
+        result = evaluate.compare_values(baseline, candidate)
+        self.assertTrue(any("NON-TIMING" in error for error in result["errors"]))
+        self.assertTrue(any("undeclared render" in error for error in result["errors"]))
+
+
 class MemoryObservationTests(unittest.TestCase):
     def test_peak_components_come_from_one_snapshot(self):
         observations = {"samples": 0, "at_sampled_peak_rss": None}
@@ -362,6 +478,8 @@ if pathlib.Path("data/settings.toml").exists():
     print("switch: shader stages built apart and put together when drawn, ZAKURO_SEPARABLE_SHADERS", file=sys.stderr)
     print("switch: shaders compiled when a draw needs them, ZAKURO_SYNC_SHADERS", file=sys.stderr)
     print("decoded texture cache budget: 16 MiB (ZAKURO_TEXTURE_CACHE_MIB)", file=sys.stderr)
+print("drawing with OpenGL ES on synthetic", file=sys.stderr)
+print("drawing on synthetic at " + os.environ["ZAKURO_RESOLUTION"] + "x through OpenGL ES", file=sys.stderr)
 p = pathlib.Path("probe-0000000000000000")
 p.mkdir()
 assert not pathlib.Path("data/new-save").exists()
@@ -387,6 +505,30 @@ bottom_pictures = 8
 skipped_frames = 0
 screenshots = [""" + ",".join('"frame-%05d.bmp"' % n for n in range(8)) + "]")
 (p / "report.md").write_text("## Warnings and errors\\n\\nNone.\\n\\n## Threads at the end\\n")
+if os.environ.get("ZAKURO_PROBE_GEOMETRY") == "1":
+    nl = chr(10)
+    settings_file = pathlib.Path(os.environ["POCKET_NATIVE_CONFIG"]) / "settings.toml"
+    settings = tomllib.loads(settings_file.read_text()) if settings_file.exists() else {}
+    aspect, layout = settings.get("aspect", "Original"), settings.get("layout", "BigTop")
+    resolution = float(os.environ["ZAKURO_RESOLUTION"])
+    g = ['schema_version = 1', 'unobserved = ["physical scanout"]', '[renderer]', 'kind = "gles"',
+         'name = "synthetic"', 'readback_scale = 1', 'effective_quarters = ' + str(round(resolution * 4)),
+         '[requested]', 'resolution = ' + str(resolution), 'layout = "' + layout + '"',
+         'aspect = "' + aspect + '"', 'swapped = false', 'stretched = "Off"', 'stacked = false', 'second_window = false']
+    for n in range(8):
+        g += ['[[shots]]', 'frame = ' + str(n), 'file = "frame-%05d.bmp"' % n,
+              '[shots.top]', 'readback = [1, 1]', '[shots.bottom]', 'readback = [1, 1]']
+    if "ZAKURO_PANEL_SHOT" in os.environ:
+        assert aspect == "FourThree" and layout == "BigTop"
+        assert os.environ["ZAKURO_PANEL_SIZE"] == "64x64"
+        pathlib.Path(os.environ["ZAKURO_PANEL_SHOT"]).write_bytes(("P6" + nl + "64 64" + nl + "255" + nl).encode() + bytes(64 * 64 * 3))
+        g += ['[final_presentation]', 'sequence = 1', 'output = "offscreen"', 'panel = [64, 64]',
+              'target = [64, 64]', 'layout = [640, 640]', 'layout_set = true', 'turned = false',
+              'second_window = false', 'fit = [1.0, 0.0, 0.0]', 'top_crop = 0.0', 'panel_shot_status = "written"',
+              'panel_shot_numbered = false', 'panel_shot_retained = false',
+              '[final_presentation.top]', 'area = [0, 0, 1, 1]', '[final_presentation.bottom]', 'area = [0, 1, 1, 1]']
+    (p / "render-geometry.toml").write_text(nl.join(g) + nl)
+    (p / "report.toml").write_text((p / "report.toml").read_text() + nl + 'render_geometry_file = "render-geometry.toml"' + nl)
 ''')
             game.chmod(0o755)
             (root / "rom.3ds").write_bytes(b"synthetic, not a ROM")
@@ -397,9 +539,64 @@ screenshots = [""" + ",".join('"frame-%05d.bmp"' % n for n in range(8)) + "]")
             command = [sys.executable, str(MODULE), "run", "--rom", str(root / "rom.3ds"),
                        "--library", str(root / "title.so"), "--executable", str(game),
                        "--output", str(root / "result"), "--seed-data", str(seed), "--frames", "8", "--repeats", "3"]
-            result = subprocess.run(command, capture_output=True, text=True)
+            inherited = {**os.environ, "ZAKURO_PANEL_SHOT": "/tmp/foreign.ppm", "ZAKURO_PANEL_SIZE": "64x64"}
+            result = subprocess.run(command, capture_output=True, text=True, env=inherited)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             manifest = json.loads((root / "result/manifest.json").read_text())
+            self.assertNotIn("render_profile", manifest)
+            self.assertNotIn("render_profile", manifest["experiment"])
+            for trial in manifest["trials"]:
+                self.assertNotIn("render_observation", trial)
+                self.assertFalse(set(trial["environment"]) & evaluate.render_rules.ENV_KEYS)
+                self.assertFalse((root / "result" / trial["trial"] / "config/settings.toml").exists())
+            render = root / "render.json"
+            render.write_text(json.dumps(render_profile()))
+            rendered_command = command.copy()
+            rendered_command[rendered_command.index("--output") + 1] = str(root / "render-result")
+            rendered_command += ["--render-profile", str(render), "--resolution", "1.5"]
+            rendered = subprocess.run(rendered_command, capture_output=True, text=True)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr + rendered.stdout)
+            recorded = json.loads((root / "render-result/manifest.json").read_text())
+            self.assertEqual(recorded["status"], "complete")
+            self.assertNotIn("evidence_class", recorded)
+            for trial in recorded["trials"]:
+                self.assertTrue(trial["render_observation"]["admitted"])
+                self.assertEqual(evaluate.validate_trial_receipt(recorded, trial), [])
+                self.assertIsNone(trial["render_settings"])
+            panel_profile = render_profile()
+            panel_profile.update(id="aspect-cell", aspect="FourThree",
+                presentation_capture={"panel_size": [64, 64], "file": "panel.ppm", "retain": "last", "max_bytes": 12301})
+            panel_file = root / "panel-profile.json"
+            panel_file.write_text(json.dumps(panel_profile))
+            diagnostics_file = root / "geometry-profile.json"
+            diagnostics_file.write_text(json.dumps({"schema_version": 1, "geometry": True}))
+            panel_command = command.copy()
+            panel_command[panel_command.index("--output") + 1] = str(root / "panel-result")
+            panel_command += ["--render-profile", str(panel_file), "--resolution", "1.5",
+                              "--diagnostic-profile", str(diagnostics_file)]
+            panel_run = subprocess.run(panel_command, capture_output=True, text=True)
+            self.assertEqual(panel_run.returncode, 0, panel_run.stderr + panel_run.stdout)
+            recorded_panel = json.loads((root / "panel-result/manifest.json").read_text())
+            self.assertEqual(recorded_panel["evidence_class"], evaluate.diagnostic_rules.NON_TIMING)
+            for trial in recorded_panel["trials"]:
+                self.assertEqual(evaluate.validate_trial_receipt(recorded_panel, trial), [])
+                self.assertTrue(trial["render_observation"]["admitted"])
+                self.assertFalse(trial["render_observation"]["matrix_presentation_capability_admitted"])
+                self.assertIn('aspect = "FourThree"', (root / "panel-result" / trial["trial"] / "config/settings.toml").read_text())
+                self.assertEqual(trial["render_settings"], trial["render_settings_after"])
+            self.assertTrue(any("NON-TIMING" in error for error in
+                                evaluate.compare_values(recorded_panel, recorded_panel)["errors"]))
+            corrupt = recorded_panel["trials"][0]
+            corrupt["render_settings_after"]["sha256"] = "f" * 64
+            self.assertTrue(evaluate.validate_trial_receipt(recorded_panel, corrupt))
+            config = root / "config-seed"
+            config.mkdir()
+            (config / "settings.toml").write_text('layout = "Original"\n')
+            rejected_command = rendered_command + ["--seed-config", str(config)]
+            rejected_command[rejected_command.index("--output") + 1] = str(root / "render-rejected")
+            rejected = subprocess.run(rejected_command, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("seeded configuration", rejected.stderr)
             self.assertEqual(manifest["status"], "complete")
             self.assertEqual(len(manifest["trials"]), 3)
             self.assertFalse((seed / "new-save").exists())
