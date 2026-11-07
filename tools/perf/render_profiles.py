@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -32,6 +33,11 @@ import stat
 from pathlib import Path
 import re
 import struct
+
+_GEOMETRY_PATH = Path(__file__).with_name("presentation_geometry.py")
+_GEOMETRY_SPEC = importlib.util.spec_from_file_location("presentation_geometry", _GEOMETRY_PATH)
+geometry_model = importlib.util.module_from_spec(_GEOMETRY_SPEC)
+_GEOMETRY_SPEC.loader.exec_module(geometry_model)
 
 LAYOUTS = ("BigTop", "TopOnly", "SideBySide", "Original", "BigBeside")
 ASPECTS = ("Original", "Integer", "FourThree", "SixteenTen", "SixteenNine", "Stretch", "Crop")
@@ -348,6 +354,36 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
             checks["panel_images"] = False
             errors.append(str(error))
     observed["panel_images"] = images
+    # A distinct partial capability: the observer may lag the probe frame.
+    # Only numbered files preserve the image belonging to a presentation.
+    geometry_errors = []
+    if capture is not None and presentations:
+        seen_sequences, seen_indices = {}, {}
+        previous = 0
+        for row in presentations:
+            sequence, index = row.get("sequence"), row.get("panel_shot_index")
+            if type(sequence) is not int or sequence <= 0 or sequence < previous:
+                geometry_errors.append("stale or missing presentation sequence")
+            else:
+                previous = sequence
+                if sequence in seen_sequences and seen_sequences[sequence] != row:
+                    geometry_errors.append("contradictory presentation identity")
+                seen_sequences[sequence] = row
+            if type(index) is int:
+                if index in seen_indices and seen_indices[index] != sequence:
+                    geometry_errors.append("panel image index reused by another presentation")
+                seen_indices[index] = sequence
+            geometry_errors.extend(geometry_model.validate_observation(profile, row))
+        if checks.get("presentation") is not True:
+            geometry_errors.append("presentation settings or panel mismatch")
+    partial = (capture is not None and capture["retain"] == "numbered" and presentations
+               and checks.get("runtime_requested") is True and checks.get("panel_images") is True
+               and not geometry_errors)
+    observed["presentation_geometry_model_sha256"] = hashlib.sha256(_GEOMETRY_PATH.read_bytes()).hexdigest()
+    observed["presentation_geometry_errors"] = sorted(set(geometry_errors))
+    observed["presentation_geometry_conformance"] = ("observed_numbered_presentations_only" if partial else
+        "contradicted" if geometry_errors else "unknown_missing_bound_evidence")
+    observed["presentation_frame_binding"] = "unknown_observer_may_precede_probe_frame"
     scale_proven = checks["renderer_quarters"] is True or checks["renderer_scale_log"] is True
     required = ["presentation", "panel_images"] if capture is not None else []
     # A written settings file counts only once the runtime reports parsing it.
@@ -361,7 +397,7 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
             "runtime_requested": requested_by_runtime, "observed": observed,
             "unobserved": sorted({*record.get("unobserved", []), *SCANOUT_UNOBSERVED}),
             "scanout": "unknown_not_observed", "checks": checks, "errors": errors, "admitted": admitted,
-            "admission_scope": "scale evidence and settings/panel-byte consistency only; layout areas and viewports are retained but mathematical agreement with requested aspect/layout is unverified; latest presentation may precede screenshot",
+            "admission_scope": "scale evidence and settings/panel-byte consistency; mathematical geometry is separately reported for numbered observed presentations, without probe-frame binding",
             "matrix_presentation_capability_admitted": False,
             "timing_eligible": timing_eligible(profile) and geometry is None,
             "evidence_class": None if timing_eligible(profile) else NON_TIMING}

@@ -15,9 +15,9 @@ offscreen PPM panel capture and a geometry-capable runtime. They are always
 NON-TIMING: the panel writes every presentation, even when a fixed filename
 overwrites the previous image. Capture byte budgets bound retained output at
 admission, not cumulative writes or a live filesystem quota. Settings, surface
-records and panel bytes are retained separately; exact viewport conformance and
-presentation-frame linkage remain unverified, and presentation matrix capability
-is not admitted. The `Original` layout modeled below is a workload change from
+records and panel bytes are retained separately; the partial geometry check
+described below can validate recorded viewports, while presentation-frame linkage
+remains unverified and presentation matrix capability is not admitted. The `Original` layout modeled below is a workload change from
 the actual BigTop default, not an alias for it.
 
 `matrix_profiles.py` freezes a bounded list of requested comparisons. It does
@@ -193,3 +193,48 @@ trace-to-checkpoint linkage remain unverified. Probe readback is before
 presentation. Current software and GLES readback scale getters return 1; the
 integer-scaled geometry model is a producer-contract model, not a claim that
 current GLES supplies a higher-scale image or evidence of internal allocation.
+
+## Bounded native 1x presentation control
+
+The separate `presentation_geometry.py` model checks observed single landscape
+panel areas and target-pixel viewports for BigTop, Original, TopOnly and
+SideBySide with Original or FourThree aspect, including swapped screen roles.
+It uses frontend f32 arithmetic and GLES endpoint rounding. A result of
+`observed_numbered_presentations_only` means the parsed settings, observed
+geometry and indexed retained PPMs agree for the presentations actually
+recorded; it does not bind a presentation to the probe's requested frame.
+Unobserved presentations, physical scanout, rotation, second windows, portrait
+touch controls, screen content and padded surface sampling remain unknown.
+Unsupported or contradictory geometry is not admitted as this partial capability.
+`matrix_presentation_capability_admitted` remains false. The existing render
+`admitted` field retains its scale/settings/panel-byte scope; inspect the
+separate geometry result rather than treating it as full matrix admission.
+
+Root-run plan, pending a geometry-enabled runtime and exact existing scene and
+binary receipts: start with one native 1x BigTop/Original, unswapped, 640x480
+numbered PPM control, 8 frames, one repeat, geometry diagnostic, NON-TIMING.
+The panel is 921,615 bytes per presentation; preflight for eight is 7,372,920
+bytes retained. The capture's `max_bytes` can be set to that amount, but this
+is an admission limit, not a live write quota. Startup and presentation rate
+may exceed eight writes, and the harness does not enforce cumulative I/O. Do
+not launch until root has a separately enforced cumulative cap (for example a
+bounded filesystem or an appropriate runtime write cap) and has budgeted all
+other artifacts. Abort on a cap or resource breach; do not call an estimated
+8-frame write count an enforced limit. No runtime execution is authorized by
+this plan itself.
+
+The control declaration is:
+
+```json
+{"schema_version":1,"id":"native1-bigtop-control","internal_scale":1,"aspect":"Original","layout":"BigTop","swapped":false,"stretched":"Off","presentation_capture":{"panel_size":[640,480],"file":"panel-%.ppm","retain":"numbered","max_bytes":7372920}}
+```
+
+Use `{"schema_version":1,"geometry":true}` for the diagnostic profile and
+`--resolution 1 --frames 8 --repeats 1`, along with root's exact bound runtime,
+library, scene, seed and output arguments. Check retained receipts, parsed
+settings, surface scale, each recorded index and the separate geometry result.
+Only after the control is accepted, run at most one cell at a time with the
+same budget and bindings: BigTop/FourThree, Original/Original,
+TopOnly/Original, SideBySide/Original, then any explicitly needed swap. Each
+cell is dependent on the previous evidence and is not timing evidence. Leave
+unrun cells pending; no 24-cell 6000-frame panel campaign is implied.
