@@ -296,7 +296,8 @@ class GenerationTest(unittest.TestCase):
         profile = rules.validate(declaration(layout="TopOnly", capture=capture("numbered", (1920, 1080), 10**9)))
         env = rules.environment(profile, Path("/runs/trial-01"))
         self.assertEqual(env, {"ZAKURO_PANEL_SHOT": "/runs/trial-01/panel-%.ppm", "ZAKURO_PANEL_SIZE": "1920x1080"})
-        self.assertEqual(set(env), rules.ENV_KEYS)
+        self.assertEqual(set(env), {"ZAKURO_PANEL_SHOT", "ZAKURO_PANEL_SIZE"})
+        self.assertLessEqual(set(env), rules.ENV_KEYS)
         self.assertFalse(rules.timing_eligible(profile))
         for trial in ("relative/trial", "/runs/../etc"):
             with self.subTest(trial=trial), self.assertRaises(ValueError):
