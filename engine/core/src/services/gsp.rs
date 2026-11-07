@@ -231,6 +231,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // SetMemoryFill(start0, value0, end0, start1, value1, end1, control0,
         // control1)
         SET_MEMORY_FILL => {
+            // PSC0 alone with both buffers, as the GX command
+            let both = buffer.get(&mut system.memory, 1) != 0 && buffer.get(&mut system.memory, 4) != 0;
             for bank in 0..2u32 {
                 let start = buffer.get(&mut system.memory, 1 + bank * 3);
                 let value = buffer.get(&mut system.memory, 2 + bank * 3);
@@ -240,7 +242,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     continue;
                 }
                 let width = fill_width(control);
-                system.memory_fill(start, end, value, width, if bank == 0 { InterruptId::Psc0 } else { InterruptId::Psc1 });
+                system.memory_fill(start, end, value, width, fill_interrupt(both, bank));
             }
             buffer.reply(&mut system.memory, id, &[]);
             true
@@ -394,6 +396,16 @@ fn interrupt_queue_address(system: &System) -> Option<u32> {
     (base != 0).then(|| base + system.services.gsp.thread_index * INTERRUPT_QUEUE_STRIDE)
 }
 
+/// the interrupt a fill raises: PSC0 for the first buffer, PSC1 for the
+/// second, and with both, PSC0 once the second is done.
+fn fill_interrupt(both: bool, bank: u32) -> Option<InterruptId> {
+    match (both, bank) {
+        (true, 0) => None,
+        (true, _) | (false, 0) => Some(InterruptId::Psc0),
+        (false, _) => Some(InterruptId::Psc1),
+    }
+}
+
 /// posts an interrupt to the client and signals its event.
 pub fn signal_interrupt(system: &mut System, interrupt: InterruptId) {
     let Some(queue) = interrupt_queue_address(system) else {
@@ -498,6 +510,11 @@ fn execute_command(system: &mut System, command: GxCommand) {
         }
         // MemoryFill(start0, value0, end0, start1, value1, end1, control)
         0x02 => {
+            // with both buffers GSP raises PSC0 alone, once the second is
+            // done: the SDK's games count each interrupt as a request done,
+            // and Super Mario 3D Land, counting a fill twice, sent nothing
+            // more
+            let both = command.data[0] != 0 && command.data[3] != 0;
             for bank in 0..2 {
                 let start = command.data[bank * 3];
                 let value = command.data[bank * 3 + 1];
@@ -506,7 +523,7 @@ fn execute_command(system: &mut System, command: GxCommand) {
                     continue;
                 }
                 let width = fill_width(command.data[6] >> (bank as u32 * 16));
-                system.memory_fill(start, end, value, width, if bank == 0 { InterruptId::Psc0 } else { InterruptId::Psc1 });
+                system.memory_fill(start, end, value, width, fill_interrupt(both, bank as u32));
             }
         }
         // DisplayTransfer(input, output, input dim, output dim, flags)
@@ -622,6 +639,25 @@ mod tests {
             0,
             "is_dirty should be cleared once the swap is applied"
         );
+    }
+
+    /// the interrupts a GX memory fill leaves in the title's queue.
+    fn fill_interrupts(starts: [u32; 2]) -> Vec<u8> {
+        let (mut system, vaddr) = system_with_mapped_gsp_shm();
+        let [a, b] = starts;
+        let command = GxCommand { id: 0x02, data: [a, 0, a + (a != 0) as u32 * 0x100, b, 0, b + (b != 0) as u32 * 0x100, 0x0201_0201] };
+        execute_command(&mut system, command);
+        let (index, count) = (system.memory.read8(vaddr) as u32, system.memory.read8(vaddr + 1) as u32);
+        (0..count).map(|n| system.memory.read8(vaddr + 0xC + (index + n) % 0x34)).collect()
+    }
+
+    /// GSP raises PSC0 alone for a fill of both buffers, once both are done:
+    /// the SDK's games count every interrupt as a request finished.
+    #[test]
+    fn a_fill_of_both_buffers_raises_one_interrupt() {
+        assert_eq!(fill_interrupts([0x1F00_0000, 0x1F30_0000]), [InterruptId::Psc0 as u8]);
+        assert_eq!(fill_interrupts([0x1F00_0000, 0]), [InterruptId::Psc0 as u8]);
+        assert_eq!(fill_interrupts([0, 0x1F30_0000]), [InterruptId::Psc1 as u8]);
     }
 
     /// a record with is_dirty clear (the steady state right after a swap
