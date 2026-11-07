@@ -33,6 +33,10 @@ pub struct GameProgress {
 pub struct Job {
     pub kind: Kind,
     child: Child,
+    /// the kit and the build folder, for a cancel to put back what the
+    /// script moved aside.
+    #[cfg(windows)]
+    places: (PathBuf, PathBuf),
     lines: Receiver<String>,
     pub log: Vec<String>,
     pub games: Vec<GameProgress>,
@@ -171,7 +175,17 @@ impl Job {
                 }
             });
         }
-        Ok(Job { kind, child, lines, log: Vec::new(), games: Vec::new(), expected: if kind == Kind::Build { roms.len() } else { 0 }, finished: None })
+        Ok(Job {
+            kind,
+            child,
+            #[cfg(windows)]
+            places: (kit.to_path_buf(), out.to_path_buf()),
+            lines,
+            log: Vec::new(),
+            games: Vec::new(),
+            expected: if kind == Kind::Build { roms.len() } else { 0 },
+            finished: None,
+        })
     }
 
     /// takes in what the script said since, true when something changed.
@@ -248,11 +262,37 @@ impl Job {
         {
             let _ = Command::new("kill").args(["-TERM", &format!("-{}", self.child.id())]).status();
         }
-        #[cfg(not(unix))]
+        // PowerShell stopped from outside runs no finally: the whole tree
+        // goes, the docker client with it, and the games a rebuild moved
+        // aside are put back here, or the next rebuild builds them again
+        #[cfg(windows)]
         {
-            let _ = self.child.kill();
+            use std::os::windows::process::CommandExt;
+            let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &self.child.id().to_string()]).creation_flags(0x0800_0000).status();
+            let _ = self.child.wait();
+            restore(&self.places.0, &self.places.1);
         }
     }
+}
+
+/// what batch-rebuild's Restore does: each game moved to the kit's
+/// .update\games goes back to its folder, or goes where one as big is back.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn restore(kit: &Path, out: &Path) {
+    let games = out.join("Pocket Native").join("pocket-native").join("games");
+    let staging = kit.join(".update").join("games");
+    let Ok(copies) = std::fs::read_dir(&staging) else { return };
+    for copy in copies.flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|extension| extension == "3ds")) {
+        let Some(id) = copy.file_stem() else { continue };
+        let game = games.join(id).join("game.3ds");
+        let size = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).ok();
+        if size(&game).is_some() && size(&game) == size(&copy) {
+            let _ = std::fs::remove_file(&copy);
+        } else if std::fs::create_dir_all(games.join(id)).is_ok() {
+            let _ = std::fs::rename(&copy, &game);
+        }
+    }
+    let _ = std::fs::remove_dir(&staging).and_then(|()| std::fs::remove_dir(kit.join(".update")));
 }
 
 /// how far a game is through its build: the recompiling most of it.
@@ -338,6 +378,25 @@ pub fn newer_version(kit: &Path) -> Result<Option<String>, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_rebuild_puts_its_games_back() {
+        let root = std::env::temp_dir().join(format!("pn-kit-restore-{}", std::process::id()));
+        let (kit, out) = (root.join("kit"), root.join("out"));
+        let staging = kit.join(".update").join("games");
+        let games = out.join("Pocket Native").join("pocket-native").join("games");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(games.join("A")).unwrap();
+        // A's build had copied it back already, B's had not started
+        std::fs::write(games.join("A").join("game.3ds"), b"aaaa").unwrap();
+        std::fs::write(staging.join("A.3ds"), b"aaaa").unwrap();
+        std::fs::write(staging.join("B.3ds"), b"bbbb").unwrap();
+        restore(&kit, &out);
+        assert_eq!(std::fs::read(games.join("A").join("game.3ds")).unwrap(), b"aaaa");
+        assert_eq!(std::fs::read(games.join("B").join("game.3ds")).unwrap(), b"bbbb");
+        assert!(!kit.join(".update").exists(), "nothing left for the next rebuild to bring back");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     fn job_reading(lines: &[&str]) -> Job {
         let child = Command::new("true").spawn().expect("true runs");
