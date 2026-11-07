@@ -63,6 +63,11 @@ impl Entry {
 /// binary's program and descriptors as the GPU's shader memory holds them,
 /// and a list of where each shader starts and its output map.
 pub fn write_vertex_list(found: &[Shbin], dir: &std::path::Path) -> std::io::Result<usize> {
+    // none, no list: a build copies the list with its shaders, which an
+    // empty one has none of
+    if !found.iter().any(|shbin| shbin.entries.iter().any(|entry| !entry.geometry)) {
+        return Ok(0);
+    }
     std::fs::create_dir_all(dir)?;
     let mut list = String::from("pocket-native vertex 1\n");
     let mut count = 0;
@@ -390,6 +395,14 @@ fn garc(data: &[u8]) -> Option<Vec<(usize, usize)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_shaders_found_leaves_no_list() {
+        let dir = std::env::temp_dir().join(format!("pn-vertex-list-{}", std::process::id()));
+        assert_eq!(write_vertex_list(&[], &dir).unwrap(), 0);
+        // a build copies the list's shaders with it, an empty list has none
+        assert!(!dir.join("vertex.txt").exists());
+    }
 
     #[test]
     fn an_entry_maps_its_outputs_as_libctru_does() {
