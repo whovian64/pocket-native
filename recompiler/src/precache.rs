@@ -26,11 +26,19 @@ const DISABLE: [u32; 6] = [20, 21, 22, 16, 17, 19];
 const FOG_MODES: [u32; 2] = [0, 5];
 const ETC1A4: u32 = 13;
 const FRAGMENT_LIGHT: u32 = 0x4000_00A2;
+/// at most this many, those the most materials share first: a Mali-G31 takes
+/// about a third of a second a program the first time.
+const MOST: usize = 2000;
 
 /// a lookup table's input and scale, and its set's name and its own.
 type Table = (u32, u32, (String, String));
+/// a shader's entries in the vertex list, by how many texture coordinates
+/// each hands out.
+type Variants = HashMap<u32, Vec<String>>;
 
 struct Material {
+    source: String,
+    shader: String,
     regs: BTreeMap<usize, u32>,
     flags: u32,
     coordinates: u32,
@@ -47,15 +55,15 @@ struct Found {
     materials: Vec<Material>,
     formats: HashMap<String, u32>,
     absolute: HashMap<(String, String), BTreeSet<bool>>,
-    shaders: Vec<(String, Shbin)>,
+    shaders: Vec<(String, String, Shbin)>,
     /// how many fragment lights the title's light sets have.
     light_counts: BTreeSet<u32>,
 }
 
 /// writes precache.txt into dir, each line a vertex shader of the list
 /// write_vertex_list made from found, file:entry, and a setup as the
-/// engine's own list keeps them. how many lines, none for a title without
-/// NintendoWare models, which writes nothing.
+/// engine's own list keeps them, the most shared first. how many lines,
+/// none for a title without NintendoWare models, which writes nothing.
 pub fn write(title: &Title, found: &[Shbin], dir: &Path) -> std::io::Result<usize> {
     let mut seen = Found::default();
     shaders::files(title, &mut |data, source| {
@@ -64,31 +72,60 @@ pub fn write(title: &Title, found: &[Shbin], dir: &Path) -> std::io::Result<usiz
         }
     });
     let named: HashSet<Vec<u8>> = title.code().map(|code| code.split(|&byte| byte == 0).map(<[u8]>::to_vec).collect()).unwrap_or_default();
-    let lines = lines(&seen, found, &named);
+    let mut lines: Vec<(String, usize)> = lines(&seen, found, &named).into_iter().collect();
     if lines.is_empty() {
         return Ok(0);
     }
+    lines.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    if lines.len() > MOST {
+        println!("{} shaders worked out, the {MOST} the most materials share kept", lines.len());
+        lines.truncate(MOST);
+    }
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join("precache.txt"), std::iter::once(HEADER.to_owned()).chain(lines.iter().cloned()).collect::<Vec<_>>().join("\n") + "\n")?;
+    std::fs::write(dir.join("precache.txt"), std::iter::once(HEADER).chain(lines.iter().map(|(line, _)| line.as_str())).collect::<Vec<_>>().join("\n") + "\n")?;
     Ok(lines.len())
 }
 
-fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> BTreeSet<String> {
-    // the shaders the title's code binds by name, else every one
-    let file = |shbin: &Shbin| found.iter().position(|other| other.code == shbin.code && other.descriptors == shbin.descriptors);
-    let bound: Vec<usize> = seen.shaders.iter().filter(|(name, _)| named.contains(name.as_bytes())).filter_map(|(_, shbin)| file(shbin)).collect();
-    let files = if bound.is_empty() { seen.shaders.iter().filter_map(|(_, shbin)| file(shbin)).collect() } else { bound };
-    let mut variants: HashMap<u32, Vec<String>> = HashMap::new();
-    for n in files {
+/// each line, and how many materials give it.
+fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> HashMap<String, usize> {
+    let mut shaders: Vec<(&str, &str, Variants)> = Vec::new();
+    for (name, source, shbin) in &seen.shaders {
+        let Some(n) = found.iter().position(|other| other.code == shbin.code && other.descriptors == shbin.descriptors) else { continue };
+        let mut variants = Variants::new();
         for entry in found[n].entries.iter().filter(|entry| !entry.geometry) {
             let semantics: Vec<u32> = entry.outmap().2.iter().flat_map(|word| (0..4).map(move |byte| word >> (byte * 8) & 0x1F)).collect();
             let texcoords = [0xC, 0xE, 0x16].iter().filter(|kind| semantics.contains(kind)).count() as u32;
             variants.entry(texcoords).or_default().push(format!("{n}:{:x}", entry.main));
         }
+        shaders.push((name, source, variants));
     }
-    let mut lines = BTreeSet::new();
+    // what a title's code binds in place of the library's default shader:
+    // one it names, that no material does, made like the default, a variant
+    // for each count of texture coordinates
+    let referenced: HashSet<&str> = seen.materials.iter().map(|material| material.shader.as_str()).collect();
+    let substitutes: Vec<usize> = (0..shaders.len()).filter(|&k| named.contains(shaders[k].0.as_bytes()) && !referenced.contains(shaders[k].0) && shaders[k].2.len() >= 3).collect();
+    let mut paired: BTreeMap<&str, usize> = BTreeMap::new();
+    let bind = |material: &Material| -> Vec<usize> {
+        if material.shader == "DefaultShader" && !substitutes.is_empty() {
+            return substitutes.clone();
+        }
+        // the one by its name, in its own file else its archive else any
+        let named: Vec<usize> = (0..shaders.len()).filter(|&k| shaders[k].0 == material.shader).collect();
+        let archive = |source: &str| source.rsplit_once('#').map_or(source, |(archive, _)| archive).to_owned();
+        let rank = |k: usize| if shaders[k].1 == material.source { 0 } else if archive(shaders[k].1) == archive(&material.source) { 1 } else { 2 };
+        let nearest = named.iter().map(|&k| rank(k)).min();
+        named.into_iter().filter(|&k| Some(rank(k)) == nearest).collect()
+    };
+    let mut lines = HashMap::new();
     for material in &seen.materials {
-        let Some(vertices) = variants.get(&material.texcoords) else { continue };
+        let bound = bind(material);
+        for &k in &bound {
+            *paired.entry(shaders[k].0).or_default() += 1;
+        }
+        let vertices: Vec<&String> = bound.iter().filter_map(|&k| shaders[k].2.get(&material.texcoords)).flatten().collect();
+        if vertices.is_empty() {
+            continue;
+        }
         let Some(&coordinates) = COORDINATES.get(material.coordinates as usize) else { continue };
         let r = |register: usize| material.regs.get(&register).copied().unwrap_or(0);
         let mut out = BTreeMap::new();
@@ -110,20 +147,26 @@ fn lines(seen: &Found, found: &[Shbin], named: &HashSet<Vec<u8>>) -> BTreeSet<St
         let lit = material.flags & 1;
         let split = (0..3).filter(|&unit| material.textures[unit].as_ref().and_then(|name| seen.formats.get(name)) == Some(&ETC1A4)).fold(0, |bits, unit| bits | 1 << unit);
         let flags = enabled | split << 4 | 2 << 12 | lit << 17;
-        // one light, which titles set up themselves as often as not, and
-        // as many as their light sets have
-        let counts: BTreeSet<u32> = if seen.light_counts.is_empty() { BTreeSet::from([1, 2]) } else { seen.light_counts.iter().copied().chain([1]).collect() };
+        // one light, which titles set up themselves as often as not, and two
+        // where their light sets have two; sets of more are scenes' lights a
+        // draw takes one or two of
+        let counts: BTreeSet<u32> = if seen.light_counts.is_empty() { BTreeSet::from([1, 2]) } else { seen.light_counts.iter().copied().filter(|&count| count <= 2).chain([1]).collect() };
         let lightings = if lit != 0 { lighting(material, &seen.absolute, &counts) } else { vec![BTreeMap::new()] };
+        let mut own = HashSet::new();
         for light in &lightings {
             for fog in FOG_MODES {
                 out.insert(0xE0, r(0xE0) & 0xFF00 | fog);
                 let regs: Vec<String> = out.iter().chain(light).filter(|&(&register, &value)| value != 0 && register < 0x300).map(|(register, value)| format!("{register:x}={value:x}")).collect();
-                for vertex in vertices {
-                    lines.insert(format!("{vertex} {flags:x} {}", regs.join(" ")));
+                for vertex in &vertices {
+                    own.insert(format!("{vertex} {flags:x} {}", regs.join(" ")));
                 }
             }
         }
+        for line in own {
+            *lines.entry(line).or_default() += 1;
+        }
     }
+    println!("{} NintendoWare materials, their shaders {paired:?}, light sets of {:?}", seen.materials.len(), seen.light_counts);
     lines
 }
 
@@ -172,7 +215,7 @@ fn read(d: &[u8], source: &str, seen: &mut Found) {
         at += next + 4;
         let base = at - 8;
         if u32_at(d, base) == Some(0x0800_0000) {
-            seen.materials.extend(material(d, base));
+            seen.materials.extend(material(d, base).map(|material| Material { source: source.to_owned(), ..material }));
         }
     }
     let mut at = 0;
@@ -199,7 +242,7 @@ fn read(d: &[u8], source: &str, seen: &mut Found) {
     }
     for (name, at) in dict(d, rel(d, data + 0x2C)) {
         if let Some(shbin) = rel(d, at + 0x1C).and_then(|binary| d.get(binary..)).filter(|binary| binary.starts_with(b"DVLB")).and_then(|binary| shaders::dvlb(binary, source)) {
-            seen.shaders.push((name, shbin));
+            seen.shaders.push((name, source.to_owned(), shbin));
         }
     }
 }
@@ -233,6 +276,8 @@ fn material(d: &[u8], base: usize) -> Option<Material> {
         Some((u32_at(d, lut)?, u32_at(d, lut + 4)?, (cstr(d, rel(d, reference + 4)?)?, cstr(d, rel(d, reference + 8)?)?)))
     });
     Some(Material {
+        source: String::new(),
+        shader: rel(d, base + 0x284).and_then(|reference| rel(d, reference + 0x18)).and_then(|name| cstr(d, name)).unwrap_or_default(),
         regs,
         flags: u32_at(d, base + 0x18)?,
         coordinates: u32_at(d, base + 0x1C)?,
@@ -304,6 +349,8 @@ mod tests {
         // layer config 2, the two tables absolute
         let names = |table: &str| ("body_LUT".to_owned(), table.to_owned());
         let material = Material {
+            source: String::new(),
+            shader: "DefaultShader".to_owned(),
             regs: BTreeMap::new(),
             flags: 1,
             coordinates: 0,

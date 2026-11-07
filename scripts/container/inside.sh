@@ -68,7 +68,7 @@ RECOMP_CFLAGS=-DRECOMP_FASTMEM CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/rel
 
 echo "== finding the game's shaders"
 rm -rf /work/vertex
-"$CARGO_TARGET_DIR/release/3dsrecomp" shaders "$game" /work/vertex ${PN_PRECACHE:+precache} | tail -3 || echo "none found, they get built as the game needs them"
+"$CARGO_TARGET_DIR/release/3dsrecomp" shaders "$game" /work/vertex ${PN_PRECACHE:+precache} | tail -4 || echo "none found, they get built as the game needs them"
 
 if [ ! -f /work/shared_font.bin ]; then
     echo "== making the system font"
