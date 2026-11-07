@@ -39,7 +39,7 @@ use zakuro_core::{loader, Config, FrameOutcome, System};
 use zakuro_gpu::Overlay;
 
 use crate::font::{Canvas, Font};
-use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, SELECT, START};
+use crate::input::{Pad, B, FN, L1, L2, L3, R1, R2, R3, SELECT, START};
 use crate::menu::{Action, Menu, Status};
 use crate::profile::Profile;
 use crate::settings::{Advanced, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings};
@@ -265,7 +265,7 @@ pub fn run(mut args: Vec<String>) {
     let mut logs = 0u32;
     // ZAKURO_SLOW_FRAMES=ms logs every frame that took longer to run
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
-    prepare_shaders(&mut system, &font, &settings);
+    prepare_shaders(&mut system, &font, &settings, &pad);
     loop {
         let began = Instant::now();
         let (mut keys, mut axes, fingers, second_touch, pad_used) = {
@@ -649,24 +649,55 @@ pub fn run(mut args: Vec<String>) {
 
 /// the overlays drawn over the screens, the menu or the status line, then
 /// the touch controls.
-/// waits for the shaders the game's list has the start build, showing how
-/// far along they are when that takes a moment, so none is built in game.
-fn prepare_shaders(system: &mut System, font: &Font, settings: &Settings) {
+/// waits for the shaders the game's list and the kit's precache list have
+/// the start build, showing how far along they are when that takes a
+/// moment, so none is built in game. B, Start or a tap skips the rest, which
+/// are built as the game needs them.
+fn prepare_shaders(system: &mut System, font: &Font, settings: &Settings, pad: &Mutex<Pad>) {
     let (total, _) = zakuro_gpu::preparing();
     if total == 0 {
         return;
     }
     let started = Instant::now();
-    while let (_, left @ 1..) = zakuro_gpu::preparing() {
-        if started.elapsed() >= Duration::from_millis(250) {
-            let mut canvas = Canvas::new(font, PANEL);
-            menu::preparing(&mut canvas, PANEL, total - left, total);
-            let screen = Some(Arc::new(canvas.finish()));
-            system.present_panel(layout::shown(settings), None, overlays(&screen, &None), settings.smooth, false);
+    // how far along it was a few seconds in, for the time left to go by
+    let mut from: Option<(Duration, usize)> = None;
+    // a press from before the screen came up is no skip
+    let (mut held, mut touched) = {
+        let pad = pad.lock().unwrap();
+        (pad.keys.clone(), !pad.fingers.is_empty())
+    };
+    while let (total, left @ 1..) = zakuro_gpu::preparing() {
+        let (keys, touching) = {
+            let mut pad = pad.lock().unwrap();
+            let keys: HashSet<u16> = pad.keys.union(&pad.let_go).copied().collect();
+            let touching = !pad.fingers.is_empty() || !pad.lifted.is_empty();
+            pad.let_go.clear();
+            pad.lifted.clear();
+            (keys, touching)
+        };
+        let skipped = [B, START].iter().any(|key| keys.contains(key) && !held.contains(key)) || touching && !touched;
+        (held, touched) = (keys, touching);
+        if skipped {
+            zakuro_gpu::skip_preparing();
+            log::info!("shaders skipped with {left} of {total} left, after {:.1} s", started.elapsed().as_secs_f64());
+            return;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        // the screens go up all along, the kit's list handed out as they do
+        let elapsed = started.elapsed();
+        let done = total - left;
+        if from.is_none() && elapsed >= Duration::from_secs(3) {
+            from = Some((elapsed, done));
+        }
+        let screen = (elapsed >= Duration::from_millis(250)).then(|| {
+            let remaining = from.filter(|&(_, then)| done > then).map(|(at, then)| (elapsed - at).mul_f64(left as f64 / (done - then) as f64));
+            let mut canvas = Canvas::new(font, PANEL);
+            menu::preparing(&mut canvas, PANEL, done, total, remaining);
+            Arc::new(canvas.finish())
+        });
+        system.present_panel(layout::shown(settings), None, overlays(&screen, &None), settings.smooth, false);
+        std::thread::sleep(Duration::from_millis(20));
     }
-    log::info!("prepared {total} shaders in {:.1} s", started.elapsed().as_secs_f64());
+    log::info!("prepared {} shaders in {:.1} s", zakuro_gpu::preparing().0, started.elapsed().as_secs_f64());
 }
 
 fn overlays(overlay: &Option<Arc<Overlay>>, controls: &Option<Arc<Overlay>>) -> Vec<Arc<Overlay>> {

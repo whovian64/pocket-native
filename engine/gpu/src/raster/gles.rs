@@ -35,7 +35,7 @@ use display::*;
 use programs::*;
 use sources::*;
 pub use display::{layout_scale, layout_size, panel_timing, second_window, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
-pub use programs::{compiling, compiling_stand_ins, note_compiler_crash, preparing, waited_draws};
+pub use programs::{compiling, compiling_stand_ins, note_compiler_crash, preparing, skip_preparing, waited_draws};
 pub(crate) use programs::{COMPILING, WAITED};
 
 const VERTEX_SIZE: usize = 24 * 4;
@@ -256,6 +256,20 @@ fn draw_filter(signature: impl FnOnce() -> String, count: usize) -> (bool, bool)
 /// the alpha, for the alpha test constant: masked off, or blended in with a
 /// zero factor and read by no factor, so the shader leaves out what only
 /// they need.
+/// the precache list a start hands out: the vertex list's shaders by
+/// file:entry, as read, translated and as stages, the lines left, and where
+/// to note it built.
+struct Precache {
+    dir: std::path::PathBuf,
+    listed: HashMap<String, Vec<String>>,
+    units: HashMap<String, Option<ShaderUnit>>,
+    stages: HashMap<String, Option<u64>>,
+    lines: std::collections::VecDeque<String>,
+    stamp: Option<std::path::PathBuf>,
+    count: usize,
+    started: std::time::Instant,
+}
+
 /// a setup as the manifest keeps it, flags and the registers its program
 /// comes from: the program's fragment constants, whether it writes depth
 /// and its lighting's shape, None for lighting that is off.
@@ -1579,6 +1593,8 @@ pub struct Gles {
     /// where to note the list built once its programs are, beside their
     /// saved copies, which a cleared cache takes with them.
     precache_stamp: Option<std::path::PathBuf>,
+    /// the list's lines still to hand out, a few each time the screens go up.
+    precache: Option<Precache>,
     /// the console's resolution times this over 4 is what the surfaces are
     /// drawn at, 4 native.
     quarters: u32,
@@ -1700,6 +1716,7 @@ impl Gles {
                 preloading: false,
                 precached: HashMap::new(),
                 precache_stamp: None,
+                precache: None,
                 quarters: 4,
                 natives: Default::default(),
             };
@@ -1708,7 +1725,7 @@ impl Gles {
             gles.preload_precache();
             gles.preload_vertex_list();
             gles.prepare_stand_ins();
-            PREPARING.store(compiling(), std::sync::atomic::Ordering::Relaxed);
+            PREPARING.store(compiling() + PRECACHE_LEFT.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
             Ok(gles)
         }
     }
@@ -1883,42 +1900,78 @@ impl Gles {
             log::info!("the precache list was built at an earlier start, its shaders load as the game needs them");
             return;
         }
-        let started = std::time::Instant::now();
-        let queue = self.compiler.is_some();
-        let listed: HashMap<String, Vec<&str>> = vertices
+        let listed = vertices
             .lines()
             .skip(1)
             .filter_map(|line| {
-                let fields: Vec<&str> = line.split_whitespace().collect();
+                let fields: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
                 Some((format!("{}:{}", fields.first()?, fields.get(1)?), fields))
             })
             .collect();
-        let mut units = HashMap::new();
-        let mut stages: HashMap<&str, Option<u64>> = HashMap::new();
-        let mut count = 0;
+        let lines: std::collections::VecDeque<String> = text.lines().skip(1).map(str::to_owned).collect();
+        PRECACHE_LEFT.store(lines.len(), std::sync::atomic::Ordering::Relaxed);
+        self.precache = Some(Precache { dir, listed, units: HashMap::new(), stages: HashMap::new(), lines, stamp, count: 0, started: std::time::Instant::now() });
+    }
+
+    /// hands out the precache list's lines for a while, each one of the
+    /// vertex list's shaders, file:entry, and a setup as the manifest keeps
+    /// them. what it missed, or a skip left, is built as the game needs it.
+    fn precache_some(&mut self, budget: std::time::Duration) {
+        let Some(mut precache) = self.precache.take() else { return };
+        if SKIP.load(std::sync::atomic::Ordering::Relaxed) {
+            log::info!("precaching skipped with {} of the list's shaders not handed out", precache.lines.len());
+            PRECACHE_LEFT.store(0, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        let began = std::time::Instant::now();
+        let queue = self.compiler.is_some();
         self.preloading = true;
-        for line in text.lines().skip(1) {
+        while began.elapsed() < budget {
+            let Some(line) = precache.lines.pop_front() else { break };
+            PRECACHE_LEFT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             let mut fields = line.split_whitespace();
             let Some(at) = fields.next() else { continue };
-            let stage = *stages.entry(at).or_insert_with(|| listed.get(at).and_then(|fields| self.listed_vertex(&dir, &mut units, fields)).map(|(vertex, _)| vertex));
-            let rest = fields.clone().collect::<Vec<_>>().join(" ");
-            let (Some(vertex), Some((constants, writes_depth, lighting))) = (stage, setup(fields)) else { continue };
-            match self.program(&constants, writes_depth, &lighting, vertex, !queue, None) {
-                Ok(_) => {
-                    count += 1;
-                    self.precached.insert((constants, writes_depth, lighting, vertex), rest);
+            let stage = match precache.stages.get(at) {
+                Some(&stage) => stage,
+                None => {
+                    let found = precache.listed.get(at).map(|fields| fields.iter().map(String::as_str).collect::<Vec<&str>>());
+                    let stage = found.and_then(|fields| self.listed_vertex(&precache.dir, &mut precache.units, &fields)).map(|(vertex, _)| vertex);
+                    precache.stages.insert(at.to_owned(), stage);
+                    stage
                 }
-                Err(error) => log::warn!("could not prepare a shader from {}, {error}", dir.join("precache.txt").display()),
+            };
+            let rest = fields.clone().collect::<Vec<_>>().join(" ");
+            // a line that builds nothing new comes off what the start shows
+            let fewer = || _ = PREPARING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let (Some(vertex), Some((constants, writes_depth, lighting))) = (stage, setup(fields)) else {
+                fewer();
+                continue;
+            };
+            // the manifest's own, or an earlier line's
+            let key = (constants, writes_depth, lighting, vertex);
+            if self.programs.contains_key(&key) || self.compiler.as_ref().is_some_and(|compiler| compiler.pending.contains(&key)) {
+                fewer();
+                continue;
+            }
+            match self.program(&key.0, key.1, &key.2, key.3, !queue, None) {
+                Ok(_) => {
+                    precache.count += 1;
+                    self.precached.insert(key, rest);
+                }
+                Err(error) => log::warn!("could not prepare a shader from {}, {error}", precache.dir.join("precache.txt").display()),
             }
         }
-        self.precache_stamp = stamp;
         self.preloading = false;
-        if !queue {
-            if let Some(path) = self.precache_stamp.take() {
-                let _ = std::fs::write(path, "");
-            }
+        if !precache.lines.is_empty() {
+            self.precache = Some(precache);
+            return;
         }
-        log::info!("{count} precached shaders from {} to prepare, handed out in {:.1} s", dir.join("precache.txt").display(), started.elapsed().as_secs_f64());
+        log::info!("{} precached shaders from {} handed out in {:.1} s", precache.count, precache.dir.join("precache.txt").display(), precache.started.elapsed().as_secs_f64());
+        if queue {
+            self.precache_stamp = precache.stamp;
+        } else if let Some(path) = precache.stamp {
+            let _ = std::fs::write(path, "");
+        }
     }
 
     /// a shader of the kit's vertex list, its file, entry, output mask, total
@@ -3090,7 +3143,7 @@ impl Gles {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached }).is_err() {
+                if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached, preload: self.preloading }).is_err() {
                     BUILDING.store(0, std::sync::atomic::Ordering::Relaxed);
                     BUILDING_STAND_INS.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.compiler = None;
@@ -3138,6 +3191,11 @@ impl Gles {
                 Ok(program) => {
                     self.programs.insert(key.clone(), program);
                     self.note_program(&key);
+                }
+                Err(error) if error == SKIPPED => {
+                    self.inputs.remove(&key);
+                    self.precached.remove(&key);
+                    self.precache_stamp = None;
                 }
                 Err(error) => {
                     log::warn!("{error}");
@@ -3953,6 +4011,9 @@ impl Gles {
     }
 
     pub(crate) fn present(&mut self, shown: [Option<(crate::PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<Arc<crate::Overlay>>, smooth: bool, interpolate: bool, frames: u32) {
+        if self.precache.is_some() {
+            self.precache_some(std::time::Duration::from_millis(100));
+        }
         let mut parts = Vec::new();
         for (index, item) in shown.into_iter().enumerate() {
             let Some((image, area)) = item else { continue };
@@ -5166,7 +5227,7 @@ mod tests {
         let job = |name: &str, stand_in: bool| {
             let mut constants = [0u32; FRAGMENT_CONSTANTS];
             constants[29] = stand_in as u32;
-            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None }
+            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None, preload: false }
         };
         let queue = Queue::new();
         for (name, stand_in) in [("stand-in 1", true), ("stand-in 2", true), ("draw 1", false), ("stand-in 3", true), ("draw 2", false)] {

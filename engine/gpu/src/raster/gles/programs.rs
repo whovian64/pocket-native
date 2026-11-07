@@ -53,11 +53,26 @@ pub fn compiling() -> usize {
 /// and the stand-ins.
 pub(super) static PREPARING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// the programs the start handed out and how many of them are still
-/// building, for the frontend to show before the game starts.
+/// the precache list's lines not handed out yet: the screens going up hand
+/// them out a few at a time, for the start to show how far along it is.
+pub(super) static PRECACHE_LEFT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// the programs the start has to build and how many of them are still to
+/// come, for the frontend to show before the game starts.
 pub fn preparing() -> (usize, usize) {
     let total = PREPARING.load(std::sync::atomic::Ordering::Relaxed);
-    (total, BUILDING.load(std::sync::atomic::Ordering::Relaxed).min(total))
+    let left = BUILDING.load(std::sync::atomic::Ordering::Relaxed) + PRECACHE_LEFT.load(std::sync::atomic::Ordering::Relaxed);
+    (total, left.min(total))
+}
+
+/// what the compiler threads give back for a start's program they let go.
+pub(super) const SKIPPED: &str = "skipped at the start";
+pub(super) static SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// the game starts now: the start's programs not built yet are left to be
+/// built as the game needs them.
+pub fn skip_preparing() {
+    SKIP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// the generic stand-ins of those, which a first run, or one after an
@@ -656,6 +671,8 @@ pub(super) struct Compile {
     pub(super) vertex: String,
     pub(super) fragment: String,
     pub(super) cached: Option<std::path::PathBuf>,
+    /// one the start prepares, which a skip lets go.
+    pub(super) preload: bool,
 }
 
 /// the programs waiting for a compiler thread: those a draw needs now first,
@@ -773,9 +790,14 @@ impl Compiler {
                     // one job at a time off the shared queue, the lock let go
                     // before the build
                     while let Some(job) = received.take() {
-                        let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
-                        // SAFETY: the context is current on this thread
-                        unsafe { gl.finish() };
+                        let result = if job.preload && SKIP.load(std::sync::atomic::Ordering::Relaxed) {
+                            Err(SKIPPED.to_owned())
+                        } else {
+                            let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
+                            // SAFETY: the context is current on this thread
+                            unsafe { gl.finish() };
+                            result
+                        };
                         BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         if job.key.0[29] != 0 {
                             BUILDING_STAND_INS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
