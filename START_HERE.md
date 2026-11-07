@@ -59,10 +59,13 @@ and the build finds it, otherwise it asks for a `.cia`.
 `-Precache` in a terminal), works out from a game's files the shaders its
 3D models need, and the handheld builds them the first time the game
 starts instead of while you play. That first start takes longer, several
-minutes on a Mali-G31 device like the R36S. It reads games made with
-Nintendo's NintendoWare library, Mario Kart 7 and Super Mario 3D Land
-among them, and only their models: menus, text, effects and other games'
-shaders are built the first time they're drawn, as before.
+minutes on a Mali-G31 device like the R36S, and B skips the rest. It reads
+the 3D models of games made with Nintendo's own formats (NintendoWare and
+the SDK's H3D: Mario Kart 7, Super Mario 3D Land, Animal Crossing, the
+Pokémon X/Y and Omega Ruby/Alpha Sapphire games, Kirby, A Link Between
+Worlds and many more), and games the kit has a shader list for. Menus,
+text, effects and other games' shaders are built the first time they're
+drawn, as before.
 
 A window shows the build as it goes and stays open at the end so you
 can read how it went. The very first build sets up the build container,
