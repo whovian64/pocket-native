@@ -298,10 +298,10 @@ pub(super) struct Kms {
     pub(super) crtc: u32,
     pub(super) connector: u32,
     pub(super) mode: DrmModeInfo,
-    /// the CRTC and connector of a dual-screen handheld's bottom panel, the
-    /// same size as the top one, which shows the bottom half of a surface
-    /// twice the panel's height, the top panel its top half.
-    pub(super) second: Option<(u32, u32)>,
+    /// the CRTC, connector and mode of a dual-screen handheld's bottom
+    /// panel, the same size as the top one, which shows the bottom half of a
+    /// surface twice the panel's height, the top panel its top half.
+    pub(super) second: Option<(u32, u32, DrmModeInfo)>,
     pub(super) shown: Option<(*mut c_void, u32)>,
     pub(super) pending: Option<(*mut c_void, u32)>,
     pub(super) set: bool,
@@ -427,11 +427,13 @@ impl Kms {
             picked
         };
         let crtc = pick(crtc, possible);
-        let second = bottom.map(|(connector, bottom_name, _, crtc, possible)| {
-            log::info!("two panels, {name} on top and {bottom_name} under it");
-            (pick(crtc, possible), connector)
+        // each panel in its own mode, the same under ROCKNIX
+        let second = bottom.map(|(connector, bottom_name, bottom_mode, crtc, possible)| {
+            let hz = |mode: &DrmModeInfo| mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
+            log::info!("two panels, {name} on top and {bottom_name} under it at {:.3} Hz", hz(&bottom_mode));
+            (pick(crtc, possible), connector, bottom_mode)
         });
-        let second = second.filter(|&(bottom, _)| bottom != 0 && bottom != crtc);
+        let second = second.filter(|&(bottom, ..)| bottom != 0 && bottom != crtc);
         set_stacked(second.is_some());
         // sway lets go of the panels a moment after it stopped, as under
         // ROCKNIX, and a modeset before then fails. only busy is worth
@@ -581,7 +583,7 @@ impl Kms {
                     return Err(format!("could not set the display mode, {result}"));
                 }
                 // the bottom panel shows the picture's bottom half
-                if let Some((crtc, mut connector)) = self.second {
+                if let Some((crtc, mut connector, mut mode)) = self.second {
                     let result = call!(
                         self.drm,
                         "drmModeSetCrtc",
@@ -607,10 +609,10 @@ impl Kms {
                 self.pending = Some((bo, fb));
                 // the bottom panel flips to the same picture; were it still
                 // busy, it is set there now, as the buffer it shows goes
-                if let Some((crtc, mut connector)) = self.second {
+                if let Some((crtc, mut connector, mut mode)) = self.second {
                     if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, crtc, fb, 1, std::ptr::without_provenance_mut(2)) != 0 {
-                        let mut mode = self.mode;
-                        call!(
+                        let flip = std::io::Error::last_os_error();
+                        let set = call!(
                             self.drm,
                             "drmModeSetCrtc",
                             fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
@@ -623,6 +625,13 @@ impl Kms {
                             1,
                             &mut mode
                         );
+                        // a panel that never takes a flip leaves this the
+                        // only way on, and dark, the log says why
+                        static FAILED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let failed = FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if failed == 1 || failed.is_multiple_of(600) {
+                            log::warn!("the bottom panel's flip failed {failed} times, last {flip}, set there instead: {set}");
+                        }
                         FLIPS_SEEN.fetch_or(2, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
@@ -1245,7 +1254,7 @@ pub(super) fn show(gl: GlRef, parts: Vec<Part>, frames: u32) -> Result<(), Strin
 /// a computer without one an image of its size, which ZAKURO_PANEL_SHOT=file
 /// saves each time, numbered in place of a % in the name.
 pub(super) enum Output {
-    Kms(Kms),
+    Kms(Box<Kms>),
     /// the framebuffer device's size, the window a Mali driver built for
     /// it takes, kept where EGL was given it.
     Fbdev(Box<[u16; 2]>),
@@ -1695,7 +1704,7 @@ impl Egl {
         }
         if std::env::var_os("ZAKURO_KMS").is_some() {
             return match Egl::new_kms() {
-                Ok((egl, gl, kms)) => Ok((egl, gl, Some(Output::Kms(kms)))),
+                Ok((egl, gl, kms)) => Ok((egl, gl, Some(Output::Kms(Box::new(kms))))),
                 Err(error) if std::path::Path::new("/dev/fb0").exists() => {
                     let (egl, gl, window) = Egl::new_fbdev().map_err(|fbdev| format!("{error}, and {fbdev}"))?;
                     log::info!("{error}, the screens go through /dev/fb0, {}x{}", window[0], window[1]);
