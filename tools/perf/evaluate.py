@@ -910,6 +910,8 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
     receipt = manifest.get("render_profile")
     if receipt is not None:
         try:
+            if manifest.get("harness", {}).get("render_profiles_sha256") != digest(Path(render_rules.__file__)):
+                raise ValueError("render-profile support SHA-256 does not match the loaded adapter")
             declaration = render_rules.validate(receipt["declaration"])
             implementation_receipt = manifest.get("implementation_profile")
             implementation = (profile_rules.validate(implementation_receipt["declaration"])

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 MODULE = Path(__file__).with_name("evaluate.py")
 SPEC = importlib.util.spec_from_file_location("evaluate", MODULE)
@@ -167,6 +168,21 @@ class RenderReceiptTests(unittest.TestCase):
         result = evaluate.compare_values(baseline, candidate)
         self.assertTrue(any("NON-TIMING" in error for error in result["errors"]))
         self.assertTrue(any("undeclared render" in error for error in result["errors"]))
+
+    def test_recorded_adapter_is_bound_to_loaded_code(self):
+        baseline = with_render_receipts(fixture(), render_profile())
+        # Matching historical identities do not bind the code revalidating them.
+        baseline["harness"]["render_profiles_sha256"] = "f" * 64
+        candidate = copy.deepcopy(baseline)
+        result = evaluate.compare_values(baseline, candidate)
+        self.assertEqual(result["status"], "incomparable")
+        self.assertTrue(any("support SHA-256" in error for error in result["errors"]))
+
+        baseline = with_render_receipts(fixture(), render_profile())
+        with mock.patch.object(evaluate, "digest", side_effect=OSError("adapter unreadable")):
+            result = evaluate.compare_values(baseline, copy.deepcopy(baseline))
+        self.assertEqual(result["status"], "incomparable")
+        self.assertTrue(any("adapter unreadable" in error for error in result["errors"]))
 
 
 class MemoryObservationTests(unittest.TestCase):
