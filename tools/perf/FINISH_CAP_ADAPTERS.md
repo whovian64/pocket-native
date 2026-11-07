@@ -24,6 +24,8 @@ zero means succeeded and every nonzero value means failed. An observed drain
 requires an open ALSA backend and operation `snd_pcm_drain`. Unavailable and
 not-attempted statuses use operation `none`; in-progress has no return code.
 Channel completion, full backend writes and backend finish are distinct.
+Schema 2 uses the runtime's literal lowercase backend tokens `alsa`, `aaudio`,
+`pending` and `unavailable`. Uppercase fixture labels are not runtime tokens.
 
 An optional diagnostic declaration `"audio_completion": "backend"` requests
 the stronger rule without changing historical declarations/hashes. It requires
@@ -82,11 +84,17 @@ presentations, with unknown probe-frame ties and no full-matrix/scanout claim.
 The compiled geometry model pin is retained. Adapter/diagnostic support is also
 hashed from the source actually compiled, with disk-change and reopen guards.
 
-## Deferred verification
+## Verification and remaining limits
 
-After root source review and release of its fixed16 compile census lane, root
-can run the three focused unittest modules followed by the established broad
-Python suite. No tests, syntax/import execution, builds, games or profiling were
-run in this source-only adapter lane. The proposed single bounded control and
-exact implementation handoff live in
-`build/continuous-r1o/finish-cap-adapters/` in the implementation checkout.
+Root's closeout passed all 197 Python performance-tool tests, including source
+pinning, reopen validation, geometry conformance and the actual lowercase ALSA
+token regression. A separate private fake-process suite passed 20 tests for
+guardian exit races, real child wait-status publication and fail-closed cleanup.
+These are helper/fixture results, not an admitted native campaign.
+
+An unchanged private 6,000-batch raw report satisfies the corrected audio
+contract and records successful ALSA-null writes/drain. Its guardian interrupted
+the evaluator during process exit, so the campaign remains held without a final
+native exit receipt. Full capture coverage, matrix capability, audible playback
+and physical device completion remain unproven. See the
+[closeout dispositions](../../docs/optimization-closeout-2026-11-07.md).
