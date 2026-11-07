@@ -37,6 +37,8 @@ use programs::*;
 use sources::*;
 pub use display::{layout_scale, layout_size, panel_timing, second_window, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
 pub use programs::{compiling, compiling_stand_ins, note_compiler_crash};
+#[cfg(feature = "shader-attribution")]
+pub use programs::attribution;
 pub(crate) use programs::COMPILING;
 
 const VERTEX_SIZE: usize = 24 * 4;
@@ -6006,11 +6008,18 @@ mod tests {
 
     #[test]
     fn separable_pairs_share_stage_until_the_final_pipeline_retires() {
-        let gles = match Gles::new() {
+        let mut gles = match Gles::new() {
             Ok(gles) => gles,
             Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
         };
         if (0..PIPELINE_NEEDED).any(|index| pipeline_fn(index) == 0) { eprintln!("no program pipelines here, skipped"); return; }
+        // Raw GL names may be reused by the shared compiler immediately after
+        // deletion. Settle this fixture's startup jobs before checking object
+        // lifetime, as the adjacent reload/pixel fixture does. The separate
+        // in-flight reservation fixture covers ownership during compilation.
+        while gles.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
+            gles.take_compiled(true);
+        }
         let worker = gles.worker.clone();
         worker.run(|| {
             let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
@@ -6170,10 +6179,10 @@ mod tests {
         for (name, stand_in) in [("stand-in 1", true), ("stand-in 2", true), ("draw 1", false), ("stand-in 3", true), ("draw 2", false)] {
             assert!(queue.send(job(name, stand_in)).is_ok());
         }
-        let order: Vec<String> = std::iter::from_fn(|| {
-            let mut jobs = queue.jobs.lock().unwrap();
-            jobs.0.pop_front().or_else(|| jobs.1.pop_front()).map(|job| job.vertex)
-        })
+        // Exercise the actual dequeue path, including feature-gated wait
+        // bookkeeping; a closed queue still drains previously sent jobs.
+        queue.close();
+        let order: Vec<String> = std::iter::from_fn(|| queue.take().map(|job| job.vertex))
         .collect();
         assert_eq!(order, ["draw 1", "draw 2", "stand-in 1", "stand-in 2", "stand-in 3"]);
         // closed, a waiting thread is let go and nothing more is taken

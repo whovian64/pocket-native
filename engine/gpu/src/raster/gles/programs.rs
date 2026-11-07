@@ -4,6 +4,32 @@
 
 use super::*;
 
+/// the diagnostic feature's span around one call, `$body` itself without
+/// it: the call, its arguments and their order stay as they are either way.
+/// `none` records no context, before a worker has one.
+#[cfg(feature = "shader-attribution")]
+macro_rules! observe {
+    ($kind:ident, none, $aux:expr, $body:expr) => {{
+        let span = attribution::Span::begin(attribution::Kind::$kind, None, $aux);
+        let value = $body;
+        span.end(attribution::Observed::outcome(&value));
+        value
+    }};
+    ($kind:ident, $gl:expr, $aux:expr, $body:expr) => {{
+        let span = attribution::Span::begin(attribution::Kind::$kind, Some($gl), $aux);
+        let value = $body;
+        span.end(attribution::Observed::outcome(&value));
+        value
+    }};
+}
+
+#[cfg(not(feature = "shader-attribution"))]
+macro_rules! observe {
+    ($kind:ident, $gl:expr, $aux:expr, $body:expr) => {
+        $body
+    };
+}
+
 pub(super) const MANIFEST_HEADER: &str = "zakuro-gles 5";
 
 /// the vertex programs' words, kept by fingerprint, so a run translates
@@ -46,10 +72,10 @@ fn write_program_binary(gl: &glow::Context, program: glow::Program, cached: Opti
     #[cfg(test)]
     BINARY_READS.set(BINARY_READS.get() + 1);
     // SAFETY: the linked program belongs to the current compiler/GL context.
-    if let Some(binary) = unsafe { gl.get_program_binary(program) } {
+    if let Some(binary) = observe!(BinaryRetrieve, gl, 0, unsafe { gl.get_program_binary(program) }) {
         let mut bytes = binary.format.to_le_bytes().to_vec();
         bytes.extend_from_slice(&binary.buffer);
-        let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, bytes));
+        let _ = observe!(CacheWrite, gl, bytes.len() as u64, path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, bytes)));
     }
 }
 
@@ -207,6 +233,8 @@ pub(super) fn compiler_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
 pub(super) fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
     let _compiling = compiler_lock();
     let _watched = Watched;
+    #[cfg(feature = "shader-attribution")]
+    let mut span = attribution::Span::begin(attribution::Kind::Graphics, Some(gl), 0);
     at_compiler([vertex, fragment]);
     // SAFETY: on the GL thread, the shaders are deleted once linked
     unsafe {
@@ -215,26 +243,32 @@ pub(super) fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<g
         for (stage, source) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
             let shader = gl.create_shader(stage)?;
             gl.shader_source(shader, source);
-            gl.compile_shader(shader);
-            if !gl.get_shader_compile_status(shader) {
+            observe!(ShaderCompile, gl, stage as u64, gl.compile_shader(shader));
+            if !observe!(CompileStatus, gl, stage as u64, gl.get_shader_compile_status(shader)) {
                 let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
                 shaders.into_iter().chain([shader]).for_each(|shader| gl.delete_shader(shader));
                 gl.delete_program(program);
+                #[cfg(feature = "shader-attribution")]
+                span.set(attribution::COMPILE_FAILED);
                 return Err(error);
             }
             gl.attach_shader(program, shader);
             shaders.push(shader);
         }
-        gl.link_program(program);
+        observe!(ProgramLink, gl, 0, gl.link_program(program));
         for shader in shaders {
             gl.detach_shader(program, shader);
             gl.delete_shader(shader);
         }
-        if !gl.get_program_link_status(program) {
+        if !observe!(LinkStatus, gl, 0, gl.get_program_link_status(program)) {
             let error = format!("could not link a program, {}", gl.get_program_info_log(program));
             gl.delete_program(program);
+            #[cfg(feature = "shader-attribution")]
+            span.set(attribution::LINK_FAILED);
             return Err(error);
         }
+        #[cfg(feature = "shader-attribution")]
+        span.set(attribution::COMPILED);
         Ok(program)
     }
 }
@@ -314,6 +348,8 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
     }
     let _compiling = compiler_lock();
     let _watched = Watched;
+    #[cfg(feature = "shader-attribution")]
+    let mut span = attribution::Span::begin(attribution::Kind::Stage, Some(gl), stage as u64);
     let started = std::time::Instant::now();
     let cached = RENDERER_NAME.get().and_then(|name| program_cache_path(name, if stage == glow::VERTEX_SHADER { "separable vertex" } else { "separable fragment" }, source));
     // SAFETY: the context is current on this thread, the pipeline calls
@@ -322,10 +358,10 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
         let program = gl.create_program()?;
         let parameter: extern "system" fn(u32, u32, i32) = std::mem::transmute(pipeline_fn(0));
         parameter(program.0.get(), PROGRAM_SEPARABLE, 1);
-        let loaded = cached.as_deref().and_then(|path| std::fs::read(path).ok()).filter(|bytes| bytes.len() > 4).is_some_and(|bytes| {
+        let loaded = cached.as_deref().and_then(|path| observe!(CacheRead, gl, 0, std::fs::read(path).ok())).filter(|bytes| bytes.len() > 4).is_some_and(|bytes| {
             let format = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format });
-            gl.get_program_link_status(program)
+            observe!(BinaryLoad, gl, bytes.len() as u64 - 4, gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format }));
+            observe!(BinaryStatus, gl, 0, gl.get_program_link_status(program))
         });
         if !loaded {
             let (shader, kept) = match compiled_shader(stage, source) {
@@ -334,14 +370,16 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
                     let shader = gl.create_shader(stage)?;
                     gl.shader_source(shader, source);
                     at_compiler([source, ""]);
-                    gl.compile_shader(shader);
+                    observe!(ShaderCompile, gl, stage as u64, gl.compile_shader(shader));
                     (shader, false)
                 }
             };
-            if !kept && !gl.get_shader_compile_status(shader) {
+            if !kept && !observe!(CompileStatus, gl, stage as u64, gl.get_shader_compile_status(shader)) {
                 let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
                 gl.delete_shader(shader);
                 gl.delete_program(program);
+                #[cfg(feature = "shader-attribution")]
+                span.set(attribution::COMPILE_FAILED);
                 return Err(error);
             }
             gl.attach_shader(program, shader);
@@ -349,7 +387,7 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
                 gl.program_binary_retrievable_hint(program, true);
             }
             at_compiler([source, ""]);
-            gl.link_program(program);
+            observe!(ProgramLink, gl, 0, gl.link_program(program));
             gl.detach_shader(program, shader);
             if !kept {
                 // The linked stage is cached by source below. Every later
@@ -358,13 +396,17 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
                 // A borrowed shader stays with the cache that owns it.
                 gl.delete_shader(shader);
             }
-            if !gl.get_program_link_status(program) {
+            if !observe!(LinkStatus, gl, 0, gl.get_program_link_status(program)) {
                 let error = format!("could not link a shader stage, {}", gl.get_program_info_log(program));
                 gl.delete_program(program);
+                #[cfg(feature = "shader-attribution")]
+                span.set(attribution::LINK_FAILED);
                 return Err(error);
             }
             write_program_binary(gl, program, cached.as_deref());
         }
+        #[cfg(feature = "shader-attribution")]
+        span.set(if loaded { attribution::LOADED } else { attribution::COMPILED });
         if stage == glow::FRAGMENT_SHADER {
             for unit in 0..3 {
                 if let Some(location) = gl.get_uniform_location(program, &format!("texture{unit}")) {
@@ -382,6 +424,8 @@ pub(super) fn stage_program(gl: &glow::Context, stage: u32, source: &str) -> Res
     let mut stages = STAGE_PROGRAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let stages = stages.get_or_insert_with(Default::default);
     if let Some(found) = stages.get(&key) {
+        #[cfg(feature = "shader-attribution")]
+        span.raced();
         // SAFETY: the context is current, nothing has used this one
         unsafe { gl.delete_program(program) };
         return Ok(found.clone());
@@ -631,7 +675,11 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
         }
     }
     let _timed = Timed(started);
+    #[cfg(feature = "shader-attribution")]
+    let mut span = attribution::Span::begin(attribution::Kind::Build, Some(gl), cached.is_some() as u64);
     if separable() {
+        #[cfg(feature = "shader-attribution")]
+        span.set(attribution::SEPARABLE);
         return build_separable(gl, vertex, fragment);
     }
     let _compiling = compiler_lock();
@@ -640,10 +688,10 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
     // once linked into the program
     unsafe {
         let program = gl.create_program()?;
-        let loaded = cached.and_then(|path| std::fs::read(path).ok()).filter(|bytes| bytes.len() > 4).is_some_and(|bytes| {
+        let loaded = cached.and_then(|path| observe!(CacheRead, gl, 0, std::fs::read(path).ok())).filter(|bytes| bytes.len() > 4).is_some_and(|bytes| {
             let format = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format });
-            gl.get_program_link_status(program)
+            observe!(BinaryLoad, gl, bytes.len() as u64 - 4, gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format }));
+            observe!(BinaryStatus, gl, 0, gl.get_program_link_status(program))
         });
         let waited = started.elapsed();
         if !loaded {
@@ -661,14 +709,14 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
                         let shader = gl.create_shader(stage)?;
                         gl.shader_source(shader, source);
                         at_compiler([source, ""]);
-                        gl.compile_shader(shader);
+                        observe!(ShaderCompile, gl, stage as u64, gl.compile_shader(shader));
                         (shader, false)
                     }
                 });
             }
             for (index, &(shader, kept)) in shaders.iter().enumerate() {
                 at_compiler([sources[index].1, ""]);
-                if !kept && !gl.get_shader_compile_status(shader) {
+                if !kept && !observe!(CompileStatus, gl, sources[index].0 as u64, gl.get_shader_compile_status(shader)) {
                     let error = format!("could not compile a shader, {}", gl.get_shader_info_log(shader));
                     for &(shader, kept) in &shaders {
                         if !kept {
@@ -676,6 +724,8 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
                         }
                     }
                     gl.delete_program(program);
+                    #[cfg(feature = "shader-attribution")]
+                    span.set(attribution::COMPILE_FAILED);
                     return Err(error);
                 }
                 stages[index] = began.elapsed();
@@ -688,23 +738,27 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
             }
             at_compiler([vertex, fragment]);
             let began = std::time::Instant::now();
-            gl.link_program(program);
+            observe!(ProgramLink, gl, 0, gl.link_program(program));
             for (&(shader, kept), (stage, source)) in shaders.iter().zip(sources) {
                 gl.detach_shader(program, shader);
                 if !kept {
                     keep_shader(gl, stage, source, shader);
                 }
             }
-            let linked = gl.get_program_link_status(program);
+            let linked = observe!(LinkStatus, gl, 0, gl.get_program_link_status(program));
             stages[2] = began.elapsed();
             count_build(vertex, fragment, waited, stages);
             if !linked {
                 let error = format!("could not link a program, {}", gl.get_program_info_log(program));
                 gl.delete_program(program);
+                #[cfg(feature = "shader-attribution")]
+                span.set(attribution::LINK_FAILED);
                 return Err(error);
             }
             write_program_binary(gl, program, cached);
         }
+        #[cfg(feature = "shader-attribution")]
+        span.set(if loaded { attribution::LOADED } else { attribution::COMPILED });
         gl.use_program(Some(program));
         for unit in 0..3 {
             if let Some(location) = gl.get_uniform_location(program, &format!("texture{unit}")) {
@@ -732,11 +786,19 @@ pub(super) struct Compile {
 pub(super) struct Queue {
     pub(super) jobs: std::sync::Mutex<(std::collections::VecDeque<Compile>, std::collections::VecDeque<Compile>, bool)>,
     pub(super) ready: std::sync::Condvar,
+    /// the diagnostic feature's open queue waits, kept under `jobs`' lock.
+    #[cfg(feature = "shader-attribution")]
+    pub(super) waits: attribution::QueueWaits,
 }
 
 impl Queue {
     pub(super) fn new() -> Queue {
-        Queue { jobs: std::sync::Mutex::new((Default::default(), Default::default(), false)), ready: std::sync::Condvar::new() }
+        Queue {
+            jobs: std::sync::Mutex::new((Default::default(), Default::default(), false)),
+            ready: std::sync::Condvar::new(),
+            #[cfg(feature = "shader-attribution")]
+            waits: attribution::QueueWaits::new(),
+        }
     }
 
     pub(super) fn send(&self, job: Compile) -> Result<(), ()> {
@@ -750,8 +812,12 @@ impl Queue {
         // a stand-in's constants say it is the dynamic program. Draws drawn
         // with stand-ins while their programs build need them first
         if job.key.0[29] != 0 && !crate::raster::stand_ins() {
+            #[cfg(feature = "shader-attribution")]
+            self.waits.queued(1, true);
             jobs.1.push_back(job);
         } else {
+            #[cfg(feature = "shader-attribution")]
+            self.waits.queued(0, job.key.0[29] != 0);
             jobs.0.push_back(job);
         }
         self.ready.notify_one();
@@ -762,8 +828,18 @@ impl Queue {
     pub(super) fn take(&self) -> Option<Compile> {
         let mut jobs = self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
-            if let Some(job) = jobs.0.pop_front().or_else(|| jobs.1.pop_front()) {
-                return Some(job);
+            #[cfg(not(feature = "shader-attribution"))]
+            {
+                if let Some(job) = jobs.0.pop_front().or_else(|| jobs.1.pop_front()) {
+                    return Some(job);
+                }
+            }
+            #[cfg(feature = "shader-attribution")]
+            {
+                let (first, second, _) = &mut *jobs;
+                if let Some(job) = self.waits.take(first, second) {
+                    return Some(job);
+                }
             }
             if jobs.2 {
                 return None;
@@ -821,7 +897,9 @@ impl Compiler {
             let spawned = thread::Builder::new()
                 .name(if index == 0 { "gles-compiler".into() } else { format!("gles-compiler{index}") })
                 .spawn(move || {
-                    let Some(gl) = egl.shared_context() else {
+                    #[cfg(feature = "shader-attribution")]
+                    let _live = attribution::Worker::enter();
+                    let Some(gl) = observe!(WorkerContext, none, index as u64, egl.shared_context()) else {
                         let _ = ready.send(false);
                         return;
                     };
@@ -829,20 +907,28 @@ impl Compiler {
                     // SAFETY: lowers the priority of this thread alone, which is
                     // what Linux takes 0 for, the game's threads going first
                     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+                    // glow answers this from the list it read when the context
+                    // was made, no GL call
+                    #[cfg(feature = "shader-attribution")]
+                    attribution::instant(attribution::Kind::ExtensionQuery, Some(&gl), index as u64, gl.supported_extensions().contains("GL_KHR_parallel_shader_compile") as u32);
                     // a driver that can compile in threads of its own may use as
                     // many as it likes for this context's programs
                     if gl.supported_extensions().contains("GL_KHR_parallel_shader_compile") {
                         // SAFETY: the context is current, the extension names it
-                        unsafe { gl.max_shader_compiler_threads(u32::MAX) };
+                        unsafe { observe!(ParallelHint, &gl, u32::MAX as u64, gl.max_shader_compiler_threads(u32::MAX)) };
                         log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
                     let _ = ready.send(true);
                     // one job at a time off the shared queue, the lock let go
                     // before the build
                     while let Some(job) = received.take() {
+                        #[cfg(feature = "shader-attribution")]
+                        let span = attribution::Span::begin(attribution::Kind::Job, Some(&gl), attribution::taken());
                         let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
                         // SAFETY: the context is current on this thread
-                        unsafe { gl.finish() };
+                        unsafe { observe!(WorkerFinish, &gl, 0, gl.finish()) };
+                        #[cfg(feature = "shader-attribution")]
+                        span.end(attribution::Observed::outcome(&result));
                         BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         if job.key.0[29] != 0 {
                             BUILDING_STAND_INS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -865,6 +951,724 @@ impl Compiler {
         }
         let thread = (!threads.is_empty()).then(|| threads.remove(0))?;
         any.then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
+    }
+}
+
+/// Diagnostic only, behind the default-off `shader-attribution` feature:
+/// what each program build, binary load, compile, link, cache read/write and
+/// compiler job cost, as begin/end events on CLOCK_MONOTONIC, enough to
+/// tell a warm binary load from a first run's compile and link.
+///
+/// Bounded: the first [`CAPACITY`] events of the process take a slot of
+/// fixed scalars, every later one only counts as dropped. Nothing records
+/// shader source, guest data or PCM. Recording takes no lock and makes no
+/// heap allocation; it never runs on a draw (binding, deleting and pruning
+/// programs are not observed) nor in the crash handler. The clock and the
+/// atomics can still move the driver's scheduling, so a capture says where
+/// time went, never how fast anything is.
+///
+/// A snapshot is never final: compiler workers have no join barrier here
+/// and may outlive whoever asks, and the GL thread can build later. Open
+/// and reserved events are reported as partial, and the completion field
+/// is `partial` or `unknown`, never `final`.
+#[cfg(feature = "shader-attribution")]
+pub mod attribution {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+
+    /// events kept per process.
+    pub const CAPACITY: usize = 256;
+    pub const FORMAT: &str = "zakuro-shader-attribution 1";
+    /// the most a report renders to: CAPACITY lines of fixed scalars at
+    /// their widest, and the header.
+    pub const MAX_REPORT_BYTES: usize = 64 * 1024;
+
+    /// an event's outcome when its span ended without one, by an early
+    /// return or an unwind.
+    pub const NO_OUTCOME: u32 = u32::MAX;
+    /// outcomes of build, stage and graphics events.
+    pub const LOADED: u32 = 1;
+    pub const COMPILED: u32 = 2;
+    pub const COMPILE_FAILED: u32 = 3;
+    pub const LINK_FAILED: u32 = 4;
+    /// build only: handed to the separable stages, their own stage events.
+    pub const SEPARABLE: u32 = 5;
+    /// stage only, added to LOADED or COMPILED: another thread published
+    /// the same stage first and this one was deleted.
+    pub const RACED: u32 = 10;
+
+    /// what an event spans. Its aux and outcome mean, by kind:
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(u32)]
+    pub enum Kind {
+        /// build_program; aux 1 with a cache path; outcome LOADED..SEPARABLE
+        Build = 1,
+        /// stage_program past the in-process stage cache; aux the GL stage
+        Stage,
+        /// link(), the renderer's own programs; outcome as Build
+        Graphics,
+        /// reading the program binary file; outcome 1 read, 0 not
+        CacheRead,
+        /// gl.program_binary, the copy of its bytes included; aux bytes
+        BinaryLoad,
+        /// gl.get_program_link_status after a binary; outcome linked
+        BinaryStatus,
+        /// gl.compile_shader; aux the GL stage
+        ShaderCompile,
+        /// gl.get_shader_compile_status, where a parallel compile is waited
+        /// for; aux the GL stage; outcome compiled
+        CompileStatus,
+        /// gl.link_program
+        ProgramLink,
+        /// gl.get_program_link_status after a link; outcome linked
+        LinkStatus,
+        /// gl.get_program_binary; outcome 1 with a binary
+        BinaryRetrieve,
+        /// the binary file's directory and write; aux bytes; outcome 1 ok
+        CacheWrite,
+        /// a compiler job from Queue::send to Queue::take; aux bit 0 a
+        /// stand-in, bit 1 the stand-ins' later lane; begin and end threads
+        /// differ
+        QueueWait,
+        /// a compiler worker's build_program and gl.finish; aux its
+        /// queue_wait's index + 1, 0 unknown; outcome 1 built
+        Job,
+        /// the gl.finish after a compiler job
+        WorkerFinish,
+        /// a compiler worker making its shared context; aux its index;
+        /// outcome 1 with a context
+        WorkerContext,
+        /// whether the worker's context lists GL_KHR_parallel_shader_compile,
+        /// an instant; aux the worker's index; outcome 1 listed
+        ExtensionQuery,
+        /// gl.max_shader_compiler_threads; aux the count asked for
+        ParallelHint,
+    }
+
+    const KINDS: [Kind; 18] = [
+        Kind::Build, Kind::Stage, Kind::Graphics, Kind::CacheRead, Kind::BinaryLoad, Kind::BinaryStatus,
+        Kind::ShaderCompile, Kind::CompileStatus, Kind::ProgramLink, Kind::LinkStatus, Kind::BinaryRetrieve,
+        Kind::CacheWrite, Kind::QueueWait, Kind::Job, Kind::WorkerFinish, Kind::WorkerContext,
+        Kind::ExtensionQuery, Kind::ParallelHint,
+    ];
+
+    impl Kind {
+        pub fn name(self) -> &'static str {
+            match self {
+                Kind::Build => "build",
+                Kind::Stage => "stage",
+                Kind::Graphics => "graphics",
+                Kind::CacheRead => "cache_read",
+                Kind::BinaryLoad => "binary_load",
+                Kind::BinaryStatus => "binary_status",
+                Kind::ShaderCompile => "shader_compile",
+                Kind::CompileStatus => "compile_status",
+                Kind::ProgramLink => "program_link",
+                Kind::LinkStatus => "link_status",
+                Kind::BinaryRetrieve => "binary_retrieve",
+                Kind::CacheWrite => "cache_write",
+                Kind::QueueWait => "queue_wait",
+                Kind::Job => "job",
+                Kind::WorkerFinish => "worker_finish",
+                Kind::WorkerContext => "worker_context",
+                Kind::ExtensionQuery => "extension_query",
+                Kind::ParallelHint => "parallel_hint",
+            }
+        }
+
+        pub fn from_u32(value: u32) -> Option<Kind> {
+            KINDS.get((value as usize).checked_sub(1)?).copied()
+        }
+    }
+
+    /// what a span's value says of how it went.
+    pub trait Observed {
+        fn outcome(&self) -> u32;
+    }
+    impl Observed for () {
+        fn outcome(&self) -> u32 {
+            1
+        }
+    }
+    impl Observed for bool {
+        fn outcome(&self) -> u32 {
+            *self as u32
+        }
+    }
+    impl<T> Observed for Option<T> {
+        fn outcome(&self) -> u32 {
+            self.is_some() as u32
+        }
+    }
+    impl<T, E> Observed for Result<T, E> {
+        fn outcome(&self) -> u32 {
+            self.is_ok() as u32
+        }
+    }
+
+    const EMPTY: u32 = 0;
+    const OPEN: u32 = 1;
+    const DONE: u32 = 2;
+
+    /// one event's scalars. The opening thread writes the begin fields
+    /// before publishing OPEN, the closing one the end fields before DONE.
+    struct Record {
+        state: AtomicU32,
+        kind: AtomicU32,
+        outcome: AtomicU32,
+        begin_thread: AtomicU32,
+        end_thread: AtomicU32,
+        context: AtomicU32,
+        share_group: AtomicU32,
+        begin_ns: AtomicU64,
+        end_ns: AtomicU64,
+        aux: AtomicU64,
+    }
+
+    impl Record {
+        const fn new() -> Record {
+            Record {
+                state: AtomicU32::new(EMPTY),
+                kind: AtomicU32::new(0),
+                outcome: AtomicU32::new(NO_OUTCOME),
+                begin_thread: AtomicU32::new(0),
+                end_thread: AtomicU32::new(0),
+                context: AtomicU32::new(0),
+                share_group: AtomicU32::new(0),
+                begin_ns: AtomicU64::new(0),
+                end_ns: AtomicU64::new(0),
+                aux: AtomicU64::new(0),
+            }
+        }
+    }
+
+    /// N fixed slots, taken in order, never reused.
+    pub struct Recorder<const N: usize> {
+        attempted: AtomicU64,
+        records: [Record; N],
+    }
+
+    impl<const N: usize> Default for Recorder<N> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl<const N: usize> Recorder<N> {
+        pub const fn new() -> Recorder<N> {
+            Recorder { attempted: AtomicU64::new(0), records: [const { Record::new() }; N] }
+        }
+
+        /// counts an attempt, and opens a slot for it while there is one.
+        pub fn open(&self, kind: Kind, context: u32, share_group: u32, aux: u64, thread: u32, now: u64) -> Option<u32> {
+            self.open_lazy(kind, || (context, share_group, aux, thread, now))
+        }
+
+        /// Only admitted records gather identity/clock fields. Saturation
+        /// counts drops without more clock syscalls or context-table work.
+        fn open_lazy(&self, kind: Kind, fields: impl FnOnce() -> (u32, u32, u64, u32, u64)) -> Option<u32> {
+            let index = self.attempted.fetch_add(1, Relaxed);
+            let record = self.records.get(usize::try_from(index).ok()?)?;
+            let (context, share_group, aux, thread, now) = fields();
+            record.kind.store(kind as u32, Relaxed);
+            record.context.store(context, Relaxed);
+            record.share_group.store(share_group, Relaxed);
+            record.aux.store(aux, Relaxed);
+            record.begin_thread.store(thread, Relaxed);
+            record.begin_ns.store(now, Relaxed);
+            record.state.store(OPEN, Release);
+            Some(index as u32)
+        }
+
+        /// ends an open slot, once; a second close is ignored.
+        pub fn close(&self, slot: u32, outcome: u32, thread: u32, now: u64) {
+            let Some(record) = self.records.get(slot as usize) else { return };
+            if record.state.load(Acquire) != OPEN {
+                return;
+            }
+            record.end_ns.store(now, Relaxed);
+            record.end_thread.store(thread, Relaxed);
+            record.outcome.store(outcome, Relaxed);
+            record.state.store(DONE, Release);
+        }
+
+        /// what has been recorded so far, with workers_live compiler workers
+        /// still running.
+        pub fn snapshot(&self, workers_live: u64) -> Snapshot {
+            let mut events = Vec::with_capacity(N);
+            let (mut completed, mut open) = (0, 0);
+            for (index, record) in self.records.iter().enumerate() {
+                let state = record.state.load(Acquire);
+                if state == EMPTY {
+                    continue;
+                }
+                let done = state == DONE;
+                if done { completed += 1 } else { open += 1 }
+                events.push(Event {
+                    index: index as u32,
+                    kind: record.kind.load(Relaxed),
+                    done,
+                    outcome: if done { record.outcome.load(Relaxed) } else { NO_OUTCOME },
+                    begin_thread: record.begin_thread.load(Relaxed),
+                    end_thread: if done { record.end_thread.load(Relaxed) } else { 0 },
+                    context: record.context.load(Relaxed),
+                    share_group: record.share_group.load(Relaxed),
+                    begin_ns: record.begin_ns.load(Relaxed),
+                    end_ns: if done { Some(record.end_ns.load(Relaxed)) } else { None },
+                    aux: record.aux.load(Relaxed),
+                });
+            }
+            // read after the slots, so every slot seen is counted in it
+            let attempted = self.attempted.load(Relaxed);
+            let recorded = attempted.min(N as u64);
+            Snapshot {
+                capacity: N,
+                attempted,
+                recorded,
+                completed,
+                open,
+                // slots taken whose opening thread had not published them yet
+                reserved: recorded.saturating_sub(completed + open),
+                dropped: attempted - recorded,
+                workers_live,
+                events,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Event {
+        pub index: u32,
+        pub kind: u32,
+        pub done: bool,
+        pub outcome: u32,
+        pub begin_thread: u32,
+        pub end_thread: u32,
+        pub context: u32,
+        pub share_group: u32,
+        pub begin_ns: u64,
+        pub end_ns: Option<u64>,
+        pub aux: u64,
+    }
+
+    /// attempted = completed + open + reserved + dropped.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Snapshot {
+        pub capacity: usize,
+        pub attempted: u64,
+        pub recorded: u64,
+        pub completed: u64,
+        pub open: u64,
+        pub reserved: u64,
+        pub dropped: u64,
+        pub workers_live: u64,
+        pub events: Vec<Event>,
+    }
+
+    impl Snapshot {
+        pub fn partial(&self) -> u64 {
+            self.open + self.reserved
+        }
+
+        /// `partial` with an event unfinished or a worker running, else
+        /// `unknown`: nothing here proves no build comes after.
+        pub fn completion(&self) -> &'static str {
+            if self.partial() > 0 || self.workers_live > 0 { "partial" } else { "unknown" }
+        }
+
+        /// the sidecar's text, at most MAX_REPORT_BYTES.
+        pub fn render(&self) -> String {
+            use std::fmt::Write;
+            let mut out = String::with_capacity(512 + self.events.len() * 160);
+            let _ = writeln!(out, "{FORMAT}");
+            let _ = writeln!(out, "diagnostic-only: instrumentation may perturb driver scheduling; not a timing or speed result");
+            let _ = writeln!(out, "clock CLOCK_MONOTONIC ns");
+            let _ = writeln!(
+                out,
+                "capacity {} attempted {} recorded {} completed {} partial {} open {} reserved {} dropped {} workers_live {} completion {}",
+                self.capacity, self.attempted, self.recorded, self.completed, self.partial(), self.open, self.reserved, self.dropped, self.workers_live, self.completion()
+            );
+            let _ = writeln!(out, "columns index kind state outcome begin_thread end_thread context share_group begin_ns end_ns aux");
+            for event in &self.events {
+                let kind = Kind::from_u32(event.kind).map_or("unknown_kind", Kind::name);
+                let state = if event.done { "done" } else { "open" };
+                let dash = || "-".to_owned();
+                let _ = writeln!(
+                    out,
+                    "event {} {kind} {state} {} {} {} {} {} {} {} {}",
+                    event.index,
+                    if event.done && event.outcome != NO_OUTCOME { event.outcome.to_string() } else { dash() },
+                    event.begin_thread,
+                    if event.done { event.end_thread.to_string() } else { dash() },
+                    event.context,
+                    event.share_group,
+                    event.begin_ns,
+                    event.end_ns.map_or_else(dash, |end| end.to_string()),
+                    event.aux,
+                );
+            }
+            out.truncate(MAX_REPORT_BYTES);
+            out
+        }
+    }
+
+    /// the process's events.
+    pub static RECORDER: Recorder<CAPACITY> = Recorder::new();
+    static WORKERS_LIVE: AtomicU64 = AtomicU64::new(0);
+    /// contexts and share groups by address, numbered from 1 as first seen;
+    /// u32::MAX past the table. An address freed and reused keeps its number.
+    static CONTEXTS: [AtomicUsize; 32] = [const { AtomicUsize::new(0) }; 32];
+    static GROUPS: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+
+    thread_local! {
+        static THREAD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static TAKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    pub fn now_ns() -> u64 {
+        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a valid timespec to fill; CLOCK_MONOTONIC always exists
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+        time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+    }
+
+    /// the kernel's id of this thread, as the profiler and the log see it.
+    pub fn thread() -> u32 {
+        THREAD.with(|thread| {
+            if thread.get() == 0 {
+                // SAFETY: gettid has no arguments and cannot fail
+                thread.set(unsafe { libc::syscall(libc::SYS_gettid) } as u32);
+            }
+            thread.get()
+        })
+    }
+
+    pub fn intern(table: &[AtomicUsize], address: usize) -> u32 {
+        if address == 0 {
+            return 0;
+        }
+        for (index, entry) in table.iter().enumerate() {
+            let mut current = entry.load(Relaxed);
+            if current == 0 {
+                current = entry.compare_exchange(0, address, Relaxed, Relaxed).unwrap_or_else(|other| other);
+                if current == 0 {
+                    return index as u32 + 1;
+                }
+            }
+            if current == address {
+                return index as u32 + 1;
+            }
+        }
+        u32::MAX
+    }
+
+    fn ids(gl: Option<&glow::Context>) -> (u32, u32) {
+        let context = gl.map_or(0, |gl| intern(&CONTEXTS, gl as *const glow::Context as usize));
+        (context, intern(&GROUPS, super::SHARE_GROUP.get()))
+    }
+
+    /// an event of the process's recorder, ended when dropped, with
+    /// NO_OUTCOME unless one was set.
+    pub struct Span {
+        slot: Option<u32>,
+        outcome: u32,
+    }
+
+    impl Span {
+        pub fn begin(kind: Kind, gl: Option<&glow::Context>, aux: u64) -> Span {
+            let slot = RECORDER.open_lazy(kind, || {
+                let (context, share_group) = ids(gl);
+                (context, share_group, aux, thread(), now_ns())
+            });
+            Span { slot, outcome: NO_OUTCOME }
+        }
+
+        pub fn set(&mut self, outcome: u32) {
+            self.outcome = outcome;
+        }
+
+        pub fn raced(&mut self) {
+            if self.outcome != NO_OUTCOME {
+                self.outcome += RACED;
+            }
+        }
+
+        pub fn end(mut self, outcome: u32) {
+            self.outcome = outcome;
+        }
+
+        pub fn slot(&self) -> Option<u32> {
+            self.slot
+        }
+    }
+
+    impl Drop for Span {
+        fn drop(&mut self) {
+            if let Some(slot) = self.slot.take() {
+                RECORDER.close(slot, self.outcome, thread(), now_ns());
+            }
+        }
+    }
+
+    /// an event with no duration.
+    pub fn instant(kind: Kind, gl: Option<&glow::Context>, aux: u64, outcome: u32) {
+        Span::begin(kind, gl, aux).end(outcome);
+    }
+
+    /// a compiler worker running, from before its context to its end.
+    pub struct Worker(());
+
+    impl Worker {
+        pub fn enter() -> Worker {
+            WORKERS_LIVE.fetch_add(1, Relaxed);
+            Worker(())
+        }
+    }
+
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            WORKERS_LIVE.fetch_sub(1, Relaxed);
+        }
+    }
+
+    /// the queue_wait index + 1 of the job this thread took last, 0 for
+    /// none or unknown, once.
+    pub fn taken() -> u64 {
+        TAKEN.replace(0)
+    }
+
+    const RING: usize = CAPACITY;
+
+    /// each queued job's open queue_wait slot + 1 (0 none), by lane, in
+    /// the lanes' FIFO order. Only touched under the queue's lock; atomics
+    /// only to be Sync. A job queued more than RING deep overwrites an
+    /// older one's slot, whose event then stays open: partial, not wrong.
+    pub struct QueueWaits {
+        slots: [[AtomicU32; RING]; 2],
+        pushed: [AtomicU64; 2],
+        popped: [AtomicU64; 2],
+    }
+
+    impl Default for QueueWaits {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl QueueWaits {
+        pub const fn new() -> QueueWaits {
+            QueueWaits {
+                slots: [const { [const { AtomicU32::new(0) }; RING] }; 2],
+                pushed: [const { AtomicU64::new(0) }; 2],
+                popped: [const { AtomicU64::new(0) }; 2],
+            }
+        }
+
+        pub fn queued(&self, lane: usize, stand_in: bool) {
+            let aux = stand_in as u64 | (lane as u64) << 1;
+            let slot = RECORDER.open_lazy(Kind::QueueWait, || (0, 0, aux, thread(), now_ns())).map_or(0, |slot| slot + 1);
+            let at = self.pushed[lane].fetch_add(1, Relaxed);
+            self.slots[lane][at as usize % RING].store(slot, Relaxed);
+        }
+
+        pub fn queued_in<const N: usize>(&self, recorder: &Recorder<N>, lane: usize, stand_in: bool, thread: u32, now: u64) {
+            let aux = stand_in as u64 | (lane as u64) << 1;
+            let slot = recorder.open(Kind::QueueWait, 0, 0, aux, thread, now).map_or(0, |slot| slot + 1);
+            let at = self.pushed[lane].fetch_add(1, Relaxed);
+            self.slots[lane][at as usize % RING].store(slot, Relaxed);
+        }
+
+        /// Queue::take's own pop: the first lane, then the second.
+        pub fn take<T>(&self, first: &mut std::collections::VecDeque<T>, second: &mut std::collections::VecDeque<T>) -> Option<T> {
+            let (lane, job) = match first.pop_front() {
+                Some(job) => (0, job),
+                None => (1, second.pop_front()?),
+            };
+            TAKEN.set(self.taken_lazy(&RECORDER, lane, || (thread(), now_ns())));
+            Some(job)
+        }
+
+        /// closes the queue_wait of the job just popped from lane, giving
+        /// its slot + 1, 0 when it had none or was overwritten.
+        pub fn taken_in<const N: usize>(&self, recorder: &Recorder<N>, lane: usize, thread: u32, now: u64) -> u64 {
+            self.taken_lazy(recorder, lane, || (thread, now))
+        }
+
+        fn taken_lazy<const N: usize>(&self, recorder: &Recorder<N>, lane: usize, fields: impl FnOnce() -> (u32, u64)) -> u64 {
+            let at = self.popped[lane].fetch_add(1, Relaxed);
+            let depth = self.pushed[lane].load(Relaxed).checked_sub(at);
+            if !depth.is_some_and(|depth| (1..=RING as u64).contains(&depth)) {
+                return 0;
+            }
+            let slot = self.slots[lane][at as usize % RING].load(Relaxed);
+            if slot != 0 {
+                let (thread, now) = fields();
+                recorder.close(slot - 1, 1, thread, now);
+            }
+            slot as u64
+        }
+    }
+
+    /// the process's events now.
+    pub fn snapshot() -> Snapshot {
+        RECORDER.snapshot(WORKERS_LIVE.load(Relaxed))
+    }
+
+    /// writes snapshot()'s report to a new file at path, refusing one that
+    /// exists, and gives the snapshot.
+    pub fn write_sidecar(path: &std::path::Path) -> std::io::Result<Snapshot> {
+        use std::io::Write;
+        let snapshot = snapshot();
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        file.write_all(snapshot.render().as_bytes())?;
+        Ok(snapshot)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn an_event_keeps_its_exact_boundaries_and_threads() {
+            let recorder = Recorder::<4>::new();
+            let slot = recorder.open(Kind::BinaryLoad, 2, 1, 4096, 77, 1_000).unwrap();
+            assert_eq!(recorder.snapshot(0).events[0].end_ns, None, "open until closed");
+            recorder.close(slot, 1, 78, 1_250);
+            recorder.close(slot, 0, 79, 9_999);
+            let snapshot = recorder.snapshot(0);
+            assert_eq!(snapshot.events, [Event { index: 0, kind: Kind::BinaryLoad as u32, done: true, outcome: 1, begin_thread: 77, end_thread: 78, context: 2, share_group: 1, begin_ns: 1_000, end_ns: Some(1_250), aux: 4096 }], "a second close changes nothing");
+            assert_eq!((snapshot.attempted, snapshot.completed, snapshot.partial(), snapshot.dropped), (1, 1, 0, 0));
+        }
+
+        #[test]
+        fn past_capacity_events_are_dropped_and_counted() {
+            let recorder = Recorder::<4>::new();
+            let slots: Vec<_> = (0..6).map(|i| recorder.open(Kind::ShaderCompile, 0, 0, i, 1, i * 10)).collect();
+            assert_eq!(slots, [Some(0), Some(1), Some(2), Some(3), None, None]);
+            for slot in slots.iter().flatten() {
+                recorder.close(*slot, 1, 1, 100);
+            }
+            let snapshot = recorder.snapshot(0);
+            assert_eq!((snapshot.attempted, snapshot.recorded, snapshot.completed, snapshot.dropped), (6, 4, 4, 2));
+            assert_eq!(snapshot.events.len(), 4);
+            assert_eq!(snapshot.attempted, snapshot.completed + snapshot.partial() + snapshot.dropped);
+        }
+
+        #[test]
+        fn dropped_events_do_not_evaluate_identity_or_clock_fields() {
+            let recorder = Recorder::<1>::new();
+            recorder.open(Kind::Build, 0, 0, 0, 7, 10).unwrap();
+            assert_eq!(recorder.open_lazy(Kind::ProgramLink, || panic!("a dropped event must not read clocks or context ids")), None);
+            assert_eq!(recorder.snapshot(0).dropped, 1);
+            let waits = QueueWaits::new();
+            waits.queued_in(&recorder, 0, false, 7, 20);
+            assert_eq!(waits.taken_lazy(&recorder, 0, || panic!("a dropped queue span must not read an end clock")), 0);
+        }
+
+        #[test]
+        fn unfinished_events_and_live_workers_publish_partial_never_final() {
+            let recorder = Recorder::<4>::new();
+            let done = recorder.open(Kind::Build, 1, 1, 1, 5, 10).unwrap();
+            recorder.close(done, LOADED, 5, 20);
+            recorder.open(Kind::Job, 2, 1, 0, 6, 30).unwrap();
+            let snapshot = recorder.snapshot(0);
+            assert_eq!((snapshot.completed, snapshot.open, snapshot.completion()), (1, 1, "partial"));
+            let report = snapshot.render();
+            assert!(report.contains("event 1 job open - 6 - 2 1 30 - 0\n"), "{report}");
+            assert!(report.contains("completion partial"));
+            let quiet = Recorder::<4>::new();
+            quiet.close(quiet.open(Kind::Build, 1, 1, 0, 5, 1).unwrap(), COMPILED, 5, 2);
+            assert_eq!(quiet.snapshot(1).completion(), "partial", "a live worker can still record");
+            assert_eq!(quiet.snapshot(0).completion(), "unknown", "no barrier proves the last build");
+            assert!(!quiet.snapshot(0).render().contains("final"));
+        }
+
+        #[test]
+        fn a_span_ended_without_an_outcome_says_so() {
+            let slot = Span::begin(Kind::Graphics, None, 9).slot();
+            if let Some(slot) = slot {
+                let event = snapshot().events.into_iter().find(|event| event.index == slot).unwrap();
+                assert!(event.done);
+                assert_eq!((event.outcome, event.aux, event.context), (NO_OUTCOME, 9, 0));
+                assert!(event.end_ns.unwrap() >= event.begin_ns);
+            }
+        }
+
+        #[test]
+        fn queue_waits_span_send_to_take_in_lane_order() {
+            let (recorder, waits) = (Recorder::<8>::new(), QueueWaits::new());
+            waits.queued_in(&recorder, 1, true, 3, 100);
+            waits.queued_in(&recorder, 0, false, 3, 110);
+            assert_eq!(waits.taken_in(&recorder, 0, 9, 150), 2, "lane 0's job had slot 1");
+            assert_eq!(waits.taken_in(&recorder, 1, 9, 170), 1);
+            let events = recorder.snapshot(0).events;
+            assert_eq!((events[0].begin_ns, events[0].end_ns, events[0].aux, events[0].begin_thread, events[0].end_thread), (100, Some(170), 0b11, 3, 9));
+            assert_eq!((events[1].begin_ns, events[1].end_ns, events[1].aux), (110, Some(150), 0));
+            assert_eq!(waits.taken_in(&recorder, 0, 9, 200), 0, "a pop with nothing pushed is unknown");
+        }
+
+        #[test]
+        fn an_overwritten_queue_wait_stays_open_rather_than_misattributed() {
+            let (recorder, waits) = (Recorder::<CAPACITY>::new(), QueueWaits::new());
+            for i in 0..=RING as u64 {
+                waits.queued_in(&recorder, 0, false, 1, i);
+            }
+            assert_eq!(waits.taken_in(&recorder, 0, 2, 1_000), 0, "its ring entry was overwritten");
+            assert_eq!(waits.taken_in(&recorder, 0, 2, 1_001), 2);
+            let snapshot = recorder.snapshot(0);
+            assert_eq!((snapshot.attempted, snapshot.dropped, snapshot.completed, snapshot.open), (RING as u64 + 1, 1, 1, RING as u64 - 1));
+            assert!(!snapshot.events[0].done);
+        }
+
+        #[test]
+        fn a_full_report_at_its_widest_stays_bounded() {
+            let recorder = Recorder::<CAPACITY>::new();
+            for _ in 0..CAPACITY + 10 {
+                if let Some(slot) = recorder.open(Kind::ExtensionQuery, u32::MAX, u32::MAX, u64::MAX, u32::MAX, u64::MAX) {
+                    recorder.close(slot, NO_OUTCOME - 1, u32::MAX, u64::MAX);
+                }
+            }
+            let report = recorder.snapshot(u64::MAX).render();
+            assert!(report.len() < MAX_REPORT_BYTES, "{} bytes", report.len());
+            assert_eq!(report.lines().filter(|line| line.starts_with("event ")).count(), CAPACITY);
+            assert!(report.contains("attempted 266 recorded 256 completed 256 partial 0 open 0 reserved 0 dropped 10"));
+        }
+
+        #[test]
+        fn sidecar_writer_preserves_existing_files_and_writes_bounded_new_output() {
+            let directory = std::env::temp_dir().join(format!("zakuro-shader-attribution-{}-{}", std::process::id(), now_ns()));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join("events.txt");
+            std::fs::write(&path, b"preserve existing receipt").unwrap();
+            assert_eq!(write_sidecar(&path).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&path).unwrap(), b"preserve existing receipt");
+            std::fs::remove_file(&path).unwrap();
+            let snapshot = write_sidecar(&path).unwrap();
+            let contents = std::fs::read_to_string(&path).unwrap();
+            assert!(contents.starts_with(FORMAT));
+            assert!(contents.len() <= MAX_REPORT_BYTES);
+            assert_eq!(snapshot.attempted, snapshot.completed + snapshot.partial() + snapshot.dropped);
+            assert_ne!(snapshot.completion(), "final");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(directory).unwrap();
+        }
+
+        #[test]
+        fn contexts_are_numbered_as_first_seen_until_the_table_is_full() {
+            let table: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+            assert_eq!([intern(&table, 0), intern(&table, 0x10), intern(&table, 0x20), intern(&table, 0x10), intern(&table, 0x30)], [0, 1, 2, 1, u32::MAX]);
+        }
+
+        #[test]
+        fn kinds_round_trip_their_numbers() {
+            for kind in KINDS {
+                assert_eq!(Kind::from_u32(kind as u32), Some(kind));
+            }
+            assert_eq!(Kind::from_u32(0), None);
+            assert_eq!(Kind::from_u32(KINDS.len() as u32 + 1), None);
+        }
     }
 }
 

@@ -7,6 +7,10 @@ license.workspace = true
 [features]
 default = []
 gles = ["dep:glow", "dep:glutin_egl_sys", "dep:libloading"]
+# Diagnostic only, off by default: bounded program build/load events with
+# CLOCK_MONOTONIC times (raster/gles/programs.rs, mod attribution). It can
+# perturb driver scheduling; never a timing or speed acceptance build.
+shader-attribution = ["gles"]
 
 [dependencies]
 zakuro-common.workspace = true

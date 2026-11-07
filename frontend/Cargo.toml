@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Diagnostic companion only; absent from normal builds.
+profile-sidecar = []
+# Diagnostic shader events; absent from normal builds.
+shader-attribution = ["zakuro-gpu/shader-attribution"]
+
 [dependencies]
 zakuro-common.workspace = true
 zakuro-core.workspace = true

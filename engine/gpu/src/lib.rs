@@ -20,6 +20,9 @@ pub use overlay::{Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
 pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
 #[cfg(feature = "gles")]
 pub use raster::gles::{compiling, compiling_stand_ins, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
+/// diagnostic program build/load events, see the feature in Cargo.toml.
+#[cfg(feature = "shader-attribution")]
+pub use raster::gles::attribution as shader_attribution;
 
 /// how the GPU reaches guest memory.
 pub trait GpuMemory {

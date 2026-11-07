@@ -250,6 +250,8 @@ pub fn run(mut args: Vec<String>) {
         let (from, frames) = spec.split_once(',')?;
         Some((from.parse::<u64>().ok()?, frames.parse::<u64>().ok()?))
     });
+    #[cfg(feature = "profile-sidecar")]
+    profiler::configure_sidecar(host_profile);
     let shots: HashSet<u64> = match (&probe, std::env::var("ZAKURO_SHOT_AT")) {
         (_, Ok(frames)) => frames.split(',').filter_map(|frame| frame.parse().ok()).collect(),
         (Some(probe), Err(_)) => probe.shot_frames(),
@@ -491,6 +493,8 @@ pub fn run(mut args: Vec<String>) {
             system.set_input(scripted_input(&script, frame_number));
         }
         if let Some((from, frames)) = host_profile {
+            #[cfg(feature = "profile-sidecar")]
+            profiler::frame_marker(frame_number, profiler::PROFILE_BOUNDARY);
             if frame_number == from {
                 profiler::start();
             } else if frame_number == from + frames {
@@ -524,6 +528,8 @@ pub fn run(mut args: Vec<String>) {
                 break;
             }
         }
+        #[cfg(feature = "profile-sidecar")]
+        profiler::frame_marker(frame_number, profiler::FRAME_COMPLETED);
         if let Some(probe) = probe.as_mut() {
             probe.checkpoint(&system, frame_number);
         }
@@ -634,6 +640,8 @@ pub fn run(mut args: Vec<String>) {
             next = now - frame * 4;
         }
     }
+    #[cfg(feature = "profile-sidecar")]
+    profiler::frame_marker(frame_number, profiler::RUN_END);
     read_ahead.save();
     // a run that ends inside the profiled frames still stops the timer,
     // which left going holds up the exit, and writes what it sampled
@@ -643,15 +651,30 @@ pub fn run(mut args: Vec<String>) {
     if let Some(probe) = probe {
         let code = probe.report(&mut system, &path, title_id, !profile.name.is_empty(), frame_number, stopped);
         system.stop_gpu();
+        #[cfg(feature = "shader-attribution")]
+        write_shader_attribution();
         std::process::exit(code);
     }
     settings::save(&settings_path, &settings);
     settings::save(&game_path, &game);
     system.stop_gpu();
+    #[cfg(feature = "shader-attribution")]
+    write_shader_attribution();
     if let Some(before) = BEFORE_EXIT.get() {
         before(exit_code);
     }
     std::process::exit(exit_code);
+}
+
+/// An explicit diagnostic snapshot; worker/late-submission finality is unknown.
+#[cfg(feature = "shader-attribution")]
+fn write_shader_attribution() {
+    if let Some(path) = std::env::var_os("ZAKURO_SHADER_ATTRIBUTION") {
+        match zakuro_gpu::shader_attribution::write_sidecar(std::path::Path::new(&path)) {
+            Ok(snapshot) => log::info!("shader attribution: {} attempted, {} completed, {} partial, {} dropped, completion {}", snapshot.attempted, snapshot.completed, snapshot.partial(), snapshot.dropped, snapshot.completion()),
+            Err(error) => log::warn!("shader attribution sidecar not written: {error}"),
+        }
+    }
 }
 
 /// the overlays drawn over the screens, the menu or the status line, then
