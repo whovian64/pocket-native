@@ -1013,8 +1013,8 @@ impl System {
         services::gsp::signal_interrupt(self, services::gsp::InterruptId::Dma);
     }
 
-    pub fn memory_fill(&mut self, start: u32, end: u32, value: u32, width: u32, interrupt: services::gsp::InterruptId) {
-        self.gpu_work(&[interrupt], move |gpu, _, guest| gpu.memory_fill(guest, start, end, value, width));
+    pub fn memory_fill(&mut self, start: u32, end: u32, value: u32, width: u32, interrupt: Option<services::gsp::InterruptId>) {
+        self.gpu_work(interrupt.as_slice(), move |gpu, _, guest| gpu.memory_fill(guest, start, end, value, width));
     }
 
     pub fn display_transfer(
