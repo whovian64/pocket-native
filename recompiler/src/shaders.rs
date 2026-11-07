@@ -454,11 +454,18 @@ mod tests {
         words[..4].copy_from_slice(&[1, 2, 3, 9]);
         words[4096] = 7;
         std::fs::write(dir.join("shaders.txt.vertex").join("00000000000000ab.pica"), words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
-        std::fs::write(dir.join("shaders.txt"), "zakuro-gles 5\nab:1c:0:1 1 c0=f\ncd:0:0:1 1 c0=e\n0 2 c0=d\n").unwrap();
-        let (lines, unknown) = crate::precache::learn(&found, &dir.join("shaders.txt")).unwrap();
+        // and one the files hold with no DVLB, at 8 in a file called code
+        let mut words = vec![0u32; 4096 + 128];
+        words[..9].copy_from_slice(&[11, 12, 13, 14, 15, 16, 17, 18, 19]);
+        words[4096..4100].copy_from_slice(&[21, 22, 23, 24]);
+        std::fs::write(dir.join("shaders.txt.vertex").join("00000000000000ef.pica"), words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        std::fs::write(dir.join("shaders.txt"), "zakuro-gles 5\nab:1c:0:1 1 c0=f\ncd:0:0:1 1 c0=e\nef:4:5:6 3 c0=c\n0 2 c0=d\n").unwrap();
+        let file: Vec<u8> = [0u32, 0, 11, 12, 13, 14, 15, 16, 17, 18, 19, 99, 21, 22, 23, 24, 98].iter().flat_map(|w| w.to_le_bytes()).collect();
+        let (lines, unknown) = crate::precache::learn(&|walk| walk(&file, "code"), &found, &dir.join("shaders.txt")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(unknown, 1);
-        assert_eq!(lines.into_iter().collect::<Vec<_>>(), vec!["0 2 c0=d".to_owned(), format!("{:016x}:1c 1 c0=f", found[1].key())]);
+        let raw = crate::precache::raw_key(&[11, 12, 13, 14, 15, 16, 17, 18, 19], &[21, 22, 23, 24]);
+        assert_eq!(lines.into_iter().collect::<Vec<_>>(), vec!["0 2 c0=d".to_owned(), format!("{:016x}:1c 1 c0=f", found[1].key()), format!("r{raw:016x}@code@8+9@30+4:4:5:6 3 c0=c")]);
     }
 
     #[test]

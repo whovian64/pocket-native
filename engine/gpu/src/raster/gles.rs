@@ -1935,8 +1935,25 @@ impl Gles {
                 _ if at == "0" => Some(0),
                 Some(&stage) => stage,
                 None => {
-                    let found = precache.listed.get(at).map(|fields| fields.iter().map(String::as_str).collect::<Vec<&str>>());
-                    let stage = found.and_then(|fields| self.listed_vertex(&precache.dir, &mut precache.units, &fields)).map(|(vertex, _)| vertex);
+                    // a program the kit read from the game's words, with the
+                    // output map the run that found it saw
+                    let parts: Vec<&str> = at.split(':').collect();
+                    let stage = if let [file, entry, semantics @ ..] = &parts[..] {
+                        let semantics: Option<Vec<u32>> = semantics.iter().map(|value| u32::from_str_radix(value, 16).ok()).collect();
+                        match (u32::from_str_radix(entry, 16), semantics.and_then(|semantics| <[u32; SEMANTICS]>::try_from(semantics).ok())) {
+                            (Ok(entry), Some(semantics)) => Self::listed_unit(&precache.dir, &mut precache.units, file).and_then(|unit| {
+                                unit.entry_point = entry;
+                                self.vertex_stage(unit, semantics).ok()
+                            }),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let stage = stage.or_else(|| {
+                        let found = precache.listed.get(at).map(|fields| fields.iter().map(String::as_str).collect::<Vec<&str>>());
+                        found.and_then(|fields| self.listed_vertex(&precache.dir, &mut precache.units, &fields)).map(|(vertex, _)| vertex)
+                    });
                     precache.stages.insert(at.to_owned(), stage);
                     stage
                 }
@@ -1975,6 +1992,22 @@ impl Gles {
         }
     }
 
+    /// a program of the kit's vertex list by its file, read once.
+    fn listed_unit<'a>(dir: &std::path::Path, units: &'a mut HashMap<String, Option<ShaderUnit>>, file: &str) -> Option<&'a mut ShaderUnit> {
+        units
+            .entry(file.to_owned())
+            .or_insert_with(|| {
+                let bytes = std::fs::read(dir.join(format!("{file}.pica"))).ok().filter(|bytes| bytes.len() == (PROGRAM_SIZE + DESCRIPTOR_SIZE) * 4)?;
+                let mut unit = ShaderUnit::new();
+                for (word, chunk) in unit.program.iter_mut().chain(unit.descriptors.iter_mut()).zip(bytes.as_chunks::<4>().0) {
+                    *word = u32::from_le_bytes(*chunk);
+                }
+                unit.prepare();
+                Some(unit)
+            })
+            .as_mut()
+    }
+
     /// a shader of the kit's vertex list, its file, entry, output mask, total
     /// and map, and whether it hands out the surface's orientation, which lit
     /// draws need.
@@ -1985,18 +2018,7 @@ impl Gles {
         if map.len() != 7 {
             return None;
         }
-        let unit = units
-            .entry((*file).to_owned())
-            .or_insert_with(|| {
-                let bytes = std::fs::read(dir.join(format!("{file}.pica"))).ok().filter(|bytes| bytes.len() == (PROGRAM_SIZE + DESCRIPTOR_SIZE) * 4)?;
-                let mut unit = ShaderUnit::new();
-                for (word, chunk) in unit.program.iter_mut().chain(unit.descriptors.iter_mut()).zip(bytes.as_chunks::<4>().0) {
-                    *word = u32::from_le_bytes(*chunk);
-                }
-                unit.prepare();
-                Some(unit)
-            })
-            .as_mut()?;
+        let unit = Self::listed_unit(dir, units, file)?;
         unit.entry_point = entry;
         let mut registers = [0u32; 0x300];
         registers[crate::registers::REG_SHADER_OUTPUT_TOTAL] = total;

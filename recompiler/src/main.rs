@@ -466,7 +466,7 @@ fn learn(rom: &str, recorded: &Path, list: &Path) {
         exit(1);
     });
     let found = recomp3ds::shaders::find(&title);
-    let (mut lines, unknown) = recomp3ds::precache::learn(&found, recorded).unwrap_or_else(|e| {
+    let (mut lines, unknown) = recomp3ds::precache::learn(&|file| recomp3ds::shaders::files(&title, file), &found, recorded).unwrap_or_else(|e| {
         eprintln!("{}: {e}", recorded.display());
         exit(1);
     });
