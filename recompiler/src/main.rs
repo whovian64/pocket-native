@@ -22,13 +22,14 @@ usage, 3dsrecomp analyze <rom>
        3dsrecomp build <rom> [<dir>] [--overrides <file or dir>]
        3dsrecomp port <rom> <dir> [--overrides <file or dir>] [--name <name>] [--zakuro <checkout>]
        3dsrecomp verify <rom> <library> [count]
-       3dsrecomp shaders <rom> [<dir> [precache [<title list>]]]
+       3dsrecomp shaders <rom> [<dir> [precache [<title list> [<other titles' lists>...]]]]
        3dsrecomp learn <rom> <a run's shaders.txt> <title list>
 
 build without a dir works in the cache and installs the library where
 Zakuro finds it on its own. shaders with precache also lists the shaders
-the title's NintendoWare models need, and those its title list holds, for
-the engine to build before the game starts. learn adds the shaders a run
+the title's models need, those its title list holds and those of other
+titles' lists for shaders it has too, for the engine to build before the
+game starts. learn adds the shaders a run
 used, from its shaders.txt and the vertex programs kept beside it, to a
 title list, which holds no game data.";
 
@@ -72,8 +73,7 @@ fn main() {
         ["port", rom, dir] => port(rom, Path::new(dir), &options),
         ["shaders", rom] => shaders(rom, None, None),
         ["shaders", rom, dir] => shaders(rom, Some(Path::new(dir)), None),
-        ["shaders", rom, dir, "precache"] => shaders(rom, Some(Path::new(dir)), Some(None)),
-        ["shaders", rom, dir, "precache", list] => shaders(rom, Some(Path::new(dir)), Some(Some(Path::new(list)))),
+        ["shaders", rom, dir, "precache", ref lists @ ..] => shaders(rom, Some(Path::new(dir)), Some(lists.iter().map(Path::new).collect())),
         ["learn", rom, recorded, list] => learn(rom, Path::new(recorded), Path::new(list)),
         #[cfg(feature = "verify")]
         ["verify", rom, library] => check(rom, Path::new(library), 500),
@@ -484,7 +484,7 @@ fn learn(rom: &str, recorded: &Path, list: &Path) {
     println!("{learned} shaders from the run, {added} new to {}{}", list.display(), if unknown > 0 { format!(", {unknown} with a vertex program the game's files have not") } else { String::new() });
 }
 
-fn shaders(rom: &str, dir: Option<&Path>, precache: Option<Option<&Path>>) {
+fn shaders(rom: &str, dir: Option<&Path>, precache: Option<Vec<&Path>>) {
     let title = Title::load(rom).unwrap_or_else(|e| {
         eprintln!("{rom}: {e}");
         exit(1);
@@ -507,8 +507,8 @@ fn shaders(rom: &str, dir: Option<&Path>, precache: Option<Option<&Path>>) {
             Ok(count) => println!("{count} vertex shaders listed in {}", dir.join("vertex.txt").display()),
             Err(error) => eprintln!("could not write the vertex list: {error}"),
         }
-        if let Some(titled) = precache {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recomp3ds::precache::write(&title, &found, dir, titled))) {
+        if let Some(lists) = precache {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recomp3ds::precache::write(&title, &found, dir, &lists))) {
                 Ok(Ok(0)) => println!("no shaders to precache, they get built as the game needs them"),
                 Ok(Ok(count)) => println!("{count} shaders to precache listed in {}", dir.join("precache.txt").display()),
                 Ok(Err(error)) => eprintln!("could not write the precache list, the shaders get built as the game needs them: {error}"),

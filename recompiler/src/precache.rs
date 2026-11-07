@@ -89,10 +89,11 @@ struct Found {
 
 /// writes precache.txt into dir, each line a vertex shader of the list
 /// write_vertex_list made from found, file:entry, and a setup as the
-/// engine's own list keeps them: the title's list first, where there is
-/// one, then the most shared. how many lines, none for a title with neither
-/// a list nor NintendoWare models, which writes nothing.
-pub fn write(title: &Title, found: &[Shbin], dir: &Path, titled: Option<&Path>) -> std::io::Result<usize> {
+/// engine's own list keeps them: the title's own list first, then the lines
+/// of the other titles' lists whose shaders this one has too, then what its
+/// models need, the most shared first. how many lines, none for a title with
+/// none of them, which writes nothing.
+pub fn write(title: &Title, found: &[Shbin], dir: &Path, lists: &[&Path]) -> std::io::Result<usize> {
     let mut seen = Found::default();
     shaders::files(title, &mut |data, source| {
         if data.starts_with(b"CGFX") {
@@ -103,25 +104,28 @@ pub fn write(title: &Title, found: &[Shbin], dir: &Path, titled: Option<&Path>) 
     });
     let named: HashSet<Vec<u8>> = title.code().map(|code| code.split(|&byte| byte == 0).map(<[u8]>::to_vec).collect()).unwrap_or_default();
     let mut lines: Vec<(String, usize)> = lines(&seen, found, &named).into_iter().collect();
-    if let Some(text) = titled.and_then(|path| std::fs::read_to_string(path).ok()).filter(|text| text.lines().next() == Some(TITLE_HEADER)) {
-        let files: HashMap<String, usize> = found.iter().enumerate().map(|(n, shbin)| (format!("{:016x}", shbin.key()), n)).collect();
-        let (mut known, mut other) = (0, 0);
+    let files: HashMap<String, usize> = found.iter().enumerate().map(|(n, shbin)| (format!("{:016x}", shbin.key()), n)).collect();
+    let mut listed = HashSet::new();
+    for (k, path) in lists.iter().enumerate() {
+        let Some(text) = std::fs::read_to_string(path).ok().filter(|text| text.lines().next() == Some(TITLE_HEADER)) else { continue };
+        // a line with no vertex program is the title's own alone
+        let own = k == 0;
+        let mut known = 0;
         for line in text.lines().skip(1) {
             let Some((vertex, setup)) = line.split_once(' ') else { continue };
             let at = match vertex.split_once(':') {
-                None if vertex == "0" => Some("0".to_owned()),
+                None if vertex == "0" && own => Some("0".to_owned()),
                 Some((key, entry)) => files.get(key).map(|n| format!("{n}:{entry}")),
                 None => None,
             };
-            match at {
-                Some(at) => {
-                    known += 1;
-                    lines.push((format!("{at} {setup}"), usize::MAX));
-                }
-                None => other += 1,
+            if let Some(line) = at.map(|at| format!("{at} {setup}")).filter(|line| listed.insert(line.clone())) {
+                known += 1;
+                lines.push((line, if own { usize::MAX } else { usize::MAX - 1 }));
             }
         }
-        println!("{known} shaders from the title's list{}", if other > 0 { format!(", {other} for shaders this copy has not") } else { String::new() });
+        if known > 0 {
+            println!("{known} shaders from {}", if own { "the title's list".to_owned() } else { path.display().to_string() });
+        }
     }
     if lines.is_empty() {
         return Ok(0);

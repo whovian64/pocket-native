@@ -68,8 +68,31 @@ RECOMP_CFLAGS=-DRECOMP_FASTMEM CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/rel
 
 echo "== finding the game's shaders"
 rm -rf /work/vertex
+# the title's own shader list first, a blank one where it has none, with
+# what the handheld built while it played, then every other title's, whose
+# lines count for the shaders this one shares
 titled=()
-[ -n "${PN_PRECACHE:-}" ] && [ -f "titles/$id/shaders.txt" ] && titled=("titles/$id/shaders.txt")
+if [ -n "${PN_PRECACHE:-}" ]; then
+    own="titles/$id/shaders.txt"
+    played="/out/Pocket Native/pocket-native/games/$id/data/shaders.txt"
+    if [ -f "$played" ]; then
+        rm -f "/work/played-$id.txt"
+        "$CARGO_TARGET_DIR/release/3dsrecomp" learn "$game" "$played" "/work/played-$id.txt" | tail -1 || true
+        if [ -f "/work/played-$id.txt" ]; then
+            # the list to share, its vertex shaders by key and no game data
+            mkdir -p "/out/Pocket Native/shaders to share"
+            cp "/work/played-$id.txt" "/out/Pocket Native/shaders to share/$id.txt"
+            ours=()
+            if [ -f "$own" ]; then ours=("$own"); fi
+            { head -1 "/work/played-$id.txt"; tail -q -n +2 "/work/played-$id.txt" "${ours[@]}" | sort -u; } > "/work/own-$id.txt"
+            own="/work/own-$id.txt"
+        fi
+    fi
+    titled=("$own")
+    for list in titles/*/shaders.txt; do
+        [ -f "$list" ] && [ "$list" != "titles/$id/shaders.txt" ] && titled+=("$list")
+    done
+fi
 "$CARGO_TARGET_DIR/release/3dsrecomp" shaders "$game" /work/vertex ${PN_PRECACHE:+precache} "${titled[@]}" | tail -5 || echo "none found, they get built as the game needs them"
 
 if [ ! -f /work/shared_font.bin ]; then

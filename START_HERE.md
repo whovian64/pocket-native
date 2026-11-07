@@ -67,6 +67,15 @@ Worlds and many more), and games the kit has a shader list for. Menus,
 text, effects and other games' shaders are built the first time they're
 drawn, as before.
 
+**Share your shaders.** Each game keeps a list of the shaders it built on
+your handheld. Copy the card's `Pocket Native` folder back into the kit's
+build folder and run Rebuild all games with Precache shaders ticked: the
+kit builds those shaders in too, and writes `Pocket Native/shaders to
+share/<title id>.txt`. That file holds only GPU settings, no game data.
+Send it to us (a GitHub issue or the Discord) and it goes into the kit, so
+everyone's first start of that game has them, and other games' too where
+they use the same shaders.
+
 A window shows the build as it goes and stays open at the end so you
 can read how it went. The very first build sets up the build container,
 which downloads a few hundred MB and takes a while. After that, each
