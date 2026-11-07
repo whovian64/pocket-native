@@ -675,11 +675,13 @@ fn prepare_shaders(system: &mut System, font: &Font, settings: &Settings, pad: &
             pad.lifted.clear();
             (keys, touching)
         };
-        let skipped = [B, START].iter().any(|key| keys.contains(key) && !held.contains(key)) || touching && !touched;
+        let pressed = [B, START].into_iter().find(|key| keys.contains(key) && !held.contains(key));
+        let tapped = touching && !touched;
         (held, touched) = (keys, touching);
-        if skipped {
+        if pressed.is_some() || tapped {
             zakuro_gpu::skip_preparing();
-            log::info!("shaders skipped with {left} of {total} left, after {:.1} s", started.elapsed().as_secs_f64());
+            let by = pressed.map_or("a tap".to_owned(), |key| format!("key {key}"));
+            log::info!("shaders skipped with {left} of {total} left, after {:.1} s, by {by}", started.elapsed().as_secs_f64());
             return;
         }
         // the screens go up all along, the kit's list handed out as they do
