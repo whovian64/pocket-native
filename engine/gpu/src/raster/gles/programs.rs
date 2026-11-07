@@ -37,14 +37,13 @@ pub(crate) const COMPILING: &str = "its program is compiling";
 pub(super) static BUILDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// how many programs are still being built, for the screen to say so.
-pub fn waited_draws() -> [usize; 3] {
+pub fn waited_draws() -> [usize; 2] {
     WAITED.each_ref().map(|count| count.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// draws made while their own programs built: left out, shaded on the CPU
-/// for the generic stand-in, and drawn on with the stand-in the game's
-/// vertex list had built.
-pub(crate) static WAITED: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+/// draws made while their own programs built: left out, and shaded on the
+/// CPU for the generic stand-in.
+pub(crate) static WAITED: [std::sync::atomic::AtomicUsize; 2] = [const { std::sync::atomic::AtomicUsize::new(0) }; 2];
 
 pub fn compiling() -> usize {
     BUILDING.load(std::sync::atomic::Ordering::Relaxed)

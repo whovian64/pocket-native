@@ -157,8 +157,8 @@ impl Probe {
         let _ = writeln!(report, "- Profile: {}", if has_profile { "yes" } else { "none yet, titles/<title id>/profile.toml" });
         let _ = writeln!(report, "- Ran {ran} frames in {seconds:.0} s, {:.0}% of the console's speed", ran as f64 / 60.0 / seconds * 100.0);
         let _ = writeln!(report, "- Pictures drawn: {} top, {} bottom", system.top_pictures(), system.bottom_pictures());
-        let [left_out, on_cpu, from_list] = zakuro_gpu::waited_draws();
-        let _ = writeln!(report, "- Draws while their shaders built: {left_out} left out, {on_cpu} shaded on the CPU, {from_list} with the vertex list's stand-in");
+        let [left_out, on_cpu] = zakuro_gpu::waited_draws();
+        let _ = writeln!(report, "- Draws while their shaders built: {left_out} left out, {on_cpu} shaded on the CPU");
         if let Some(speed) = self.speed {
             let _ = writeln!(report, "- At {:.0}% speed: {} of {ran} frames skipped", speed * 100.0, self.skipped);
         }
