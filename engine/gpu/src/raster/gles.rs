@@ -695,10 +695,19 @@ struct Texture {
     used: u64,
 }
 
-#[derive(PartialEq)]
 enum Attribute {
     Constant([f32; 4]),
     Array { offset: usize, ty: u32, count: u32, stride: u32 },
+}
+
+impl PartialEq for Attribute {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Attribute::Constant(a), Attribute::Constant(b)) => a.map(f32::to_bits) == b.map(f32::to_bits),
+            (Attribute::Array { offset: a, ty: b, count: c, stride: d }, Attribute::Array { offset: e, ty: f, count: g, stride: h }) => (a, b, c, d) == (e, f, g, h),
+            _ => false,
+        }
+    }
 }
 
 enum Attributes {
@@ -754,6 +763,17 @@ impl Resident {
             log::info!("gpu memory resident orphan pruning: removed {removed} buffers, released {} charged bytes, elapsed {} us", bytes - self.bytes, started.elapsed().as_micros());
         }
         removed > 0
+    }
+
+    /// A cached VAO still reads these buffers in this draw, even when no
+    /// attribute pointer changes. Protect them before allocating indices.
+    /// A missing entry forces the caller to rebuild instead of trusting it.
+    fn touch(&mut self, array: &Arc<[u8]>) -> bool {
+        let key = (Arc::as_ptr(array) as *const u8 as usize, array.len());
+        match self.buffers.get_mut(&key) {
+            Some((_, _, used)) => { *used = self.draws; true }
+            None => false,
+        }
     }
 
     fn buffer(&mut self, gl: &glow::Context, array: &Arc<[u8]>) -> Result<glow::Buffer, String> {
@@ -1097,7 +1117,9 @@ impl DrawJob {
                                 // the draw before's arrays read the same way,
                                 // the vertex array still has them
                                 let key: Vec<usize> = arrays.iter().map(|array| Arc::as_ptr(array) as *const u8 as usize).collect();
-                                if !local.cache.resident.as_ref().is_some_and(|(last, read)| *last == key && *read == slots) {
+                                let same = local.cache.resident.as_ref().is_some_and(|(last, read)| *last == key && *read == slots)
+                                    && arrays.iter().all(|array| local.resident.touch(array));
+                                if !same {
                                     let buffers = arrays.iter().map(|array| local.resident.buffer(&gl, array)).collect::<Result<Vec<_>, String>>()?;
                                     for (slot, (array, attribute)) in slots.iter().enumerate() {
                                         let slot = slot as u32;
@@ -5079,7 +5101,7 @@ mod tests {
 
     #[test]
     fn resident_orphan_pruning_preserves_current_and_queued_array_leases() {
-        let gles = match Gles::new() {
+        let mut gles = match Gles::new() {
             Ok(gles) => gles,
             Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
         };
@@ -5113,6 +5135,90 @@ mod tests {
             assert_eq!(resident.bytes, 0);
             assert!(resident.buffers.is_empty());
         });
+        // Join shader compilation before process/driver teardown.
+        gles.stop();
+    }
+
+    #[test]
+    fn resident_constants_compare_float_bits() {
+        assert!(Attribute::Constant([0.0; 4]) != Attribute::Constant([-0.0, 0.0, 0.0, 0.0]));
+        let nan = f32::from_bits(0x7fc0_1234);
+        assert!(Attribute::Constant([nan; 4]) == Attribute::Constant([nan; 4]));
+        assert!(Attribute::Constant([nan; 4]) != Attribute::Constant([f32::from_bits(0x7fc0_1235); 4]));
+        let array = |offset| Attribute::Array { offset, ty: 3, count: 4, stride: 16 };
+        assert!(array(0) == array(0));
+        assert!(array(0) != array(16));
+    }
+
+    #[test]
+    fn resident_cache_hits_keep_vertices_alive_for_new_indices() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
+        };
+        let (vertex_array, shaded_array, blank) = (gles.vertex_array, gles.shaded_array, gles.blank);
+        let observed = gles.worker.run(|| {
+            let gl = GL_CONTEXT.with(|gl| gl.get()).expect("the GL thread's context");
+            // SAFETY: all objects and accesses are on the owning GL thread.
+            unsafe {
+                eprintln!("resident-lifetime GLES renderer: {}; vendor: {}", gl.get_parameter_string(glow::RENDERER), gl.get_parameter_string(glow::VENDOR));
+                let vertex = "#version 310 es\nlayout(location = 0) in vec4 first;\nlayout(location = 0) out vec4 passed;\nvoid main() { vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0); gl_Position = vec4(p, 0.0, 1.0); passed = first; }\n";
+                let fragment = "#version 310 es\nprecision highp float;\nlayout(location = 0) in vec4 passed;\nlayout(location = 0) out vec4 color;\nvoid main() { color = passed; }\n";
+                let program = link(gl, vertex, fragment).unwrap();
+                let image = gl.create_renderbuffer().unwrap();
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(image));
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, 1, 1);
+                let framebuffer = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(image));
+                assert_eq!(gl.check_framebuffer_status(glow::FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+                disturb();
+                // Exactly the real 64 MiB budget: no fabricated accounting,
+                // environment override, or test-only cache implementation.
+                let mut bytes = vec![0; RESIDENT_BYTES];
+                let red: Vec<u8> = [1.0f32, 0.0, 0.0, 1.0].into_iter().flat_map(f32::to_le_bytes).collect();
+                for vertex in bytes[..48].chunks_exact_mut(16) { vertex.copy_from_slice(&red); }
+                let vertices: Arc<[u8]> = bytes.into();
+                let key = (Arc::as_ptr(&vertices) as *const u8 as usize, vertices.len());
+                let index_bytes = || [0u16, 1, 2].into_iter().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+                let mut observations = Vec::new();
+                let mut original_buffer = None;
+                for step in 0..3 {
+                    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                    let prepared = (step > 0).then(|| Arc::<[u8]>::from(index_bytes()));
+                    let geometry = Submit::Shaded {
+                        viewport: [0, 0, 1, 1], cull: 0, uniforms: vec![0; 4],
+                        attributes: Attributes::Resident { arrays: vec![vertices.clone()], slots: vec![(0, Attribute::Array { offset: 0, ty: 3, count: 4, stride: 16 })] },
+                        indices: if prepared.is_none() { index_bytes() } else { Vec::new() },
+                        count: 3, range: (0, 2), resident_indices: prepared,
+                    };
+                    let job = DrawJob {
+                        occlusion: None, framebuffer, program, depth_range: (0.0, 1.0), scissor: [0, 0, 1, 1], color_mask: 0xF,
+                        blend: None, depth: None, depth_mask: false, stencil: None, bound: [(blank, None); 6],
+                        uniforms: vec![0; 4], vertex_array, shaded_array, geometry, targets: [None, None], sources: [None; 3], tables: None,
+                    };
+                    job.submit(GlRef(gl)).unwrap();
+                    let current = local(|local| local.resident.buffers.get(&key).map(|(buffer, _, used)| (*buffer, *used == local.resident.draws)));
+                    if step == 0 { original_buffer = current.map(|(buffer, _)| buffer); }
+                    let alive = original_buffer.is_some_and(|buffer| gl.is_buffer(buffer));
+                    let mut pixel = [0u8; 4];
+                    gl.read_pixels(0, 0, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixel)));
+                    observations.push((current == original_buffer.map(|buffer| (buffer, true)), alive, pixel, gl.get_error()));
+                }
+                gl.delete_program(program); gl.delete_framebuffer(framebuffer); gl.delete_renderbuffer(image);
+                disturb();
+                observations
+            }
+        });
+        // Shut down even when a regression assertion below will fail.
+        gles.stop();
+        assert_eq!(observed.len(), 3);
+        for (step, (same_and_current, alive, pixel, error)) in observed.into_iter().enumerate() {
+            assert!(same_and_current && alive, "step {step}: cached vertex buffer lost before draw");
+            assert_eq!(pixel, [255, 0, 0, 255], "step {step}: current/next cache hit pixels");
+            assert_eq!(error, glow::NO_ERROR, "step {step}: GL error");
+        }
     }
 
     #[test]
@@ -5301,7 +5407,7 @@ mod tests {
 
     #[test]
     fn capped_mutable_ring_wrap_and_growth_preserve_queued_draws_and_bytes() {
-        let gles = match Gles::new() {
+        let mut gles = match Gles::new() {
             Ok(gles) => gles,
             Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
         };
@@ -5390,6 +5496,8 @@ mod tests {
                 gl.delete_renderbuffer(image);
             }
         });
+        // Join shader compilation before process/driver teardown.
+        gles.stop();
     }
 
     /// guest memory as one flat block from address zero.
@@ -5546,7 +5654,7 @@ mod tests {
 
     #[test]
     fn fragment_uniform_liveness_preserves_pixels_across_program_modes() {
-        let gles = match Gles::new() {
+        let mut gles = match Gles::new() {
             Ok(gles) => gles,
             Err(error) => { eprintln!("no OpenGL ES here, skipped: {error}"); return; }
         };
@@ -5644,6 +5752,8 @@ mod tests {
                 for selected in selected { gl.delete_program(selected.program); }
             }
         });
+        // Join shader compilation before process/driver teardown.
+        gles.stop();
     }
 
     #[test]
