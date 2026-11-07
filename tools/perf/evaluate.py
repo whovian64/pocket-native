@@ -32,10 +32,40 @@ batch_metrics = importlib.util.module_from_spec(_BATCH_SPEC)
 _BATCH_SPEC.loader.exec_module(batch_metrics)
 _DIAGNOSTIC_SPEC = importlib.util.spec_from_file_location("diagnostic_profiles", Path(__file__).with_name("diagnostic_profiles.py"))
 diagnostic_rules = importlib.util.module_from_spec(_DIAGNOSTIC_SPEC)
-_DIAGNOSTIC_SPEC.loader.exec_module(diagnostic_rules)
+_DIAGNOSTIC_SOURCE = Path(_DIAGNOSTIC_SPEC.origin).read_bytes()
+DIAGNOSTIC_SUPPORT_SHA256 = hashlib.sha256(_DIAGNOSTIC_SOURCE).hexdigest()
+exec(compile(_DIAGNOSTIC_SOURCE, _DIAGNOSTIC_SPEC.origin, "exec"), diagnostic_rules.__dict__)
 _RENDER_SPEC = importlib.util.spec_from_file_location("render_profiles", Path(__file__).with_name("render_profiles.py"))
 render_rules = importlib.util.module_from_spec(_RENDER_SPEC)
-_RENDER_SPEC.loader.exec_module(render_rules)
+_RENDER_SOURCE = Path(_RENDER_SPEC.origin).read_bytes()
+RENDER_SUPPORT_SHA256 = hashlib.sha256(_RENDER_SOURCE).hexdigest()
+exec(compile(_RENDER_SOURCE, _RENDER_SPEC.origin, "exec"), render_rules.__dict__)
+
+
+def observer_support_identity(kind):
+    path, compiled = ((Path(diagnostic_rules.__file__), DIAGNOSTIC_SUPPORT_SHA256) if kind == "diagnostic" else
+                      (Path(render_rules.__file__), RENDER_SUPPORT_SHA256))
+    if hashlib.sha256(path.read_bytes()).hexdigest() != compiled:
+        raise ValueError(f"{kind} support differs from the loaded source")
+    if kind == "diagnostic" and render_rules.diagnostic_support_identity() != compiled:
+        raise ValueError("render and diagnostic adapters loaded different diagnostic source")
+    return compiled
+
+
+def revalidate_observers(trial_path, trial, declaration):
+    """Reopen source-bound observer inputs for new finish/cap admission rules."""
+    stored = trial.get("diagnostics", {})
+    reports = list(Path(trial_path).glob("probe-*/report.toml"))
+    if len(reports) != 1:
+        raise ValueError("new observer admission needs exactly one retained raw report")
+    data, source = diagnostic_rules.snapshot(reports[0])
+    report = tomllib.loads(data.decode())
+    if (source != stored.get("report_source") or source["sha256"] != trial.get("probe", {}).get("report_sha256")
+            or report != trial.get("probe", {}).get("report")):
+        raise ValueError("observer report source/receipt changed on reopen")
+    fresh = diagnostic_rules.collect(Path(trial_path), report, trial["probe"].get("screenshots", {}), declaration)
+    if fresh != stored or fresh.get("valid") is not True:
+        raise ValueError("observer sources or admission changed on reopen")
 
 SCHEMA = 1
 BUTTONS = set("A B X Y L R START SELECT UP DOWN LEFT RIGHT CUP CDOWN CLEFT CRIGHT".split())
@@ -596,13 +626,13 @@ def run(args: argparse.Namespace) -> int:
         manifest["diagnostic_profile"] = {"declaration": diagnostic,
             "declaration_sha256": diagnostic_rules.declaration_hash(diagnostic),
             "source": diagnostic_source, "backend_before": diagnostic_backend}
-        manifest["harness"]["diagnostic_profiles_sha256"] = digest(Path(diagnostic_rules.__file__))
+        manifest["harness"]["diagnostic_profiles_sha256"] = observer_support_identity("diagnostic")
         (args.output / "diagnostic-profile.json").write_bytes(diagnostic_data)
     if render:
         experiment["render_profile"] = render
         manifest["render_profile"] = {"declaration": render,
             "declaration_sha256": render_rules.declaration_hash(render), "source": render_source}
-        manifest["harness"]["render_profiles_sha256"] = digest(Path(render_rules.__file__))
+        manifest["harness"]["render_profiles_sha256"] = observer_support_identity("render")
         manifest["harness"]["presentation_geometry_sha256"] = geometry_support
         if not render_rules.timing_eligible(render):
             manifest["evidence_class"] = diagnostic_rules.NON_TIMING
@@ -683,7 +713,7 @@ def run(args: argparse.Namespace) -> int:
                 result["diagnostics"] = diagnostic_rules.collect(trial, result["probe"].get("report", {}),
                     result["probe"].get("screenshots", {}), diagnostic)
                 manifest["evidence_class"] = diagnostic_rules.NON_TIMING
-                manifest["harness"].setdefault("diagnostic_profiles_sha256", digest(Path(diagnostic_rules.__file__)))
+                manifest["harness"].setdefault("diagnostic_profiles_sha256", observer_support_identity("diagnostic"))
                 if reader_source := result["diagnostics"].get("gpu_reader_source"):
                     initial = manifest["harness"].setdefault("diagnostic_gpu_reader_sha256", reader_source["sha256"])
                     if initial != reader_source["sha256"]:
@@ -902,6 +932,8 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
     if receipt is not None:
         try:
             declaration = diagnostic_rules.validate(receipt["declaration"])
+            if manifest.get("harness", {}).get("diagnostic_profiles_sha256") != observer_support_identity("diagnostic"):
+                raise ValueError("diagnostic support SHA-256 does not match the loaded adapter")
             diagnostic_env = diagnostic_rules.environment(declaration)
             allowed.update(diagnostic_env)
             if (receipt.get("declaration_sha256") != diagnostic_rules.declaration_hash(declaration)
@@ -912,12 +944,17 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
                     or trial.get("diagnostics", {}).get("requested") != declaration
                     or trial.get("diagnostics", {}).get("timing_eligible") is not False):
                 errors.append("diagnostic declaration/environment/receipt mismatch")
-        except (ValueError, KeyError, TypeError):
-            errors.append("cannot derive declared diagnostic environment")
+            audio_report = probe.get("report", {}).get("audio")
+            if audio_report is not None and not isinstance(audio_report, dict):
+                raise ValueError("audio observation must be a table")
+            if declaration.get("audio_completion") == "backend" or (audio_report or {}).get("schema_version") == 2:
+                revalidate_observers(Path(env.get("ZAKURO_DATA", "")).parent, trial, declaration)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            errors.append(f"cannot derive declared diagnostic environment: {error}")
     receipt = manifest.get("render_profile")
     if receipt is not None:
         try:
-            if manifest.get("harness", {}).get("render_profiles_sha256") != digest(Path(render_rules.__file__)):
+            if manifest.get("harness", {}).get("render_profiles_sha256") != observer_support_identity("render"):
                 raise ValueError("render-profile support SHA-256 does not match the loaded adapter")
             if manifest.get("harness", {}).get("presentation_geometry_sha256") != render_rules.geometry_support_identity():
                 raise ValueError("presentation-geometry support SHA-256 does not match the loaded model")
@@ -938,6 +975,10 @@ def validate_trial_receipt(manifest: dict, trial: dict) -> list[str]:
                 raise ValueError("render trial data/config paths are not isolated siblings")
             render_env = render_rules.environment(declaration, trial_path)
             allowed.update(render_env)
+            if declaration["presentation_capture"] and "max_io_bytes" in declaration["presentation_capture"]:
+                if manifest.get("harness", {}).get("diagnostic_profiles_sha256") != observer_support_identity("diagnostic"):
+                    raise ValueError("capped capture diagnostic support SHA-256 mismatch")
+                revalidate_observers(trial_path, trial, diagnostic)
             observation = render_rules.observe(declaration,
                 geometry=(trial.get("diagnostics") or {}).get("geometry", {}).get("record"),
                 renderer_log_lines=renderer_lines, trial=trial_path)

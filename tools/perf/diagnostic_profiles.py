@@ -49,7 +49,7 @@ def snapshot(path: Path, limit=2 * 1024 * 1024):
 
 def validate(value):
     keys(value, ("schema_version",), ("audio", "geometry", "packet_census", "packet_window_start",
-                                     "texture_stats", "texture_timing", "audio_backend"))
+                                     "texture_stats", "texture_timing", "audio_backend", "audio_completion"))
     require(type(value["schema_version"]) is int and value["schema_version"] == 1,
             "unsupported diagnostic profile schema_version")
     result = {"schema_version": 1, "audio": value.get("audio", "off"),
@@ -65,6 +65,10 @@ def validate(value):
                 "packet_window_start requires packet_census and a u64 batch index")
         result["packet_window_start"] = start
     backend = value.get("audio_backend")
+    if "audio_completion" in value:
+        require(result["audio"] != "off" and value["audio_completion"] == "backend",
+                "audio_completion requires audio on and the backend completion rule")
+        result["audio_completion"] = "backend"
     if result["audio"] == "off":
         require("audio_backend" not in value, "audio off cannot declare an unused audio_backend")
     else:
@@ -139,19 +143,24 @@ def stage_backend(profile, trial):
     return {**receipt, "asoundrc_clone": clone}
 
 
-def audio_admission(row, requested):
+def audio_admission(row, requested, completion_required=False):
+    require(type(row) is dict, "audio observation must be a table")
     fields = ("mixed_frames", "received_frames", "discarded_frames", "output_frames", "written_frames",
               "device_frames_offered", "device_frames_accepted", "device_writes", "partial_writes", "failed_writes",
               "write_errors", "write_recoveries")
-    keys(row, ("schema_version", "requested", "pacing", "mixing_requested", "backend", "delivery", "drained",
+    version = row.get("schema_version")
+    require(type(version) is int and version in (1, 2), "unknown audio schema")
+    finish_fields = ("drained",) if version == 1 else ("channel_finished", "backend_finish", "backend_finish_operation")
+    keys(row, ("schema_version", "requested", "pacing", "mixing_requested", "backend", "delivery", *finish_fields,
                "underruns_measured", *fields),
          ("device_rate", "stretch_ratio_min", "stretch_ratio_max", "queued_seconds_mean", "queued_seconds_max",
-          "underruns", "paced_batches", "late_batches"))
-    require(type(row["schema_version"]) is int and row["schema_version"] == 1 and row["requested"] == requested
+          "underruns", "paced_batches", "late_batches", *(("backend_finish_code",) if version == 2 else ())))
+    require(row["requested"] == requested
             and requested in ("paced", "unpaced") and row["pacing"] == ("frontend" if requested == "paced" else "unpaced")
             and row["mixing_requested"] in ("async", "sync"), "audio schema or requested mode/mixing mismatch")
     require(all(type(row[name]) is int and 0 <= row[name] <= U64_MAX for name in fields), "invalid audio frame/write counters")
-    require(type(row["drained"]) is bool and type(row["underruns_measured"]) is bool, "invalid audio booleans")
+    finished = row["drained" if version == 1 else "channel_finished"]
+    require(type(finished) is bool and type(row["underruns_measured"]) is bool, "invalid audio booleans")
     require(type(row["backend"]) is str and row["backend"] and row["delivery"] in ("device", "incomplete", "mixing_only"),
             "invalid audio backend/delivery")
     for name in ("stretch_ratio_min", "stretch_ratio_max", "queued_seconds_mean", "queued_seconds_max"):
@@ -171,21 +180,61 @@ def audio_admission(row, requested):
             and row["partial_writes"] + row["failed_writes"] <= row["device_writes"]
             and row["written_frames"] <= row["output_frames"]
             and row["discarded_frames"] <= row["received_frames"] <= row["mixed_frames"], "contradictory audio counters")
+    for low, high in (("stretch_ratio_min", "stretch_ratio_max"), ("queued_seconds_mean", "queued_seconds_max")):
+        if low in row and high in row:
+            require(row[low] <= row[high], "contradictory audio summary observations")
+    finish = "unknown_historical_schema1"
+    if version == 2:
+        finish, operation, code = row["backend_finish"], row["backend_finish_operation"], row.get("backend_finish_code")
+        require(finish in ("unavailable", "not_attempted", "in_progress", "succeeded", "failed"),
+                "invalid backend finish status")
+        returned = finish in ("succeeded", "failed")
+        require(("backend_finish_code" in row) == returned, "backend finish code availability contradicts status")
+        require(operation == ("snd_pcm_drain" if finish in ("in_progress", "succeeded", "failed") else "none"),
+                "backend finish operation contradicts status")
+        if returned:
+            require(type(code) is int and -(2**31) <= code < 2**31
+                    and (code == 0) == (finish == "succeeded"), "backend finish code contradicts status")
+        require((row["backend"] == "unavailable") == (finish == "unavailable"), "backend availability contradicts finish")
+        if operation == "snd_pcm_drain":
+            require(row["backend"] == "ALSA" and "device_rate" in row, "drain observation requires an open ALSA device")
+        require(finish != "in_progress" or not finished, "channel finished before backend return")
+        require(row["backend"] != "pending" or (finish == "not_attempted" and not finished), "pending device contradicts finish")
+        require(row["backend"] != "ALSA" or not row["underruns_measured"], "ALSA underruns are unmeasured in this source")
+        accepted = "device_rate" in row and row["device_frames_accepted"] > 0
+        expected_delivery = ("mixing_only" if not accepted else
+                             "incomplete" if row["partial_writes"] + row["failed_writes"] else "device")
+        require(row["delivery"] == expected_delivery, "delivery contradicts backend write counters")
+        if row["backend"] in ("pending", "unavailable"):
+            require("device_rate" not in row and all(row[name] == 0 for name in fields if name not in ("mixed_frames",)),
+                    "unopened backend contradicts write/frame domains")
     whole = (row["delivery"] == "device" and row["backend"] not in ("unavailable", "pending")
-             and "device_rate" in row and row["drained"] and row["written_frames"] > 0
+             and "device_rate" in row and finished and row["written_frames"] > 0
              and row["received_frames"] == row["mixed_frames"] and row["device_writes"] > 0
              and row["device_frames_accepted"] == row["device_frames_offered"] > 0
              and row["partial_writes"] == row["failed_writes"] == 0
              and row["written_frames"] == row["output_frames"])
-    return {"full_write_admitted": whole, "report": row,
+    completion = whole and version == 2 and finish == "succeeded"
+    return {"full_write_admitted": whole, "backend_completion_admitted": completion,
+            "backend_finish": finish, "completion_required": completion_required,
+            "admitted": completion if completion_required else whole, "report": row,
             "sound_correctness": "delivery counters only; catch-up discards retained",
             "acoustic_quality": "unknown_not_measured", "physical_device_identity": "unknown_not_measured"}
 
 
-def presentation_record(row):
+def canonical_u64(value):
+    require(type(value) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is not None,
+            "budget counter must be a canonical u64 decimal string")
+    number = int(value)
+    require(number <= U64_MAX, "budget counter exceeds u64")
+    return number
+
+
+def presentation_record(row, schema_version=1):
+    budget_fields = ("panel_budget_status", "panel_budget_limit_bytes", "panel_budget_charged_bytes")
     keys(row, ("sequence", "output", "panel", "turned", "target", "layout", "layout_set", "fit", "top_crop",
                "second_window", "panel_shot_status", "panel_shot_retained"),
-         ("panel_shot_index", "panel_shot_numbered", "top", "bottom"))
+         ("panel_shot_index", "panel_shot_numbered", "top", "bottom", *(budget_fields if schema_version == 2 else ())))
     require(type(row["sequence"]) is int and 0 <= row["sequence"] <= U64_MAX
             and type(row["output"]) is str and row["panel_shot_status"] in ("disabled", "written", "write_failed"),
             "invalid geometry presentation identity/status")
@@ -201,6 +250,29 @@ def presentation_record(row):
         require(type(row["panel_shot_index"]) is int and 0 <= row["panel_shot_index"] < 2**32, "invalid panel shot index")
     if "panel_shot_numbered" in row:
         require(type(row["panel_shot_numbered"]) is bool, "invalid panel shot numbering flag")
+    if schema_version == 1 and "panel_shot_index" in row:
+        require(row["panel_shot_status"] == "written" and row.get("panel_shot_numbered") is True
+                and row["panel_shot_retained"], "v1 index only identifies a retained numbered written file")
+    if schema_version == 2:
+        attempted = row["panel_shot_status"] != "disabled"
+        require(all((field in row) == attempted for field in
+                    ("panel_shot_index", "panel_shot_numbered", "panel_budget_status")),
+                "v2 attempt identity/budget availability contradicts shot status")
+        require(row["panel_shot_retained"] == (attempted and row["panel_shot_numbered"]
+                                              and row["panel_shot_status"] == "written"),
+                "retained flag contradicts numbered written attempt")
+        status = row.get("panel_budget_status")
+        require(not attempted or status in ("absent", "invalid", "ready", "exhausted", "write_failed", "size_failed"),
+                "invalid panel budget status")
+        counted = status in ("ready", "exhausted", "write_failed", "size_failed")
+        require(all((field in row) == counted for field in budget_fields[1:]), "panel budget counter availability mismatch")
+        if counted:
+            limit, charged = (canonical_u64(row[field]) for field in budget_fields[1:])
+            require(limit > 0 and charged <= limit, "panel budget charged/limit contradiction")
+        if status == "ready":
+            require(row["panel_shot_status"] == "written" and charged > 0, "ready budget contradicts written reservation")
+        if status in ("invalid", "exhausted", "write_failed", "size_failed"):
+            require(row["panel_shot_status"] == "write_failed", "failed budget contradicts shot status")
     for name in ("top", "bottom"):
         if name not in row:
             continue
@@ -216,7 +288,7 @@ def presentation_record(row):
 def geometry_record(data, screenshots):
     row = tomllib.loads(data.decode())
     keys(row, ("schema_version", "unobserved", "renderer", "requested", "shots"), ("final_presentation",))
-    require(type(row["schema_version"]) is int and row["schema_version"] == 1, "unknown render geometry schema")
+    require(type(row["schema_version"]) is int and row["schema_version"] in (1, 2), "unknown render geometry schema")
     require(type(row["unobserved"]) is list and all(type(item) is str for item in row["unobserved"]), "invalid geometry unknowns")
     keys(row["renderer"], ("kind", "readback_scale"), ("name", "effective_quarters"))
     require(row["renderer"]["kind"] in ("gles", "gles-panel", "software")
@@ -242,7 +314,7 @@ def geometry_record(data, screenshots):
                 and shot["file"] == f"frame-{shot['frame']:05}.bmp", "invalid geometry shot frame/file binding")
         files.append(shot["file"])
         if "presentation" in shot:
-            presentation_record(shot["presentation"])
+            presentation_record(shot["presentation"], row["schema_version"])
         for name in ("top", "bottom"):
             screen = shot[name]
             keys(screen, ("readback",), ("gpu_surface",))
@@ -258,8 +330,8 @@ def geometry_record(data, screenshots):
                         "invalid observed GPU surface")
     require(len(set(files)) == len(files) and set(files) == set(screenshots), "geometry shots do not bind probe screenshots")
     if "final_presentation" in row:
-        presentation_record(row["final_presentation"])
-    return {"record": row, "validation_scope": "v1 schema and screenshot/readback bindings; presentation is not scanout proof",
+        presentation_record(row["final_presentation"], row["schema_version"])
+    return {"record": row, "validation_scope": f"v{row['schema_version']} schema and screenshot/readback bindings; presentation is not scanout proof",
             "presentation_pixels": "unknown_not_captured"}
 
 
@@ -289,9 +361,11 @@ def collect(trial, report, screenshots, profile=None):
         require(len(reports) == 1, "diagnostics require exactly one probe report")
         _, result["report_source"] = snapshot(reports[0])
         if "audio" in report:
+            require(type(report["audio"]) is dict, "audio observation must be a table")
             mode = profile["audio"] if profile else report["audio"].get("requested")
-            result["audio"] = audio_admission(report["audio"], mode)
-            require(result["audio"]["full_write_admitted"], "audio did not satisfy full-write delivery admission")
+            completion_required = bool(profile and profile.get("audio_completion") == "backend") or report["audio"].get("schema_version") == 2
+            result["audio"] = audio_admission(report["audio"], mode, completion_required)
+            require(result["audio"]["admitted"], "audio did not satisfy requested delivery/backend-completion admission")
         elif profile and profile["audio"] != "off":
             raise ValueError("requested audio observer missing")
         if geometry_paths or (profile and profile["geometry"]):

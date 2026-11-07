@@ -49,6 +49,20 @@ def geometry_support_identity():
         raise ValueError("presentation-geometry support differs from the loaded source")
     return GEOMETRY_MODEL_SHA256
 
+
+_DIAGNOSTIC_PATH = Path(__file__).with_name("diagnostic_profiles.py")
+_DIAGNOSTIC_SOURCE = _DIAGNOSTIC_PATH.read_bytes()
+DIAGNOSTIC_SUPPORT_SHA256 = hashlib.sha256(_DIAGNOSTIC_SOURCE).hexdigest()
+_DIAGNOSTIC_SPEC = importlib.util.spec_from_file_location("render_diagnostic_schema", _DIAGNOSTIC_PATH)
+diagnostic_schema = importlib.util.module_from_spec(_DIAGNOSTIC_SPEC)
+exec(compile(_DIAGNOSTIC_SOURCE, str(_DIAGNOSTIC_PATH), "exec"), diagnostic_schema.__dict__)
+
+
+def diagnostic_support_identity():
+    require(hashlib.sha256(_DIAGNOSTIC_PATH.read_bytes()).hexdigest() == DIAGNOSTIC_SUPPORT_SHA256,
+            "diagnostic support differs from the loaded source")
+    return DIAGNOSTIC_SUPPORT_SHA256
+
 LAYOUTS = ("BigTop", "TopOnly", "SideBySide", "Original", "BigBeside")
 ASPECTS = ("Original", "Integer", "FourThree", "SixteenTen", "SixteenNine", "Stretch", "Crop")
 STRETCHES = ("Off", "Top", "Bottom", "Both")
@@ -57,7 +71,7 @@ DEFAULT_PRESENTATION = {"layout": "BigTop", "aspect": "Original", "swapped": Fal
 PROFILE_KEYS = {"schema_version", "id", "internal_scale", "aspect", "layout", "swapped", "stretched",
                 "presentation_capture"}
 CAPTURE_KEYS = {"panel_size", "file", "retain", "max_bytes"}
-ENV_KEYS = {"ZAKURO_PANEL_SHOT", "ZAKURO_PANEL_SIZE"}
+ENV_KEYS = {"ZAKURO_PANEL_SHOT", "ZAKURO_PANEL_SIZE", "ZAKURO_PANEL_SHOT_MAX_IO_BYTES"}
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,79}\Z")
 SHOT_FILE = {"last": re.compile(r"[a-z][a-z0-9-]{0,62}\.ppm\Z"),
              "numbered": re.compile(r"[a-z][a-z0-9-]{0,62}%\.ppm\Z")}
@@ -129,7 +143,8 @@ def validate(value):
         require(presentation_is_default(result),
                 "aspect, layout and swap have no panel without presentation_capture; declare one or keep the defaults")
         return result
-    exact(capture, CAPTURE_KEYS, "presentation_capture")
+    require(type(capture) is dict and CAPTURE_KEYS <= capture.keys() <= CAPTURE_KEYS | {"max_io_bytes"},
+            "presentation_capture requires its historical fields and optional max_io_bytes only")
     panel = capture["panel_size"]
     require(type(panel) is list and len(panel) == 2 and all(type(n) is int and 64 <= n <= 8192 for n in panel),
             "panel_size must be two integers from 64 through 8192")
@@ -139,6 +154,10 @@ def validate(value):
     budget = capture["max_bytes"]
     require(type(budget) is int and ppm_bytes(panel) <= budget <= MAX_CAPTURE_BYTES,
             "max_bytes must hold at least one panel image and at most 8 GiB")
+    if "max_io_bytes" in capture:
+        require(type(capture["max_io_bytes"]) is int and 0 < capture["max_io_bytes"] <= 2**64 - 1,
+                "max_io_bytes must be a positive u64 logical attempted-output limit")
+        require(capture["retain"] == "numbered", "capped capture requires numbered retained attempt evidence")
     return result
 
 
@@ -183,7 +202,10 @@ def environment(profile, trial):
     require(trial.is_absolute() and ".." not in trial.parts, "trial directory must be absolute and normalized")
     require(trial.resolve() == trial, "trial directory must not traverse symlinks")
     width, height = capture["panel_size"]
-    return {"ZAKURO_PANEL_SHOT": str(trial / capture["file"]), "ZAKURO_PANEL_SIZE": f"{width}x{height}"}
+    result = {"ZAKURO_PANEL_SHOT": str(trial / capture["file"]), "ZAKURO_PANEL_SIZE": f"{width}x{height}"}
+    if "max_io_bytes" in capture:
+        result["ZAKURO_PANEL_SHOT_MAX_IO_BYTES"] = str(capture["max_io_bytes"])
+    return result
 
 
 def timing_eligible(profile):
@@ -273,6 +295,55 @@ def presentation_errors(profile, row):
     return errors
 
 
+def capture_log_receipt(trial):
+    """Hash the complete bounded stderr, retaining every capture failure line."""
+    data, source = diagnostic_schema.snapshot(Path(trial) / "stderr.log", 64 * 1024 * 1024)
+    lines = data.decode(errors="replace").splitlines()
+    failures = [line for line in lines if re.search(
+        r"panel capture.*(?:fail|exhaust|invalid|overflow)|invalid ZAKURO_PANEL_SHOT_MAX_IO_BYTES|"
+        r"(?:could not|failed to).*(?:panel|\.ppm)", line, re.IGNORECASE)]
+    return {"source": source, "capture_errors": failures}
+
+
+def cap_observation(capture, record, presentations, images):
+    """Check only events independently present in snapshots and retained files.
+
+    Consistency does not establish thread lifetime, unseen attempts, scanout,
+    or probe-frame ties. No per-process quota is inferred from this observer.
+    """
+    diagnostic_support_identity()
+    require(record.get("schema_version") == 2 and type(record.get("schema_version")) is int,
+            "capped capture requires observed geometry schema 2; requested environment is not support")
+    require(presentations and images, "capped capture lacks observed attempts/images")
+    size = ppm_bytes(capture["panel_size"])
+    samples = {}
+    for row in presentations:
+        diagnostic_schema.presentation_record(row, 2)
+        require(row["panel_budget_status"] == "ready", "panel budget missing, unrecognized or failed/exhausted")
+        limit = diagnostic_schema.canonical_u64(row["panel_budget_limit_bytes"])
+        charged = diagnostic_schema.canonical_u64(row["panel_budget_charged_bytes"])
+        require(limit == capture["max_io_bytes"] and charged <= limit, "observed panel budget differs from requested cap")
+        index = row["panel_shot_index"]
+        require(row["panel_shot_status"] == "written" and row["panel_shot_numbered"] and row["panel_shot_retained"],
+                "capped attempt was not numbered, written and retained")
+        require(charged == (index + 1) * size,
+                "attempt index/charged bytes contradict the single GL thread fixed-size control")
+        require(index not in samples or samples[index] == row, "contradictory indexed budget snapshot")
+        samples[index] = row
+    inventory = {image["index"] for image in images}
+    require(set(samples) <= inventory, "observed capped attempt has no retained image")
+    require(sum(image["bytes"] for image in images) <= capture["max_io_bytes"], "retained output exceeds logical cap")
+    # Gaps may be real unseen events. Hold them without filling in an event log.
+    complete = (set(samples) == inventory and all(index == expected for expected, index in enumerate(sorted(inventory))))
+    require(complete, "unknown complete attempt coverage: sparse snapshots or noninitial indexed inventory")
+    require(max(diagnostic_schema.canonical_u64(row["panel_budget_charged_bytes"]) for row in presentations)
+            == sum(image["bytes"] for image in images), "final charged bytes contradict retained attempt inventory")
+    return {"status": "consistent_observed_numbered_attempts_only", "limit_bytes": capture["max_io_bytes"],
+            "charged_bytes": sum(image["bytes"] for image in images), "observed_attempts": len(samples),
+            "scope": "logical whole-file reservations on the selected GL thread; not physical IO or a process quota",
+            "thread_lifetime_coverage": "unknown_not_observed", "all_presentations": "unknown_not_observed"}
+
+
 def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
     """Split the requested profile from runtime observations, unknowns explicit.
 
@@ -323,6 +394,20 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
     observed["presentation_geometry_conformance"] = "unknown_not_mathematically_verified"
     capture = profile["presentation_capture"]
     images = []
+    if capture is not None:
+        try:
+            # Legacy standalone helper callers may lack stderr. A declared cap
+            # must have it; evaluate always records it for every new capture.
+            if trial is not None and (Path(trial) / "stderr.log").exists():
+                observed["capture_log"] = capture_log_receipt(trial)
+                checks["capture_log"] = not observed["capture_log"]["capture_errors"]
+                if not checks["capture_log"]:
+                    errors.append("capture error log holds admission; retained files may be stale")
+            elif "max_io_bytes" in capture:
+                raise ValueError("capped capture stderr log missing")
+        except (OSError, ValueError, TypeError) as error:
+            checks["capture_log"] = False
+            errors.append(str(error))
     if capture is None:
         # No panel is expected; one appearing means the environment was not the evaluator's.
         checks["presentation"] = None if geometry is None else not presentations
@@ -364,6 +449,18 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
             checks["panel_images"] = False
             errors.append(str(error))
     observed["panel_images"] = images
+    if capture is not None and "max_io_bytes" in capture:
+        # Snapshots cannot establish final worker/thread lifetime or all
+        # presentations. No independent control attestation is in this schema.
+        checks["cap_trial_coverage"] = None
+        errors.append("capped trial held: independent full attempt/thread-lifetime coverage is unknown")
+        try:
+            observed["capture_budget"] = cap_observation(capture, record, presentations, images)
+            checks["capture_budget"] = True
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            checks["capture_budget"] = False
+            observed["capture_budget"] = {"status": "held", "reason": str(error)}
+            errors.append(str(error))
     # A distinct partial capability: the observer may lag the probe frame.
     # Only numbered files preserve the image belonging to a presentation.
     geometry_errors = []
@@ -388,6 +485,7 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
             geometry_errors.append("presentation settings or panel mismatch")
     partial = (capture is not None and capture["retain"] == "numbered" and presentations
                and checks.get("runtime_requested") is True and checks.get("panel_images") is True
+               and checks.get("capture_log") is not False
                and not geometry_errors)
     observed["presentation_geometry_model_sha256"] = geometry_support_identity()
     observed["presentation_geometry_errors"] = sorted(set(geometry_errors))
@@ -396,6 +494,8 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
     observed["presentation_frame_binding"] = "unknown_observer_may_precede_probe_frame"
     scale_proven = checks["renderer_quarters"] is True or checks["renderer_scale_log"] is True
     required = ["presentation", "panel_images"] if capture is not None else []
+    if capture is not None and "max_io_bytes" in capture:
+        required += ["capture_budget", "capture_log", "cap_trial_coverage"]
     # A written settings file counts only once the runtime reports parsing it.
     if config_settings(profile) is not None:
         required.append("runtime_requested")
@@ -407,8 +507,9 @@ def observe(profile, *, geometry=None, renderer_log_lines=(), trial=None):
             "runtime_requested": requested_by_runtime, "observed": observed,
             "unobserved": sorted({*record.get("unobserved", []), *SCANOUT_UNOBSERVED}),
             "scanout": "unknown_not_observed", "checks": checks, "errors": errors, "admitted": admitted,
-            "admission_scope": "scale evidence and settings/panel-byte consistency; mathematical geometry is separately reported for numbered observed presentations, without probe-frame binding",
+            "admission_scope": "scale evidence and settings/panel-byte consistency; mathematical geometry is separately reported for numbered observed presentations, without probe-frame binding; capped trials held pending independent full attempt/thread-lifetime coverage",
             "matrix_presentation_capability_admitted": False,
+            "full_matrix_cap_admitted": False, "process_quota_admitted": False,
             "timing_eligible": timing_eligible(profile) and geometry is None,
             "evidence_class": None if timing_eligible(profile) else NON_TIMING}
 
@@ -447,7 +548,7 @@ def screening_plan():
               "profile_sha256": declaration_hash(profile), "resolution": profile["internal_scale"],
               "diagnostic_profile": {"schema_version": 1, "geometry": True},
               "evidence_class": NON_TIMING if profile["presentation_capture"] else "NON-TIMING diagnostic geometry observer",
-              # Each presentation overwrites the image: frames bound the disk writes.
+              # Each presentation overwrites the image; batches do not bound write count.
               "panel_write_bytes_per_presentation": ppm_bytes(capture["panel_size"]) if profile["presentation_capture"] else 0,
               "status": "pending-observation"} for title in TITLES for axis, profile in per_title]
     return {"schema_version": 1, "kind": "render-profile-screening-plan", "timing_admitted": False,

@@ -68,6 +68,132 @@ def write_ppm(path, panel):
     path.write_bytes(f"P6\n{width} {height}\n255\n".encode() + bytes(width * height * 3))
 
 
+class CappedCaptureContractTests(unittest.TestCase):
+    def profile(self, count=2):
+        size = rules.ppm_bytes([64, 64])
+        return rules.validate(declaration(capture={**capture("numbered", panel=(64, 64), budget=count * size),
+                                                  "max_io_bytes": count * size}))
+
+    def record(self, profile, count=2):
+        size = rules.ppm_bytes([64, 64])
+        rows = [presentation(profile, i+1, i) for i in range(count)]
+        for i, row in enumerate(rows):
+            row.update(panel_budget_status="ready", panel_budget_limit_bytes=str(profile["presentation_capture"]["max_io_bytes"]),
+                       panel_budget_charged_bytes=str((i+1)*size))
+        record = geometry(profile, presentations=rows)
+        record["schema_version"] = 2
+        return record
+
+    def files(self, directory, count=2):
+        root = Path(directory)
+        (root / "stderr.log").write_text("INFO synthetic contract; no runtime validation\n")
+        for index in range(count):
+            write_ppm(root / f"panel-{index:05}.ppm", [64, 64])
+
+    def test_optional_cap_preserves_historical_declarations_and_defaults(self):
+        old = rules.validate(declaration(capture=capture("numbered", panel=(64, 64))))
+        old_hash = rules.declaration_hash(old)
+        self.assertNotIn("max_io_bytes", old["presentation_capture"])
+        self.assertNotIn("ZAKURO_PANEL_SHOT_MAX_IO_BYTES", rules.environment(old, Path("/trial")))
+        self.assertEqual(rules.declaration_hash(rules.validate(old)), old_hash)
+        capped = self.profile()
+        self.assertEqual(rules.environment(capped, Path("/trial"))["ZAKURO_PANEL_SHOT_MAX_IO_BYTES"],
+                         str(capped["presentation_capture"]["max_io_bytes"]))
+        self.assertEqual(rules.environment(rules.validate(declaration()), Path("/trial")), {})
+        for value in (None, True, 0, -1, 1.0, "12301", 2**64):
+            changed = copy.deepcopy(capped)
+            changed["presentation_capture"]["max_io_bytes"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                rules.validate(changed)
+        rules.validate({**capped, "presentation_capture": {**capped["presentation_capture"], "max_io_bytes": 2**64-1}})
+
+    def test_exact_limit_success_is_only_observed_attempt_consistency(self):
+        profile = self.profile()
+        with tempfile.TemporaryDirectory() as directory:
+            self.files(directory)
+            record = self.record(profile)
+            before = copy.deepcopy(record)
+            result = rules.observe(profile, geometry=record, trial=directory)
+            self.assertTrue(result["checks"]["capture_budget"], result["errors"])
+            self.assertIsNone(result["checks"]["cap_trial_coverage"])
+            self.assertFalse(result["admitted"])
+            budget = result["observed"]["capture_budget"]
+            self.assertEqual(budget["charged_bytes"], budget["limit_bytes"])
+            self.assertEqual(budget["observed_attempts"], 2)
+            self.assertEqual(budget["thread_lifetime_coverage"], "unknown_not_observed")
+            self.assertEqual(result["observed"]["presentation_frame_binding"], "unknown_observer_may_precede_probe_frame")
+            self.assertFalse(result["full_matrix_cap_admitted"])
+            self.assertFalse(result["process_quota_admitted"])
+            self.assertFalse(result["timing_eligible"])
+            self.assertEqual(record, before)
+
+    def test_old_runtime_ignoring_environment_is_held(self):
+        profile = self.profile()
+        with tempfile.TemporaryDirectory() as directory:
+            self.files(directory)
+            record = geometry(profile, presentations=[presentation(profile, 1, 0), presentation(profile, 2, 1)])
+            result = rules.observe(profile, geometry=record, trial=directory)
+            self.assertFalse(result["admitted"])
+            self.assertFalse(result["checks"]["capture_budget"])
+
+    def test_missing_invalid_failed_and_exhausted_budget_never_admit(self):
+        profile = self.profile()
+        with tempfile.TemporaryDirectory() as directory:
+            self.files(directory)
+            for status in (None, "absent", "invalid", "unknown", "exhausted", "write_failed", "size_failed"):
+                record = self.record(profile)
+                for row in [shot["presentation"] for shot in record["shots"]] + [record["final_presentation"]]:
+                    row["panel_budget_status"] = status
+                with self.subTest(status=status):
+                    result = rules.observe(profile, geometry=record, trial=directory)
+                    self.assertFalse(result["admitted"])
+
+    def test_failed_index_with_existing_valid_stale_file_is_held(self):
+        profile = self.profile()
+        with tempfile.TemporaryDirectory() as directory:
+            self.files(directory)
+            record = self.record(profile)
+            record["final_presentation"].update(panel_shot_status="write_failed", panel_shot_retained=False,
+                                               panel_budget_status="write_failed")
+            result = rules.observe(profile, geometry=record, trial=directory)
+            self.assertTrue(result["checks"]["panel_images"])
+            self.assertFalse(result["admitted"])
+            self.assertFalse(result["checks"]["presentation"])
+
+    def test_capture_error_log_is_bound_and_holds_success_shaped_snapshots(self):
+        profile = self.profile()
+        with tempfile.TemporaryDirectory() as directory:
+            self.files(directory)
+            log = Path(directory, "stderr.log")
+            log.write_text("ERROR panel capture failed: panel capture I/O budget exhausted\n")
+            result = rules.observe(profile, geometry=self.record(profile), trial=directory)
+            self.assertFalse(result["admitted"])
+            self.assertFalse(result["checks"]["capture_log"])
+            self.assertEqual(result["observed"]["capture_log"]["source"]["bytes"], log.stat().st_size)
+            log.unlink()
+            result = rules.observe(profile, geometry=self.record(profile), trial=directory)
+            self.assertFalse(result["admitted"])
+            self.assertIn("capped capture stderr log missing", result["errors"])
+
+    def test_sparse_snapshots_and_counter_inventory_contradictions_are_held(self):
+        profile = self.profile()
+        with tempfile.TemporaryDirectory() as directory:
+            self.files(directory)
+            for change in ("sparse", "charge", "limit", "decimal", "overflow", "index", "partial"):
+                record = self.record(profile)
+                row = record["shots"][0]["presentation"]
+                if change == "sparse":
+                    del record["shots"][0]["presentation"]
+                elif change == "charge": row["panel_budget_charged_bytes"] = "1"
+                elif change == "limit": row["panel_budget_limit_bytes"] = str(10**6)
+                elif change == "decimal": row["panel_budget_charged_bytes"] = "012301"
+                elif change == "overflow": row["panel_budget_limit_bytes"] = str(2**64)
+                elif change == "index": row["panel_shot_index"] = 5
+                elif change == "partial": Path(directory, "panel-00000.ppm").write_bytes(b"P6\n64 64\n255\n")
+                with self.subTest(change=change):
+                    self.assertFalse(rules.observe(profile, geometry=record, trial=directory)["admitted"])
+
+
 class ValidationTest(unittest.TestCase):
     def test_default_presentation_changes_nothing_but_the_requested_scale(self):
         for scale in (1, 1.5, 2.0):

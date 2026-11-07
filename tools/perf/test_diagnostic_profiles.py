@@ -27,6 +27,26 @@ def audio_fixture(mode="paced"):
     return result
 
 
+def finish_fixture(**changes):
+    row = audio_fixture()
+    del row["drained"]
+    row.update(schema_version=2, channel_finished=True, backend_finish="succeeded",
+               backend_finish_operation="snd_pcm_drain", backend_finish_code=0)
+    row.update(changes)
+    return row
+
+
+def presentation_fixture(**changes):
+    row = {"sequence": 1, "output": "offscreen", "panel": [64, 64], "turned": False,
+           "target": [64, 64], "layout": [640, 640], "layout_set": True, "fit": [1.0, 0.0, 0.0],
+           "top_crop": 0.0, "second_window": False, "panel_shot_status": "written",
+           "panel_shot_retained": True, "panel_shot_index": 0, "panel_shot_numbered": True,
+           "panel_budget_status": "ready", "panel_budget_limit_bytes": "12301",
+           "panel_budget_charged_bytes": "12301"}
+    row.update(changes)
+    return row
+
+
 def packet_bytes(start=None):
     """A synthetic empty census, not a substitute for missing runtime data."""
     gpu = diagnostics.gpu_reader()
@@ -147,6 +167,157 @@ class ProfileTests(unittest.TestCase):
                 diagnostics.validate(profile)
 
 
+class FinishAndCapSchemaTests(unittest.TestCase):
+    def test_historical_delivery_is_readable_with_finish_explicitly_unknown(self):
+        original = audio_fixture()
+        saved = copy.deepcopy(original)
+        result = diagnostics.audio_admission(original, "paced", completion_required=True)
+        self.assertTrue(result["full_write_admitted"])
+        self.assertFalse(result["backend_completion_admitted"])
+        self.assertFalse(result["admitted"])
+        self.assertEqual(result["backend_finish"], "unknown_historical_schema1")
+        self.assertEqual(original, saved)
+
+    def test_completion_does_not_replace_write_or_channel_gates(self):
+        result = diagnostics.audio_admission(finish_fixture(), "paced", completion_required=True)
+        self.assertTrue(result["admitted"])
+        self.assertEqual(result["acoustic_quality"], "unknown_not_measured")
+        self.assertNotIn("underruns", result["report"])
+        for changes in ({"channel_finished": False}, {"written_frames": 89}, {"received_frames": 99},
+                        {"device_frames_accepted": 119}, {"delivery": "incomplete", "partial_writes": 1}):
+            with self.subTest(changes=changes):
+                self.assertFalse(diagnostics.audio_admission(finish_fixture(**changes), "paced", True)["admitted"])
+
+    def test_failed_or_unobserved_alsa_return_does_not_erase_full_write_delivery(self):
+        for code in (-32, 1):
+            result = diagnostics.audio_admission(finish_fixture(backend_finish="failed", backend_finish_code=code), "paced", True)
+            self.assertTrue(result["full_write_admitted"])
+            self.assertFalse(result["admitted"])
+            self.assertEqual(result["report"]["backend_finish_code"], code)
+        row = finish_fixture(backend_finish="in_progress", channel_finished=False)
+        del row["backend_finish_code"]
+        self.assertFalse(diagnostics.audio_admission(row, "paced", True)["admitted"])
+
+    def test_aaudio_noop_never_claims_backend_or_acoustic_completion(self):
+        row = finish_fixture(backend="AAudio", backend_finish="not_attempted", backend_finish_operation="none")
+        del row["backend_finish_code"]
+        result = diagnostics.audio_admission(row, "paced", True)
+        self.assertTrue(result["full_write_admitted"])
+        self.assertFalse(result["backend_completion_admitted"])
+        self.assertEqual(result["acoustic_quality"], "unknown_not_measured")
+
+    def test_finish_status_operation_and_exact_signed_code_are_closed(self):
+        for changes in ({"backend_finish": "drained"}, {"backend_finish": "failed"},
+                        {"backend_finish_code": -1}, {"backend_finish_code": True}, {"backend_finish_code": 2**31},
+                        {"backend_finish_code": -(2**31)-1}, {"backend_finish_code": "0"},
+                        {"backend_finish_operation": "request_stop"}, {"backend": "AAudio"},
+                        {"backend_finish": "not_attempted", "backend_finish_operation": "none"},
+                        {"backend_finish": "in_progress"}, {"channel_finished": 1},
+                        {"drained": True}, {"device_frames_accepted": 121}, {"written_frames": 91},
+                        {"queued_seconds_mean": 1.0}, {"underruns_measured": True, "underruns": 0}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                diagnostics.audio_admission(finish_fixture(**changes), "paced", True)
+        for missing in ("channel_finished", "backend_finish", "backend_finish_operation", "backend_finish_code"):
+            row = finish_fixture()
+            del row[missing]
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                diagnostics.audio_admission(row, "paced", True)
+
+    def test_unavailable_backend_can_finish_channel_without_delivery(self):
+        row = finish_fixture(backend="unavailable", backend_finish="unavailable", backend_finish_operation="none", delivery="mixing_only")
+        del row["backend_finish_code"], row["device_rate"]
+        for name in ("received_frames", "discarded_frames", "output_frames", "written_frames", "device_frames_offered",
+                     "device_frames_accepted", "device_writes", "partial_writes", "failed_writes", "write_errors", "write_recoveries"):
+            row[name] = 0
+        self.assertFalse(diagnostics.audio_admission(row, "paced", True)["admitted"])
+        row["device_frames_accepted"] = 1
+        with self.assertRaises(ValueError):
+            diagnostics.audio_admission(row, "paced", True)
+
+    def test_optional_completion_declaration_preserves_old_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = ProfileTests().backend_profile(Path(directory))
+            old = diagnostics.validate(profile)
+            self.assertNotIn("audio_completion", old)
+            new = diagnostics.validate({**profile, "audio_completion": "backend"})
+            self.assertNotEqual(diagnostics.declaration_hash(old), diagnostics.declaration_hash(new))
+            self.assertEqual(diagnostics.environment(old), diagnostics.environment(new))
+        for profile in ({"schema_version": 1, "audio_completion": "backend"},
+                        {"schema_version": 1, "audio_completion": True}):
+            with self.assertRaises(ValueError):
+                diagnostics.validate(profile)
+
+    def test_collection_holds_historical_or_failed_finish_when_completion_requested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe = ObserverTests().trial(root)
+            profile = diagnostics.validate({**ProfileTests().backend_profile(root), "audio_completion": "backend"})
+            for audio, admitted in ((audio_fixture("unpaced"), False),
+                                    (finish_fixture(requested="unpaced", pacing="unpaced"), True),
+                                    (finish_fixture(requested="unpaced", pacing="unpaced", backend_finish="failed",
+                                                    backend_finish_code=-32), False)):
+                audio.pop("paced_batches", None)
+                audio.pop("late_batches", None)
+                lines = ["schema_version = 1", "[audio]"] + [f"{key} = {json.dumps(value)}" for key, value in audio.items()]
+                (probe / "report.toml").write_text("\n".join(lines) + "\n")
+                result = diagnostics.collect(root, {"schema_version": 1, "audio": audio}, {}, profile)
+                with self.subTest(schema=audio["schema_version"], admitted=admitted):
+                    self.assertEqual(result["valid"], admitted)
+                    self.assertEqual(result["audio"]["backend_completion_admitted"], admitted)
+                    self.assertFalse(result["timing_eligible"])
+
+    def test_geometry_schema1_rejects_v2_budget_and_attempt_index_semantics(self):
+        row = presentation_fixture()
+        with self.assertRaises(ValueError):
+            diagnostics.presentation_record(row, 1)
+        for name in ("panel_budget_status", "panel_budget_limit_bytes", "panel_budget_charged_bytes"):
+            row.pop(name)
+        diagnostics.presentation_record(row, 1)
+        row.update(panel_shot_status="write_failed", panel_shot_retained=False)
+        with self.assertRaises(ValueError):
+            diagnostics.presentation_record(row, 1)
+        row.pop("panel_shot_index")
+        diagnostics.presentation_record(row, 1)  # historical failed capture remains readable
+        diagnostics.presentation_record({**presentation_fixture(), "panel_shot_status": "write_failed",
+                                        "panel_shot_retained": False, "panel_budget_status": "write_failed"}, 2)
+
+    def test_sidecar_versions_apply_the_closed_presentation_schema(self):
+        body = b"\n[final_presentation]\n" + "\n".join(
+            f"{key} = {json.dumps(value)}" for key, value in presentation_fixture().items()).encode() + b"\n"
+        v2 = GEOMETRY.replace(b"schema_version = 1", b"schema_version = 2") + body
+        result = diagnostics.geometry_record(v2, {"frame-00000.bmp": "synthetic"})
+        self.assertEqual(result["record"]["schema_version"], 2)
+        self.assertEqual(result["record"]["final_presentation"]["panel_budget_charged_bytes"], "12301")
+        with self.assertRaises(ValueError):
+            diagnostics.geometry_record(GEOMETRY + body, {"frame-00000.bmp": "synthetic"})
+
+    def test_canonical_decimal_strings_and_u64_overflow(self):
+        for value in ("", "00", "01", "+1", "-1", " 1", "1 ", "1.0", "1e3", "١", "18446744073709551616", 1, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                diagnostics.canonical_u64(value)
+        self.assertEqual(diagnostics.canonical_u64("18446744073709551615"), 2**64-1)
+        diagnostics.presentation_record(presentation_fixture(panel_budget_limit_bytes=str(2**64-1)), 2)
+
+    def test_geometry_status_counter_and_retention_contradictions_fail_closed(self):
+        for changes in ({"panel_budget_status": "unknown"}, {"panel_budget_status": "absent"},
+                        {"panel_budget_limit_bytes": "0"}, {"panel_budget_charged_bytes": "12302"},
+                        {"panel_budget_charged_bytes": "0"}, {"panel_budget_status": "exhausted"},
+                        {"panel_shot_retained": False}, {"panel_shot_numbered": False}, {"new_field": 1}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                diagnostics.presentation_record(presentation_fixture(**changes), 2)
+        for name in ("panel_budget_status", "panel_budget_limit_bytes", "panel_budget_charged_bytes", "panel_shot_index"):
+            row = presentation_fixture()
+            row.pop(name)
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                diagnostics.presentation_record(row, 2)
+        for status in ("absent", "invalid"):
+            row = presentation_fixture(panel_budget_status=status)
+            del row["panel_budget_limit_bytes"], row["panel_budget_charged_bytes"]
+            if status == "invalid":
+                row.update(panel_shot_status="write_failed", panel_shot_retained=False)
+            diagnostics.presentation_record(row, 2)
+
+
 class ObserverTests(unittest.TestCase):
     def test_audio_domains_discards_and_unknown_underruns_are_retained(self):
         for mode in ("paced", "unpaced"):
@@ -182,7 +353,7 @@ class ObserverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             diagnostics.geometry_record(GEOMETRY, {"frame-00001.bmp": "different"})
         with self.assertRaises(ValueError):
-            diagnostics.geometry_record(GEOMETRY.replace(b"schema_version = 1", b"schema_version = 2"), {"frame-00000.bmp": "hash"})
+            diagnostics.geometry_record(GEOMETRY.replace(b"schema_version = 1", b"schema_version = 3"), {"frame-00000.bmp": "hash"})
 
     def trial(self, root):
         probe = root / "probe-synthetic"

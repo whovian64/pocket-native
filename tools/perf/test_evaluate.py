@@ -130,6 +130,53 @@ def with_render_receipts(manifest, profile):
 
 
 class RenderReceiptTests(unittest.TestCase):
+    def test_compiled_helper_pins_reject_disk_replacement_without_reimport(self):
+        original = Path.read_bytes
+        for kind, filename in (("diagnostic", "diagnostic_profiles.py"), ("render", "render_profiles.py")):
+            def replaced(path):
+                data = original(path)
+                return data + b"\n# source replacement\n" if path.name == filename else data
+            with self.subTest(kind=kind), mock.patch.object(Path, "read_bytes", autospec=True, side_effect=replaced):
+                with self.assertRaisesRegex(ValueError, "loaded source"):
+                    evaluate.observer_support_identity(kind)
+        with mock.patch.object(evaluate.render_rules, "DIAGNOSTIC_SUPPORT_SHA256", "f"*64):
+            with self.assertRaises(ValueError):
+                evaluate.observer_support_identity("diagnostic")
+
+    def test_new_cap_environment_is_rejected_when_undeclared(self):
+        baseline = with_render_receipts(fixture(), render_profile())
+        for trial in baseline["trials"]:
+            trial["environment"]["ZAKURO_PANEL_SHOT_MAX_IO_BYTES"] = "7372920"
+        result = evaluate.compare_values(baseline, copy.deepcopy(baseline))
+        self.assertEqual(result["status"], "incomparable")
+        self.assertTrue(any("environment" in error for error in result["errors"]))
+        self.assertTrue(any("NON-TIMING" in error for error in result["errors"]))
+
+    def test_observer_reopen_rejects_changed_geometry_or_raw_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_dir = root / "probe-synthetic"
+            probe_dir.mkdir()
+            report_path = probe_dir / "report.toml"
+            report_path.write_text("schema_version = 1\n")
+            (root / "stderr.log").write_text("INFO synthetic contract only\n")
+            declaration = evaluate.diagnostic_rules.validate({"schema_version": 1})
+            report = {"schema_version": 1}
+            stored = evaluate.diagnostic_rules.collect(root, report, {}, declaration)
+            trial = {"diagnostics": stored, "probe": {"report": report, "screenshots": {},
+                     "report_sha256": evaluate.digest(report_path)}}
+            evaluate.revalidate_observers(root, trial, declaration)
+            (root / "stderr.log").write_text("ERROR panel capture failed: write failed\n")
+            # Geometry-free diagnostic logs do not produce invented cap proof.
+            evaluate.revalidate_observers(root, trial, declaration)
+            report_path.write_text("schema_version = 1\nchanged = true\n")
+            with self.assertRaisesRegex(ValueError, "report source/receipt changed"):
+                evaluate.revalidate_observers(root, trial, declaration)
+            report_path.write_text("schema_version = 1\n")
+            (probe_dir / "render-geometry.toml").write_text("schema_version = 2\n")
+            with self.assertRaisesRegex(ValueError, "sources or admission changed"):
+                evaluate.revalidate_observers(root, trial, declaration)
+
     def test_geometry_support_is_required_even_when_historical_records_agree(self):
         for model_sha in (None, "f" * 64):
             with self.subTest(model_sha=model_sha):
@@ -193,7 +240,7 @@ class RenderReceiptTests(unittest.TestCase):
         self.assertTrue(any("support SHA-256" in error for error in result["errors"]))
 
         baseline = with_render_receipts(fixture(), render_profile())
-        with mock.patch.object(evaluate, "digest", side_effect=OSError("adapter unreadable")):
+        with mock.patch.object(evaluate, "observer_support_identity", side_effect=OSError("adapter unreadable")):
             result = evaluate.compare_values(baseline, copy.deepcopy(baseline))
         self.assertEqual(result["status"], "incomparable")
         self.assertTrue(any("adapter unreadable" in error for error in result["errors"]))
