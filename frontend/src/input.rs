@@ -87,7 +87,11 @@ pub fn shared() -> Option<Arc<Mutex<Pad>>> {
 
 /// the handheld's gamepad device and its name.
 pub fn gamepad() -> Option<(String, String)> {
-    let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
+    pad_among(&std::fs::read_to_string("/proc/bus/input/devices").ok()?)
+}
+
+/// the pad in /proc/bus/input/devices' text, its event device and name.
+fn pad_among(devices: &str) -> Option<(String, String)> {
     // muOS hides the pad it reads behind its own, so that one goes first
     let mut blocks: Vec<&str> = devices.split("\n\n").collect();
     blocks.sort_by_key(|block| !block.contains("N: Name=\"muOS-Keys\""));
@@ -125,8 +129,10 @@ fn rk3562_pad(name: &str) -> bool {
 
 /// the Miyoo Flip's pad under spruceOS: the usual gamepad codes (304 to 318,
 /// no 312/313), the d-pad as a hat, the triggers only as ABS_Z and ABS_RZ.
+/// TrimUI's handhelds (the Smart Pro) give theirs the same way.
 fn miyoo_pad(name: &str) -> bool {
-    name.trim_matches('"').starts_with("MIYOO Player")
+    let name = name.trim_matches('"');
+    name.starts_with("MIYOO Player") || name.starts_with("TRIMUI Player")
 }
 
 pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
@@ -161,7 +167,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
         } else if muos {
             ", numbered as on muOS"
         } else if miyoo {
-            ", numbered as on the Miyoo Flip"
+            ", numbered as on the Miyoo Flip and TrimUI's handhelds"
         } else if usual {
             ", numbered the usual way"
         } else {
@@ -604,7 +610,19 @@ pub fn cursor_step(speed: Speed) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::sticks_in_order;
+    use super::{pad_among, sticks_in_order};
+
+    #[test]
+    fn a_trimui_pad_is_found_under_spruceos() {
+        // the Smart Pro's devices under spruceOS, as a tester's log named them
+        let devices = ["sunxi-keyboard", "pwm-vibrator", "axp2202-pek", "audiocodec Headphones", "TRIMUI Player1", "Microsoft X-Box 360 pad"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("I: Bus=0019 Vendor=0001 Product=0001 Version=0100\nN: Name=\"{name}\"\nH: Handlers=event{i}\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(pad_among(&devices), Some(("/dev/input/event4".to_owned(), "TRIMUI Player1".to_owned())));
+    }
 
     #[test]
     fn sticks_follow_the_axes_a_pad_has() {
