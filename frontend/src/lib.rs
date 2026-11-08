@@ -24,6 +24,8 @@ mod menu;
 mod probe;
 mod profile;
 mod profiler;
+#[cfg(feature = "profile-sidecar")]
+mod phase_cpu;
 mod readahead;
 mod settings;
 mod sound;
@@ -116,6 +118,8 @@ pub fn run(mut args: Vec<String>) {
             log::info!("{note}");
         }
     }
+    #[cfg(feature = "profile-sidecar")]
+    let mut phase_cpu = phase_cpu::Recorder::from_env();
     let Some(path) = args.first().cloned() else {
         eprintln!("usage: pocket-native <rom>, or pocket-native --probe <rom> [frames]");
         std::process::exit(2);
@@ -267,6 +271,8 @@ pub fn run(mut args: Vec<String>) {
     let mut logs = 0u32;
     // ZAKURO_SLOW_FRAMES=ms logs every frame that took longer to run
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
+    #[cfg(feature = "profile-sidecar")]
+    phase_cpu.before_batches();
     loop {
         let began = Instant::now();
         if let Some(probe) = probe.as_mut() { probe.begin_batch(); }
@@ -530,6 +536,8 @@ pub fn run(mut args: Vec<String>) {
         }
         #[cfg(feature = "profile-sidecar")]
         profiler::frame_marker(frame_number, profiler::FRAME_COMPLETED);
+        #[cfg(feature = "profile-sidecar")]
+        phase_cpu.completed(frame_number);
         if let Some(probe) = probe.as_mut() {
             probe.checkpoint(&system, frame_number);
         }
@@ -642,6 +650,8 @@ pub fn run(mut args: Vec<String>) {
     }
     #[cfg(feature = "profile-sidecar")]
     profiler::frame_marker(frame_number, profiler::RUN_END);
+    #[cfg(feature = "profile-sidecar")]
+    phase_cpu.after_loop(frame_number);
     read_ahead.save();
     // a run that ends inside the profiled frames still stops the timer,
     // which left going holds up the exit, and writes what it sampled
@@ -653,6 +663,8 @@ pub fn run(mut args: Vec<String>) {
         system.stop_gpu();
         #[cfg(feature = "shader-attribution")]
         write_shader_attribution();
+        #[cfg(feature = "profile-sidecar")]
+        phase_cpu.finish(frame_number);
         std::process::exit(code);
     }
     settings::save(&settings_path, &settings);
@@ -663,6 +675,8 @@ pub fn run(mut args: Vec<String>) {
     if let Some(before) = BEFORE_EXIT.get() {
         before(exit_code);
     }
+    #[cfg(feature = "profile-sidecar")]
+    phase_cpu.finish(frame_number);
     std::process::exit(exit_code);
 }
 

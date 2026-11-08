@@ -75,6 +75,23 @@ class ResolutionTests(unittest.TestCase):
 
 
 class DiagnosticComparisonTests(unittest.TestCase):
+    def test_attribution_collectors_are_non_timing_without_profile_receipts(self):
+        keys = ("ZAKURO_HOST_PROFILE", "ZAKURO_HOST_PROFILE_SIDECAR", "ZAKURO_HOST_PROFILE_SIDECAR_RECEIPT",
+                "ZAKURO_SHADER_ATTRIBUTION", "ZAKURO_SHADER_ATTRIBUTION_DRIVER_COMPILER_THREADS",
+                "ZAKURO_PHASE_CPU_OUT", "ZAKURO_PHASE_CPU_RUN_ID")
+        for key in keys:
+            with self.subTest(key=key):
+                baseline, candidate = fixture(), fixture()
+                for manifest in (baseline, candidate):
+                    for trial in manifest["trials"]:
+                        trial["environment"][key] = "declared-diagnostic"
+                for trial in candidate["trials"]:
+                    scale_metrics(trial, .1)
+                result = evaluate.compare_values(baseline, candidate)
+                self.assertEqual(result["status"], "incomparable")
+                self.assertFalse(result["target_met"])
+                self.assertTrue(any("NON-TIMING" in error for error in result["errors"]))
+
     def test_identical_diagnostics_cannot_become_throughput_wins(self):
         for marker in ("profile", "packet_artifact", "audio_report", "diagnostic_receipt", "environment"):
             with self.subTest(marker=marker):

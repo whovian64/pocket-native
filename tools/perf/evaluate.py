@@ -694,6 +694,9 @@ def run(args: argparse.Namespace) -> int:
                 result["diagnostic_backend"] = diagnostic_rules.stage_backend(diagnostic, trial)
             preload_path = Path(implementation["knobs"]["allocator"]["path"]) if allocator_before else None
             result["metrics"] = measure(command, trial, env, args.timeout, affinity, args.rss_limit_mib, preload_path)
+            if any(key in env for key in diagnostic_rules.ATTRIBUTION_ENV_KEYS):
+                manifest["evidence_class"] = diagnostic_rules.NON_TIMING
+                manifest["harness"].setdefault("diagnostic_profiles_sha256", observer_support_identity("diagnostic"))
             result["host_activity"] = result["metrics"].pop("host_activity")
             result["probe"] = probe_result(trial, args.frames)
             if args.batch_telemetry:

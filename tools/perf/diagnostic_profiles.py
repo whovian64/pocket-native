@@ -19,6 +19,13 @@ U64_MAX = 2**64 - 1
 NON_TIMING = "NON-TIMING diagnostic evidence; ineligible for throughput comparison"
 ENV_KEYS = {"ZAKURO_PROBE_AUDIO", "ZAKURO_PROBE_GEOMETRY", "ZAKURO_PACKET_CENSUS_FROM",
             "ZAKURO_TEXTURE_CACHE_STATS", "ZAKURO_TEXTURE_CACHE_TIMING"}
+# These source-bound collectors have separate artifact contracts. Presence
+# still excludes throughput claims, even without a diagnostic-profile receipt.
+ATTRIBUTION_ENV_KEYS = {
+    "ZAKURO_HOST_PROFILE", "ZAKURO_HOST_PROFILE_SIDECAR", "ZAKURO_HOST_PROFILE_SIDECAR_RECEIPT",
+    "ZAKURO_SHADER_ATTRIBUTION", "ZAKURO_SHADER_ATTRIBUTION_DRIVER_COMPILER_THREADS",
+    "ZAKURO_PHASE_CPU_OUT", "ZAKURO_PHASE_CPU_RUN_ID",
+}
 
 
 def require(condition, message):
@@ -405,7 +412,7 @@ def timing_reasons(manifest):
         if "diagnostics" in trial:
             reasons.append("observed diagnostic receipt/artifact")
         env = trial.get("environment", {})
-        if any(key in env for key in ENV_KEYS):
+        if any(key in env for key in ENV_KEYS | ATTRIBUTION_ENV_KEYS):
             reasons.append("diagnostic process environment")
         report = trial.get("probe", {}).get("report", {})
         if "audio" in report or "render_geometry_file" in report or trial.get("probe", {}).get("diagnostic_artifacts"):

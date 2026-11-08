@@ -875,7 +875,7 @@ impl Drop for Jobs {
 /// driver's compiler.
 pub(super) struct Compiler {
     pub(super) jobs: Jobs,
-    pub(super) thread: thread::JoinHandle<()>,
+    threads: Vec<thread::JoinHandle<()>>,
     pub(super) done: std::sync::mpsc::Receiver<(ProgramKey, Result<glow::Program, String>)>,
     pub(super) pending: rustc_hash::FxHashSet<ProgramKey>,
     pub(super) failed: rustc_hash::FxHashMap<ProgramKey, String>,
@@ -919,6 +919,9 @@ impl Compiler {
                         log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
                     let _ = ready.send(true);
+                    // Readiness must disconnect if another worker exits
+                    // before reporting, not stay held by the job loop.
+                    drop(ready);
                     // one job at a time off the shared queue, the lock let go
                     // before the build
                     while let Some(job) = received.take() {
@@ -942,15 +945,124 @@ impl Compiler {
                 threads.push(spawned);
             }
         }
-        drop(ready);
+        drop((ready, finished));
         // every thread that started says whether it has a context, the first
         // that has one is enough to go on
         let mut any = false;
         for _ in 0..threads.len() {
             any |= started.recv().unwrap_or(false);
         }
-        let thread = (!threads.is_empty()).then(|| threads.remove(0))?;
-        any.then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
+        Compiler { jobs, threads, done, pending: Default::default(), failed: Default::default() }.started(any)
+    }
+
+    fn started(self, any: bool) -> Option<Compiler> {
+        if any {
+            Some(self)
+        } else {
+            // Even a worker without a context may still be returning from
+            // startup. Retain its handle until it has actually ended.
+            self.stop();
+            None
+        }
+    }
+
+    /// Close the queue and result channel before joining every worker.
+    /// Called by the owner, never by one of these compiler threads.
+    pub(super) fn stop(self) {
+        let Compiler { jobs, threads, done, .. } = self;
+        drop((jobs, done));
+        for thread in threads {
+            // A panicked worker must not prevent joining the remaining ones.
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod compiler_worker_join_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}, mpsc};
+    use std::time::Duration;
+
+    /// Real Queue/Jobs shutdown and the production join path, without EGL.
+    /// Worker zero finishes first; the others cannot finish until released.
+    fn assert_all_joined(any_context: bool, panic_first: bool) {
+        let queue = Arc::new(Queue::new());
+        let jobs = Jobs(queue.clone());
+        let (finished, done) = mpsc::channel();
+        let (closed, saw_closed) = mpsc::channel();
+        let ended = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        let mut releases = Vec::new();
+        for index in 0..3 {
+            let (release, proceed) = mpsc::channel();
+            releases.push(release);
+            let (queue, closed, ended, finished) = (queue.clone(), closed.clone(), ended.clone(), finished.clone());
+            threads.push(thread::spawn(move || {
+                assert!(queue.take().is_none(), "Jobs must close and wake every queue waiter");
+                closed.send(index).unwrap();
+                // Dropping the test's release sender on failure also releases
+                // this worker, so an assertion cannot leave it blocked.
+                let _ = proceed.recv();
+                drop(finished);
+                ended.fetch_add(1, Ordering::Relaxed);
+                assert!(!(panic_first && index == 0), "authored worker panic");
+            }));
+        }
+        drop((closed, finished));
+        let compiler = Compiler { jobs, threads, done, pending: Default::default(), failed: Default::default() };
+        let (stopped, saw_stopped) = mpsc::channel();
+        let observed = ended.clone();
+        let stopper = thread::spawn(move || {
+            if any_context {
+                compiler.stop();
+            } else {
+                assert!(compiler.started(false).is_none());
+            }
+            stopped.send(observed.load(Ordering::Relaxed)).unwrap();
+        });
+        let mut workers = Vec::new();
+        for _ in 0..3 {
+            workers.push(saw_closed.recv_timeout(Duration::from_secs(2)).expect("queue waiter did not wake"));
+        }
+        workers.sort_unstable();
+        assert_eq!(workers, [0, 1, 2]);
+        releases[0].send(()).unwrap();
+        let premature = saw_stopped.recv_timeout(Duration::from_millis(100));
+        // Release every worker before asserting, including for the old
+        // retain/join-only-first behavior this fixture is meant to detect.
+        releases[1].send(()).unwrap();
+        releases[2].send(()).unwrap();
+        assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)), "shutdown returned with other workers blocked");
+        assert_eq!(saw_stopped.recv_timeout(Duration::from_secs(2)).unwrap(), 3);
+        stopper.join().unwrap();
+        assert_eq!(ended.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn stop_joins_every_worker_after_closing_the_queue() {
+        assert_all_joined(true, false);
+    }
+
+    #[test]
+    fn failed_start_joins_every_started_worker() {
+        assert_all_joined(false, false);
+    }
+
+    #[test]
+    fn a_panicked_worker_does_not_skip_the_other_joins() {
+        assert_all_joined(true, true);
+    }
+
+    #[test]
+    fn no_started_workers_returns_none() {
+        let (finished, done) = mpsc::channel();
+        drop(finished);
+        let compiler = Compiler {
+            jobs: Jobs(Arc::new(Queue::new())), threads: Vec::new(), done,
+            pending: Default::default(), failed: Default::default(),
+        };
+        assert!(compiler.started(false).is_none());
     }
 }
 
@@ -1676,6 +1788,33 @@ pub mod attribution {
 mod compiler_release_tests {
     use super::*;
 
+    /// Run alone in a fresh process with ZAKURO_COMPILERS=3 and attribution.
+    /// This is desktop context/shutdown evidence, never Android certification.
+    #[cfg(feature = "shader-attribution")]
+    #[test]
+    #[ignore = "requires a fresh dedicated process with ZAKURO_COMPILERS=3"]
+    fn explicit_stop_joins_three_live_compiler_workers() {
+        assert_eq!(compilers(), 3, "fixture requires ZAKURO_COMPILERS=3 before process start");
+        let mut gles = Gles::new().expect("actual EGL context required for the three-worker stop fixture");
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(gles.compiler.as_ref().expect("background compiler required").threads.len(), 3);
+            assert_eq!(attribution::snapshot().workers_live, 3, "three live application compiler workers required");
+            gles.worker.run(|| {
+                let gl = GL_CONTEXT.get().unwrap();
+                let program = build_program(gl, BINARY_VERTEX, BINARY_FRAGMENT, None).unwrap();
+                assert_eq!(red_pixels(gl, program), [255, 0, 0, 255].repeat(4).as_slice());
+                delete_program(gl, program);
+            });
+        }));
+        // Preserve explicit shutdown even if one of this fixture's assertions
+        // fails. No production Drop or unwind lifecycle is introduced.
+        gles.stop();
+        if let Err(panic) = checked { std::panic::resume_unwind(panic); }
+        assert!(gles.compiler.is_none());
+        assert_eq!(attribution::snapshot().workers_live, 0, "every application compiler worker ended before stop returned");
+        gles.stop();
+    }
+
     fn red_pixels(gl: &glow::Context, program: glow::Program) -> [u8; 16] {
         // SAFETY: called on the GL worker with its current context.
         unsafe {
@@ -1710,7 +1849,7 @@ mod compiler_release_tests {
     #[test]
     fn program_binary_none_and_some_paths_preserve_exact_pixels() {
         if separable() { eprintln!("monolithic binary cache fixture skipped in separable mode"); return; }
-        let gles = Gles::new().expect("actual EGL context required for binary cache lifecycle test");
+        let mut gles = Gles::new().expect("actual EGL context required for binary cache lifecycle test");
         gles.worker.run(|| {
             let gl = GL_CONTEXT.get().unwrap();
             let reads = BINARY_READS.get();
@@ -1735,6 +1874,9 @@ mod compiler_release_tests {
             }
             std::fs::remove_file(path).unwrap();
         });
+        // The standalone fixture must join its startup compiler before the
+        // process exits and the driver tears down its shared state.
+        gles.stop();
     }
 
     #[test]
