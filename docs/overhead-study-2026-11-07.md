@@ -689,3 +689,70 @@ at 181 passed, one failed and seven ignored; this separate public-source suite
 does not repair that admission. The ownership correction is proposed in the PR.
 No speedup, memory saving, audio/transition acceptance or performance-policy
 promotion follows from these component checks.
+
+## R50–R53 retained shaders, normal ELF mapping and admission checks
+
+A distinct two-position component question drains only the compiler worker's
+reusable standalone shader map at one settled boundary. The same worker,
+context and linked programs remain alive through both idle windows and the
+old/new/revisit sentinels. It does not issue `glReleaseShaderCompiler`, retire
+programs or restart workers. The frozen source builds; 15 new bridge cases,
+16 fixture cases and 16 guardian cases pass.
+
+CONTROL passes its scoped screen with 83 observed retained names before and
+after the boundary and zero deletion calls. Root reviews that positive actual
+population before separately admitting DRAIN. DRAIN's complete raw producer
+receipt records 83 names before, zero after and 83 returned deletion calls with
+no GL error. Both producers record 72 submitted/completed jobs, matching worker
+identity, retained linked programs and passing old/new/revisit pixels.
+
+**The question is overall HELD.** DRAIN's guardian fails a required `VmRSS`
+field read. Native exit is zero and cleanup has no errors or survivors, but the
+original raw status was not retained and the missing-field cause is unknown.
+Its final resource assignment stays unknown; no resource sample rejoin repairs
+the attempt. Both positions are consumed, with no replay or extension. The raw
+producer facts establish only component properties, not driver deletion
+finality, reclaimed bytes, resource effect or normal gameplay acceptance.
+
+A separate future diagnostic helper preserves bounded original status bytes,
+their captured-byte hash, original process identity and collection brackets,
+plus one later ordinary process-stat recheck. Twelve new synthetic cases pass.
+Missing, malformed or duplicate fields still force HELD. Later live, absent or
+exited process observations cannot repair the original sample or establish its
+cause. This helper is not applied to the closed R50 attempt.
+
+The first static normal-library mapping attempt holds before map creation:
+an empty `STT_FILE` marker precedes a local linked function, which the reader
+refuses to qualify. A separately reviewed reader revision accepts an unqualified
+local only with a nonempty, unambiguous linked name, preserving an empty source
+qualifier rather than inventing a filename. Seven new reader cases and three
+adapter revision cases pass; the unchanged five gzip cases are reused.
+
+One distinct bounded static parse then succeeds for the retained Omega Ruby
+normal x86 library, SHA256
+`4273b1ee54c26fb3ad628ce85d89412cf2203232b5dd6d0cdf17668c2077e1e1`.
+It maps all 394,748 RELA targets and complete ABI pointer roles, producing a
+101,110,113-byte logical map in a 7,517,835-byte gzip artifact with verified
+round-trip bytes and footer. This compresses an evidence artifact; it is not
+a RELR-linked library or a measured library-size saving. Twenty-nine synthetic
+cases pass against the actual loaded-slot integer validator. Five additional
+actual-parser cases cover 28 initializer, resolver, TLS and dependency/import
+counterexamples. No DSO is loaded; pair provenance, current-loader relocation,
+placement/unload behavior and performance remain unproven.
+
+C1's original eight-case screen proof is authenticated without replaying those
+tests. A new bounded read-only host qualification holds: its first window has
+host/SMT contention, the second fails thermal settling, and only the third
+passes. The required two consecutive passing windows are absent. No C1 timing
+process launches and no gate is weakened. Separately, a default-off raw ALSA
+observer has 16 passing formatter/bookkeeping cases. Full frontend integration
+is held on mismatched retained engine metadata; actual audio, endpoint/DAC
+progress, draining and quality remain unknown.
+
+Root receipts are retained under
+`build/optimization-round-20261106/continuous-r1/continuation-r1l/` in
+`resume-r51-20261108`, `resume-r52-20261108` and `resume-r53-20261108`.
+The principal closed shader decision is `R50-ROOT-ADJUDICATION.json` in the first
+directory. None of these checks establishes a game-level speedup, resource
+saving, hardware result or default promotion. Historical failures and holds
+remain unchanged.
