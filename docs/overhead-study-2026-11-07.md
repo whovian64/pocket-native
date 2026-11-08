@@ -1,6 +1,6 @@
 # Current overhead priorities and attribution limits
 
-The resumed study is based on runtime/compiler source at `6bcd630` and retained desktop evidence. The opt-in attribution implementation began at `e363601`; shutdown and phase-CPU telemetry are bound to `f800237`. Three distinct current-source diagnostic generations now provide scoped evidence; R7 required remaining-only offline finalization after a classification mismatch, and its original held receipt is preserved. No new game-level gain is accepted. The prior 170 timing executions and 15 held series remain closed/held.
+The resumed study is based on runtime/compiler source at `6bcd630` and retained desktop evidence. The opt-in attribution implementation began at `e363601`; shutdown and phase-CPU telemetry are bound to `f800237`. The numbered diagnostic generations below retain their exact source and scoped evidence; R7 required remaining-only offline finalization after a classification mismatch, and its original held receipt is preserved. Current C1 serialized sampled correctness and R39 normal shader-work observations have passed within their separate scopes; R39 also retains an exact-selection difference. No new game-level gain is accepted. The prior 170 timing executions and 15 held series remain closed/held.
 
 | Priority | Evidence and plausible benefit | Confidence and next validation |
 | --- | --- | --- |
@@ -8,7 +8,7 @@ The resumed study is based on runtime/compiler source at `6bcd630` and retained 
 | Shader compiler resources | Source requests unlimited driver compiler threads. Historical async/serialized anonymous-memory differences around 150–180 MiB change two switches and do not isolate ownership. | Source policy certain; actual driver behavior and removable cost unknown. Attribute first, then compare one hint with external workers/quality/cache fixed. |
 | Texture fingerprints | Retained streams describe substantial logical input; the later H1 capture times only bounded prefixes. This is not DRAM traffic or total exclusive CPU. | H1 does not establish a material removable endpoint cost; no hash rewrite is selected. |
 | ROM prefetch and GPU transport | Plausible shared-runtime costs; no current exclusive attribution or positive retirement churn. | Preserve default-off retirement and ordering; count actual work before redesign. |
-| Lookup and compiler ABI | Current R4/R5 callback/ABI sample rows support one narrow miss-outline source candidate; final-linked hit shape improves. Sample shares are not CPU fractions. | The candidate fails its once-only exact work/trace gate and remains private/held. Rejected cache/pointer-hoist/restrict/GPR/effect-IR families stay closed. |
+| Lookup and compiler ABI | Current R4/R5 callback/ABI sample rows support one narrow miss-outline source candidate; final-linked hit shape improves. Sample shares are not CPU fractions. | The historical async pair remains held. Current source passes semantic, final-linked and sampled serialized correctness gates; performance and default promotion remain held. Rejected cache/pointer-hoist/restrict/GPR/effect-IR families stay closed. |
 
 For every row, the removable exclusive critical-path fraction remains unknown; a numeric end-to-end Amdahl ceiling would be invented. Desktop GCC 16/NVIDIA behavior does not establish GCC 8/A55/Mali or physical RG DS Plus performance.
 
@@ -23,7 +23,7 @@ The fresh default Omega Ruby library was built with the current header, producti
 
 Both R2 captures remain held. The first guardian used path/hash-only pins where its stat check required enriched identities. The second native process exited with SIGXFSZ under the private guardian's inherited 64 MiB file limit before producing a probe report. Guest physical memory uses a 135/263 MiB shared memfd; sparse CPU fixtures reproduce the limit failure, though the exact native syscall was not traced. The corrected future driver passes 36 CPU fixtures with a separately pinned finite file/memfd limit. No further title process was launched in that R2 round. No complete current profile or revised numerical game-speed ceiling was obtained.
 
-The first resource-policy prototype requests exactly 1–4 driver compiler threads under the diagnostic feature while retaining the original unlimited production request and external worker selector. It passed feature-off compilation and 15 pure tests, including four new selector cases. It remains private, unapplied and **held**: the requested hint does not prove driver compliance, lower RAM, faster readiness, unchanged pictures/audio, or gameplay improvement. The later R4/R5 captures establish current shader work, but the G1 comparison remains held on actual driver ownership/lifetimes and complete per-program readiness/resource coverage. A benefit claim requires the corresponding equal-work controls and matrix gates.
+The first resource-policy prototype requests exactly 1–4 driver compiler threads under the diagnostic feature while retaining the original unlimited production request and external worker selector. It passed feature-off compilation and 15 pure tests, including four new selector cases. It remains private, unapplied and **held**: the requested hint does not prove driver compliance, lower RAM, faster readiness, unchanged pictures/audio, or gameplay improvement. The later R4/R5 captures establish current shader work. A new scoped black-box resource screen can measure total owned process resources without resolving proprietary driver-thread ownership; that ownership and hint compliance remain unknown. The next G1 screen requires prospectively bound equal compile work, demand/readiness and its specific quality/resource gates. Full gameplay or promotion claims additionally require the corresponding broader validation. Historical held comparisons remain unchanged.
 
 Optimization has resumed. The existing rejected/held candidate ledger is preserved; no new game-level gain is accepted. No merge is requested.
 
@@ -581,3 +581,61 @@ the broader matrix and physical-device gates remain held or unobserved.
 The next source task defines the smallest prospectively bounded G1
 resource/readiness/quality screen from these retained outcomes, without an
 endpoint extension or a general telemetry expansion.
+
+
+## R38–R39 normal startup compile-work screen
+
+A private default-off observer adds 23 fixed saturating compile-work counters
+and cached-stage producer references to the existing 128 flow records. The
+256-event and 256 KiB report limits are unchanged. It adds no GL call or draw
+hook. Twelve new reader cases, eight producer cases and one actual cache case
+pass; the real producer-output/reader boundary also passes. One output fixture
+was reinvoked after the root runner omitted its declared environment; the
+original missing-output failure is preserved. Feature-off checks, feature-on
+compilation and the diagnostic normal release build pass. Four newly compiled
+ordinary Rust units and the bytes of 83 inherited ordinary artifacts are
+accounted for; no PGO flags or sections are present.
+
+The diagnostic runtime SHA256 is
+`0ab3de7219100d2eca3b25cecd06b3fe3ba41c0212a08416cd273b183a197af9`;
+its private 348-file source manifest SHA256 is
+`0c24e5d331a677a80ff6e193991501fb1b55af66f595ff00e51f02da2402655b`.
+Six new guardian cases pass. Exactly two newly bounded normal-mode startup
+processes, MAX then hint 1, completed 900 loop batches with native/guardian exit
+0, clean resource observations and no cleanup survivors. Their allowance is
+consumed. Source, title library, seed, input, cache policy, external worker count
+and settings were fixed; only the requested hint and declared output identities
+differed. Hint issuance does not prove driver compliance.
+
+Both retained snapshots contain the same 70 complete canonical program keys.
+All 23 literal counters match per key and attempt, as do cached-stage references
+after mapping producer references through full keys rather than cross-process
+flow numbers. Both record 70 successful source-path monolithic builds/links,
+11 fresh vertex stages, 70 fresh fragment stages and 59 vertex cache hits, with
+no recorded build error or untracked work. These are non-atomic observations,
+not literal GLSL digests, complete GL dependency closure or late-worker finality.
+The first 256 of 830 events remain a truncated prefix; full fixed flow rows,
+not that prefix, supply the compile-work comparison.
+
+Readiness is unequal in the retained observations: MAX has 61 keys with a first
+exact selection, hint 1 has 60, and both have 62 with a first demand. The differing
+key was returned and consumed in both runs; MAX records two exact selections
+and ten compiling dispositions, while hint 1 records zero and twelve. This does
+not identify the cause or prove a visual regression, and it prevents an equal
+readiness claim. The separately selected endpoint is observed in both runs.
+
+Root inspected both guest images at the existing batch-600 readback in each
+run. They show the dark Continue menu and corresponding lower-screen artwork,
+with no obvious gross corruption in these samples. Correct fade/guest phase,
+GL-versus-CPU fallback, layout, scanout and full visual quality remain unknown.
+Sampled normal ALSA snapshots record 606/601 returned calls, 473,088/469,248
+accepted frames and 11/12 negative returns respectively. These do not establish
+acoustic quality, draining, physical routing or playback.
+
+G1 remains held. This pair establishes scoped budget viability and retained
+compile-work correspondence, with a readiness difference. Async guest-work
+nonrepeatability still prevents a total-process CPU effect claim. There is no
+accepted speedup, resource saving or default promotion. The next source task
+attempts a complete 70-key literal GLSL export from retained CPU inputs; it must
+reject missing or ambiguous keys. A future component experiment needs its own
+prospective question and admission, and cannot clear gameplay/audio/device gates.
