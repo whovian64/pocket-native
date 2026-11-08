@@ -282,3 +282,66 @@ The next existing Sol source lane prepares a minimal export of full program keys
 bound to the retained flow IDs, within the existing flow/event/report caps.
 Process-local IDs alone cannot match programs across processes. No extra native
 allowance or G1 promotion follows from the successful baseline observation.
+
+
+## R19 canonical program identity: checks pass, factor comparison held
+
+The private diagnostic now captures a complete canonical ProgramKey once at
+accepted async submission or synchronous attempt creation. It keeps all 30
+constant words, depth, every lighting word and the existing vertex key. The
+encoding is 136 + 4 × lighting-word-count bytes; it is not a literal GLSL digest.
+Process-local flow IDs still identify attempts only within their own process.
+
+Four new CPU cases passed: canonical encoding and boundary populations;
+duplicate/conflicting binding and distinct retry IDs; missing, unretained,
+oversized, busy and poisoned identities; and whole-report overflow before file
+creation with existing-file preservation. A feature-off compile check and the
+normal diagnostic release build passed. No earlier tests or native allowance
+were replayed. The source manifest is SHA-256
+`ba5a706c0fad8db50c091d488e22060f209c1d1bedc900e53d2fb3090eaf0afb`;
+the new diagnostic executable is
+`a730848a7c702b6629e462daaf0376771922639057f37a7e021836af632b4620`.
+
+The 128-flow, 256-lighting-word, 256-event and 256 KiB report caps remain fixed.
+A valid population that cannot fit the whole report produces no admissible
+partial key population. Individual keys are mutex-consistent; the complete
+key/lifecycle/counter snapshot remains non-atomic with completion unknown.
+Key equality alone does not prove identical GLSL, completed readiness, equal
+guest work, driver compliance or worker finality.
+
+Four new strict-reader CPU cases and four new factor-guardian CPU cases also
+passed. The reader requires the complete report grammar and canonical extension,
+all retained keys/points/buckets, and independently supplied source, binary,
+workload and live-process identity. It preserves unknowns and grants no readiness
+or performance acceptance.
+
+The first guardian invocation stopped before starting a game because an inherited
+status literal expected the earlier release-build receipt label. That failure is
+preserved. A new source-bound CPU regression evaluated the original predicate
+against the actual current build receipt and reproduced the rejection. The
+corrected exact predicate passed, while altered status/source/binary evidence
+remained rejected. Earlier CPU cases were reused rather than replayed.
+
+A separately frozen generation then started one normal MAX position with the
+same runtime, original DSO, seed, input, ordinary async settings, fresh-cache
+policy and external worker count. The game exited 0, but its guardian remained
+**HELD** on `missing or oversized maps` during shutdown. No second/factor process
+was launched, and the generation is closed. Cleanup recorded no errors or
+survivors. The rejected map bytes and their length were not retained: empty
+versus oversized maps, and the actual cause, remain unknown. A final sampled
+zero RSS with two threads only suggests an exit transition.
+
+An offline parse of the held trial's raw report, checked against its initial
+live identity and exact source/runtime/workload declarations, found 59 bound
+attempts with 59 distinct complete keys and no unretained or unknown keys.
+It records 59 successful build/finish/send observations, 58 consumptions,
+51 first demands and 50 first exact selections. These are **raw observations
+from a held trial**, not an admitted comparison or completed readiness proof.
+They neither clear the late observer failure nor reconstruct R18's missing keys.
+The event recorder still retains only its first 256 of 707 attempted events.
+
+The next source/CPU task adds failure-only map-read context without changing
+the rejection gate. No native retry, factor result, resource benefit, speedup,
+audio/visual acceptance, full-matrix or device claim follows. The known async
+baseline-oracle mismatch and all historical candidate/campaign holds remain
+binding. Public runtime behavior remains unchanged.
