@@ -7,6 +7,9 @@ set -euo pipefail
 # the open-source system font from Azahar's archives, generated from them
 # at build time rather than shipped
 FONT_URL=https://raw.githubusercontent.com/azahar-emu/azahar/c9e1e946a0b5d30a58ae14dee83c1f203a49622d/externals/open_source_archives/include/shared_font.app.romfs.h
+# and their open-source Mii parts, heads with no faces, for Mii heads where
+# the console's own aren't given
+MII_URL=https://raw.githubusercontent.com/azahar-emu/azahar/c9e1e946a0b5d30a58ae14dee83c1f203a49622d/externals/open_source_archives/include/mii.app.romfs.h
 
 rom="$1"
 keys="${2:-}"
@@ -83,6 +86,24 @@ cp LICENSE CREDITS.md assets/fonts/OFL.txt "$pn/"
 python3 tools/third_party.py "$pn/THIRD_PARTY_LICENSES.txt" >/dev/null
 aarch64-linux-gnu-strip -o "$pn/games/$id/title.so" "/work/recomp/$id/$id.so"
 cp /work/shared_font.bin "$pn/games/$id/sysdata/shared_font.bin"
+# Mii heads, experimental: the console's Mii parts from the kit's folder or
+# a game that carries them, Animal Crossing: New Leaf does, into every game
+# built, else Azahar's placeholder
+for own in CFL_Res.dat 00000000.app.romfs; do
+    [ -f "$own" ] && python3 tools/mii_parts.py "$own" /work/mii_parts.dat && break
+done
+[ -f "/work/recomp/$id/CFL_Res.dat" ] && [ ! -f /work/mii_parts.dat ] && cp "/work/recomp/$id/CFL_Res.dat" /work/mii_parts.dat
+if [ ! -f /work/mii_parts.dat ] && [ ! -f /work/mii_placeholder.dat ]; then
+    curl -sSfL "$MII_URL" -o /work/mii.app.romfs.h && python3 tools/mii_parts.py /work/mii.app.romfs.h /work/mii_placeholder.dat || echo "== no Mii placeholder, Mii heads stay blank"
+fi
+for sysdata in "$pn"/games/*/sysdata; do
+    if [ -f /work/mii_parts.dat ]; then
+        cp /work/mii_parts.dat "$sysdata/CFL_Res.dat"
+        rm -f "$sysdata/CFL_Res.placeholder.dat"
+    elif [ -f /work/mii_placeholder.dat ]; then
+        cp /work/mii_placeholder.dat "$sysdata/CFL_Res.placeholder.dat"
+    fi
+done
 cp "$game" "$pn/games/$id/game.3ds"
 rm -f /work/game.*
 # FAT cards and Windows take no colons and a few other characters in a name

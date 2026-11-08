@@ -227,6 +227,20 @@ as above.
 **The Windows build can't reach Docker.** Docker Desktop isn't running.
 Start it, wait until it says it's running, and build again.
 
+**Miis have no heads, or heads with no faces (experimental).** Mii heads
+are drawn from the console's Mii parts, which are Nintendo's and can't come
+with Pocket Native. The build looks for them and copies them into every game
+it builds:
+- a `CFL_Res.dat` from your own console, or the `00000000.app.romfs` Citra
+  and Azahar keep them in (`nand/.../title/0004009b/00010202/content/`), put
+  in the kit's folder;
+- a game you build that carries them, as Animal Crossing: New Leaf does.
+
+Without them, Miis get an open-source placeholder head with no face. After
+adding them, run `Rebuild all games` and copy the folder onto the card again.
+The game's log says which it used. This is experimental and not guaranteed
+to work in every game.
+
 **The build says the game is encrypted.** Put your console's
 `aes_keys.txt` next to the game or in the kit's folder and build again,
 or decrypt the dump first (GodMode9: Decrypt file).

@@ -74,22 +74,30 @@ pub fn bad_word_list() -> Vec<u8> {
 /// to the working directory and then to the user's data directory, as the
 /// shared font is.
 const MII_RESOURCE_PATHS: &[&str] = &["sysdata/CFL_Res.dat", "CFL_Res.dat"];
+/// and where the open-source placeholder the kit puts in their place is,
+/// heads with no faces.
+const MII_PLACEHOLDER_PATHS: &[&str] = &["sysdata/CFL_Res.placeholder.dat", "CFL_Res.placeholder.dat"];
 
 /// builds the Mii data archive, which holds the models and textures Miis
 /// are drawn from, the user's own when dumped. titles load it whole while
 /// starting up and give up when it is missing, an empty resource file lets
 /// them start, with nothing to draw a Mii from.
 pub fn mii_data(data_dir: Option<&std::path::Path>) -> Vec<u8> {
-    let dumped = MII_RESOURCE_PATHS
-        .iter()
-        .map(std::path::PathBuf::from)
-        .chain(MII_RESOURCE_PATHS.iter().filter_map(|path| Some(data_dir?.join(path))))
-        .find_map(|path| std::fs::read(path).ok().filter(|data| !data.is_empty()));
-    match &dumped {
-        Some(data) => log::info!("using the dumped Mii resources ({} KiB)", data.len() / 1024),
-        None => log::info!("no Mii resource file found, Miis will have nothing to be drawn from"),
+    let find = |paths: &[&str]| {
+        paths
+            .iter()
+            .map(std::path::PathBuf::from)
+            .chain(paths.iter().filter_map(|path| Some(data_dir?.join(path))))
+            .find_map(|path| std::fs::read(path).ok().filter(|data| !data.is_empty()))
+    };
+    let dumped = find(MII_RESOURCE_PATHS);
+    let placeholder = dumped.is_none().then(|| find(MII_PLACEHOLDER_PATHS)).flatten();
+    match (&dumped, &placeholder) {
+        (Some(data), _) => log::info!("Mii heads (experimental): using the dumped Mii resources ({} KiB)", data.len() / 1024),
+        (None, Some(_)) => log::info!("Mii heads (experimental): using the open-source placeholder, heads with no faces"),
+        (None, None) => log::info!("no Mii resource file found, Miis will have nothing to be drawn from"),
     }
-    let data = dumped.unwrap_or_else(|| vec![0u8; 0x1000]);
+    let data = dumped.or(placeholder).unwrap_or_else(|| vec![0u8; 0x1000]);
     romfs_build::build(&[BuildFile { path: "CFL_Res.dat".into(), data }])
 }
 
@@ -232,6 +240,12 @@ mod tests {
             image[start..start + entry.data_size as usize].to_vec()
         };
         assert_eq!(resource(mii_data(Some(&dir))), dumped);
+        // the placeholder only stands in for a dumped one
+        let placeholder = vec![0x5Au8; 0x800];
+        std::fs::write(dir.join("sysdata/CFL_Res.placeholder.dat"), &placeholder).unwrap();
+        assert_eq!(resource(mii_data(Some(&dir))), dumped);
+        std::fs::remove_file(dir.join("sysdata/CFL_Res.dat")).unwrap();
+        assert_eq!(resource(mii_data(Some(&dir))), placeholder);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(resource(mii_data(Some(&dir))).iter().all(|&byte| byte == 0));
     }

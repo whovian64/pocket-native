@@ -341,12 +341,34 @@ impl Title {
         Ok(code)
     }
 
+    /// the console's Mii parts (CFL_Res.dat), which a few titles carry among
+    /// their files, Animal Crossing: New Leaf among them.
+    pub fn mii_parts(&self) -> Option<Vec<u8>> {
+        let romfs = self.romfs.as_ref()?;
+        let mut dirs = vec![romfs.root().ok()?];
+        while let Some(dir) = dirs.pop() {
+            for (_, file) in romfs.files(&dir) {
+                if (0x54..1 << 22).contains(&file.data_size) && self.read_romfs(&file, 0, 0x54).is_some_and(|head| mii_parts(&head, file.data_size)) {
+                    return self.read_romfs(&file, 0, file.data_size as usize);
+                }
+            }
+            dirs.extend(romfs.subdirs(&dir).into_iter().map(|(_, dir)| dir));
+        }
+        None
+    }
+
     /// up to len bytes of a RomFS file from offset.
     pub fn read_romfs(&self, file: &FileEntry, offset: u64, len: usize) -> Option<Vec<u8>> {
         let romfs = self.romfs.as_ref()?;
         let len = len.min(file.data_size.saturating_sub(offset) as usize);
         self.read(romfs.data + file.data_offset + offset, len).ok()
     }
+}
+
+/// whether head starts Mii parts size bytes long: their version, then the
+/// twenty parts' offsets in order, the first just past them.
+pub fn mii_parts(head: &[u8], size: u64) -> bool {
+    head.len() >= 0x54 && u32_at(head, 0) == 0x0509_0014 && u32_at(head, 4) == 0x54 && (1..20).all(|k| u32_at(head, 4 * k) <= u32_at(head, 4 * k + 4)) && (u32_at(head, 80) as u64) < size
 }
 
 /// the level 3 tables of the RomFS whose IVFC header is at offset.
@@ -443,6 +465,21 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mii_parts_are_known_by_their_header() {
+        // the console's and Azahar's open-source placeholder's first words
+        let words = |words: [u32; 21]| words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<u8>>();
+        let console = words([0x0509_0014, 0x54, 0x7D0, 0x2CDC, 0x5F14, 0xA848, 0xA894, 0x76E80, 0x7C1C8, 0x7C790, 0x7DF24, 0x7E92C, 0xBCC1C, 0xC2964, 0xC31B0, 0xC5E68, 0xD0F80, 0xD9034, 0xD90F4, 0xFE2B8, 0xFF728]);
+        let placeholder = words([0x0509_0014, 0x54, 0x6C, 0x494, 0xA6C, 0xE94, 0xED4, 0x657C, 0x69D4, 0x6EA4, 0x6EF4, 0x710C, 0x7BBC, 0x7FE4, 0x8070, 0x8288, 0x84A0, 0x8634, 0x8694, 0x8CF8, 0x8E08]);
+        assert!(mii_parts(&console, 1_083_400));
+        assert!(mii_parts(&placeholder, 73_448));
+        assert!(!mii_parts(&console, 0xFF728));
+        let mut shuffled = console.clone();
+        shuffled[8..16].rotate_left(4);
+        assert!(!mii_parts(&shuffled, 1_083_400));
+        assert!(!mii_parts(&console[..0x50], 1_083_400));
+    }
 
     #[test]
     fn gba_virtual_console_code_is_told_apart() {

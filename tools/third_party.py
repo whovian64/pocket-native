@@ -26,6 +26,11 @@ Each game's sysdata/shared_font.bin is the open-source replacement for the
 externals/open_source_archives, which B3n30's citra_system_archives (GPL-2.0)
 generated from Montserrat (SIL Open Font License 1.1) and GNU Unifont 10.0.05
 (GPL-2.0-or-later with the GNU font embedding exception).
+
+A game's sysdata/CFL_Res.placeholder.dat, where there is one, is the
+open-source placeholder for the 3DS's Mii parts, taken at build time from the
+same archives, which citra_system_archives (GPL-2.0) generated. A
+sysdata/CFL_Res.dat came from the player's own console or game.
 """
 
 

@@ -137,6 +137,10 @@ pub fn build(rom: &Path, options: &Options, events: &(dyn Fn(Event) + Sync)) -> 
     events(Event::Note(format!("compiling {} files, {} at a time, the longest part", generated.sources.len(), compile::jobs())));
     compile::compile(&generated.dir, &generated.sources, &library, &progress)?;
     events(Event::Built { library: library.clone(), took: start.elapsed() });
+    if let Some(parts) = generated.title.mii_parts() {
+        std::fs::write(generated.dir.join("CFL_Res.dat"), parts).map_err(|error| format!("could not write the Mii parts, {error}"))?;
+        events(Event::Note("the game carries the console's Mii parts, kept for Mii heads (experimental)".to_owned()));
+    }
     if options.dir.is_some() {
         return Ok(library);
     }
