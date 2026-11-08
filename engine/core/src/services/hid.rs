@@ -74,6 +74,10 @@ pub struct InputState {
     /// how far the console is tilted, for the motion sensors, -1.0 to 1.0
     /// on each axis, x to the right and y down as on the screen.
     pub tilt: (f32, f32),
+    /// a real device's motion sensors, which stand in for the tilt: the
+    /// acceleration in g and the rotation in degrees a second, on the
+    /// 3DS's axes, x to the right, y out of the screen and z down it.
+    pub motion: Option<([f32; 3], [f32; 3])>,
 }
 
 #[derive(Default)]
@@ -325,8 +329,13 @@ pub fn update(system: &mut System, input: InputState) {
     let turn = [-y / length * MOST_TILT, 0.0, x / length * MOST_TILT];
     let before = std::mem::replace(&mut system.services.hid.turn, turn);
     let back = turn.map(|c| -c);
-    let gravity = turned([0.0, -ONE_G, 0.0], back).map(|c| c as i16);
-    let rate = turned(std::array::from_fn(|i| (turn[i] - before[i]).to_degrees() * 60.0 * ONE_DPS), back).map(|c| c as i16);
+    let (gravity, rate) = match input.motion {
+        Some((acceleration, rotation)) => (acceleration.map(|c| (c * ONE_G) as i16), rotation.map(|c| (c * ONE_DPS) as i16)),
+        None => (
+            turned([0.0, -ONE_G, 0.0], back).map(|c| c as i16),
+            turned(std::array::from_fn(|i| (turn[i] - before[i]).to_degrees() * 60.0 * ONE_DPS), back).map(|c| c as i16),
+        ),
+    };
     let hid = &system.services.hid;
     if hid.accelerometer_users > 0 {
         let index = (hid.accelerometer_index + 1) % ACCELEROMETER_SAMPLES;

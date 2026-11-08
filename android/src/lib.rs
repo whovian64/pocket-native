@@ -19,7 +19,7 @@
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
 use std::time::Duration;
 
 use android_activity::input::{Axis, InputEvent, KeyAction, Keycode, MotionAction};
@@ -87,10 +87,15 @@ fn android_main(app: AndroidApp) {
     ACTIVITY.store(app.activity_as_ptr(), Ordering::Relaxed);
     VM.store(app.vm_as_ptr(), Ordering::Relaxed);
     let _ = pocket_native::BEFORE_EXIT.set(finish);
+    {
+        let pad = pad.clone();
+        let _ = std::thread::Builder::new().name("motion".into()).spawn(move || read_motion(&pad));
+    }
     let rom = folder.join("game.3ds").to_string_lossy().into_owned();
     let game = std::thread::Builder::new().name("game".into()).spawn(move || pocket_native::run(vec![rom])).expect("a thread for the game");
 
     let mut window = Some(window);
+    let mut last_size = None;
     loop {
         app.poll_events(Some(Duration::from_millis(8)), |event| match event {
             // the app away holds the game still, back it goes on
@@ -114,6 +119,12 @@ fn android_main(app: AndroidApp) {
         });
         // the window's size now, which turns with the phone
         let size = window.as_ref().map(|window| (window.width(), window.height()));
+        // which way the device is turned, for the motion sensors' axes
+        if let Some((width, height)) = size.filter(|&size| last_size != Some(size)) {
+            last_size = size;
+            PORTRAIT.store(height > width, Ordering::Relaxed);
+            ROTATION.store(display_rotation(&app), Ordering::Relaxed);
+        }
         if let (Ok(mut events), Some(size)) = (app.input_events_iter(), size) {
             while events.next(|event| handle(event, &pad, size)) {}
         }
@@ -428,4 +439,80 @@ extern "system" fn touched(_env: JNIEnv, _class: JClass, pressed: jboolean, x: j
     let (left, top) = ((width - 320.0 * scale) / 2.0, (height - 240.0 * scale) / 2.0);
     let at = ((x - left) / (320.0 * scale), (y - top) / (240.0 * scale));
     input::share().lock().unwrap().second_touch = (pressed == JNI_TRUE).then_some(at);
+}
+
+/// the display's quarter turns from the device's natural orientation, which
+/// its sensors' axes keep to, and whether the window is upright.
+static ROTATION: AtomicU8 = AtomicU8::new(0);
+static PORTRAIT: AtomicBool = AtomicBool::new(false);
+
+/// the display's rotation, Display.getRotation, 0 when it cannot be asked.
+fn display_rotation(app: &AndroidApp) -> u8 {
+    // SAFETY: the activity's VM and activity, which live as long as the app
+    let Ok(vm) = (unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }) else { return 0 };
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+    let Ok(mut env) = vm.attach_current_thread_permanently() else { return 0 };
+    let rotation = (|| -> jni::errors::Result<i32> {
+        let manager = env.call_method(&activity, "getWindowManager", "()Landroid/view/WindowManager;", &[])?.l()?;
+        let display = env.call_method(&manager, "getDefaultDisplay", "()Landroid/view/Display;", &[])?.l()?;
+        env.call_method(&display, "getRotation", "()I", &[])?.i()
+    })();
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    rotation.unwrap_or(0) as u8
+}
+
+/// the device's accelerometer and gyroscope into the pad, on the 3DS's axes,
+/// as long as the app runs: the game's motion sensors read them in place of
+/// tilting with L2 and the right stick. Nothing happens on a device without.
+fn read_motion(pad: &std::sync::Mutex<Pad>) {
+    use android_activity::ndk_sys as sys;
+    // SAFETY: the NDK's sensor calls on a looper of this thread's own, the
+    // queue read into an event that outlives each call
+    unsafe {
+        #[allow(deprecated)]
+        let manager = sys::ASensorManager_getInstance();
+        let looper = sys::ALooper_prepare(sys::ALOOPER_PREPARE_ALLOW_NON_CALLBACKS as i32);
+        if manager.is_null() || looper.is_null() {
+            return;
+        }
+        let queue = sys::ASensorManager_createEventQueue(manager, looper, 0, None, std::ptr::null_mut());
+        if queue.is_null() {
+            return;
+        }
+        let mut found = 0;
+        for kind in [sys::ASENSOR_TYPE_ACCELEROMETER, sys::ASENSOR_TYPE_GYROSCOPE] {
+            let sensor = sys::ASensorManager_getDefaultSensor(manager, kind as i32);
+            if !sensor.is_null() && sys::ASensorEventQueue_registerSensor(queue, sensor, sys::ASensor_getMinDelay(sensor).max(10_000), 0) >= 0 {
+                found += 1;
+            }
+        }
+        log::info!("motion sensors: {found} of the accelerometer and gyroscope");
+        if found == 0 {
+            return;
+        }
+        let (mut acceleration, mut rotation) = ([0.0, -1.0, 0.0], [0.0; 3]);
+        let mut event: sys::ASensorEvent = std::mem::zeroed();
+        loop {
+            sys::ALooper_pollOnce(100, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+            let (turned, portrait) = (ROTATION.load(Ordering::Relaxed), PORTRAIT.load(Ordering::Relaxed));
+            let mut changed = false;
+            while sys::ASensorEventQueue_getEvents(queue, &mut event, 1) > 0 {
+                let [x, y, z, ..] = event.__bindgen_anon_1.__bindgen_anon_1.data;
+                let axes = input::to_3ds([x, y, z], turned, portrait);
+                if event.type_ == sys::ASENSOR_TYPE_ACCELEROMETER as i32 {
+                    // m/s² to g, the reaction to gravity the other way round
+                    acceleration = axes.map(|c| c / -sys::ASENSOR_STANDARD_GRAVITY as f32);
+                    changed = true;
+                } else if event.type_ == sys::ASENSOR_TYPE_GYROSCOPE as i32 {
+                    rotation = axes.map(f32::to_degrees);
+                    changed = true;
+                }
+            }
+            if changed {
+                pad.lock().unwrap().motion = Some((acceleration, rotation));
+            }
+        }
+    }
 }

@@ -37,8 +37,9 @@ pull requests:
   its pad ([#17](https://github.com/whovian64/pocket-native/pull/17)),
   every toggle shown in the advanced settings ([#16](https://github.com/whovian64/pocket-native/pull/16))
   and the tables buffer bound from the start ([#28](https://github.com/whovian64/pocket-native/pull/28))
-- **Sekyleky**: the New 3DS system modes' memory ([#33](https://github.com/whovian64/pocket-native/pull/33))
-  and Stretch filling both displays on two-screen handhelds ([#32](https://github.com/whovian64/pocket-native/pull/32))
+- **Sekyleky**: the New 3DS system modes' memory ([#33](https://github.com/whovian64/pocket-native/pull/33)),
+  Stretch filling both displays on two-screen handhelds ([#32](https://github.com/whovian64/pocket-native/pull/32))
+  and the device's motion sensors on Android ([#53](https://github.com/whovian64/pocket-native/pull/53))
 - **kxn203**: game profiles ([#3](https://github.com/whovian64/pocket-native/pull/3))
   and the script that rebuilds every game built before ([#34](https://github.com/whovian64/pocket-native/pull/34))
 - **Kvn0l**: the Monster Hunter 4 Ultimate profile

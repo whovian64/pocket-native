@@ -63,6 +63,8 @@ pub struct Pad {
     pub osh_pb: bool,
     /// a finger on a second window's screen, across and down it from 0 to 1.
     pub second_touch: Option<(f32, f32)>,
+    /// the device's own motion sensors, as InputState's motion has them.
+    pub motion: Option<([f32; 3], [f32; 3])>,
 }
 
 /// the pad a program around the frontend fills, in place of evdev's.
@@ -566,6 +568,21 @@ pub fn parse_keys(spec: &str) -> Vec<(u64, HashSet<u16>)> {
         .collect()
 }
 
+/// a vector from an Android device's sensors, on its axes in its natural
+/// orientation, on the 3DS's instead: the device turned by rotation quarter
+/// turns, as its display reports, and held across or upright, the way
+/// Azahar turns them.
+pub fn to_3ds([x, y, z]: [f32; 3], rotation: u8, portrait: bool) -> [f32; 3] {
+    // across and up the screen as shown, out of it
+    let (across, up) = match rotation % 4 {
+        0 => (x, y),
+        1 => (y, -x),
+        2 => (-x, -y),
+        _ => (-y, x),
+    };
+    if portrait { [-across, z, up] } else { [across, z, -up] }
+}
+
 /// a stick's position from -1 to 1, nothing near the middle.
 pub fn stick(value: i32) -> f32 {
     if value.abs() < 200 { 0.0 } else { (value as f32 / STICK).clamp(-1.0, 1.0) }
@@ -733,6 +750,22 @@ mod tests {
         assert!(!keys.contains(&UP));
         assert!(!keys.contains(&DOWN));
         assert!(keys.contains(&RIGHT));
+    }
+
+    #[test]
+    fn sensors_turn_to_the_3ds_axes() {
+        use super::to_3ds;
+        // lying on a table, screen up: out of the screen, whichever way it turned
+        for rotation in 0..4 {
+            assert_eq!(to_3ds([0.0, 0.0, 9.8], rotation, rotation % 2 == 0)[1], 9.8);
+        }
+        // held across, screen facing the player, gravity's reaction up the
+        // screen whichever way the device's natural axes lie: down the 3DS's z
+        assert_eq!(to_3ds([0.0, 9.8, 0.0], 0, false), [0.0, 0.0, -9.8]);
+        assert_eq!(to_3ds([-9.8, 0.0, 0.0], 1, false), [0.0, 0.0, -9.8]);
+        assert_eq!(to_3ds([9.8, 0.0, 0.0], 3, false), [0.0, 0.0, -9.8]);
+        // as Azahar has a phone in portrait
+        assert_eq!(to_3ds([1.0, 2.0, 3.0], 0, true), [-1.0, 3.0, 2.0]);
     }
 
     #[test]
