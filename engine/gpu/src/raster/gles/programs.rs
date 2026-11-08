@@ -914,8 +914,14 @@ impl Compiler {
                     // a driver that can compile in threads of its own may use as
                     // many as it likes for this context's programs
                     if gl.supported_extensions().contains("GL_KHR_parallel_shader_compile") {
+                        #[cfg(not(feature = "shader-attribution"))]
+                        let requested = u32::MAX;
+                        #[cfg(feature = "shader-attribution")]
+                        let requested = attribution::driver_compiler_threads();
                         // SAFETY: the context is current, the extension names it
-                        unsafe { observe!(ParallelHint, &gl, u32::MAX as u64, gl.max_shader_compiler_threads(u32::MAX)) };
+                        unsafe { observe!(ParallelHint, &gl, requested as u64, gl.max_shader_compiler_threads(requested)) };
+                        #[cfg(feature = "shader-attribution")]
+                        log::info!("diagnostic driver compiler hint: requested={requested} worker={index} tid={} opaque_context={:x}; extension=GL_KHR_parallel_shader_compile; driver_compliance=unknown", attribution::thread(), &gl as *const glow::Context as usize);
                         log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
                     let _ = ready.send(true);
@@ -1100,6 +1106,30 @@ pub mod attribution {
     /// an event's outcome when its span ended without one, by an early
     /// return or an unwind.
     pub const NO_OUTCOME: u32 = u32::MAX;
+
+    fn parse_driver_compiler_threads(value: Option<&std::ffi::OsStr>) -> Result<u32, ()> {
+        match value {
+            None => Ok(u32::MAX),
+            Some(value) => match value.to_str() {
+                Some("max") => Ok(u32::MAX),
+                Some("1") => Ok(1),
+                _ => Err(()),
+            },
+        }
+    }
+
+    // Diagnostic only: this changes a hint, not the external worker count or
+    // any cache/quality setting. Absence or invalid input preserves the default.
+    pub(super) fn driver_compiler_threads() -> u32 {
+        static REQUESTED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *REQUESTED.get_or_init(|| {
+            let value = std::env::var_os("ZAKURO_SHADER_ATTRIBUTION_DRIVER_COMPILER_THREADS");
+            parse_driver_compiler_threads(value.as_deref()).unwrap_or_else(|()| {
+                log::warn!("invalid ZAKURO_SHADER_ATTRIBUTION_DRIVER_COMPILER_THREADS; expected exactly max or 1; retaining unlimited request");
+                u32::MAX
+            })
+        })
+    }
     /// outcomes of build, stage and graphics events.
     pub const LOADED: u32 = 1;
     pub const COMPILED: u32 = 2;
@@ -1641,6 +1671,19 @@ pub mod attribution {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn diagnostic_driver_hint_selects_only_unlimited_or_one() {
+            assert_eq!(parse_driver_compiler_threads(None), Ok(u32::MAX));
+            for (value, expected) in [("max", u32::MAX), ("1", 1)] {
+                assert_eq!(parse_driver_compiler_threads(Some(std::ffi::OsStr::new(value))), Ok(expected));
+            }
+            for value in ["", "0", "2", "3", "4", "01", "+1", " 1", "1 ", "1\n", "unlimited", "4294967295"] {
+                assert_eq!(parse_driver_compiler_threads(Some(std::ffi::OsStr::new(value))), Err(()));
+            }
+            #[cfg(unix)]
+            assert_eq!(parse_driver_compiler_threads(Some(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"\xff"))), Err(()));
+        }
 
         #[test]
         fn an_event_keeps_its_exact_boundaries_and_threads() {

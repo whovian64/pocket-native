@@ -133,6 +133,18 @@ credited as less CPU work. Probe runs are uncapped and suppress device audio;
 they do not measure paced interactive FPS, audio continuity or KMS display
 latency. Those still require a separate interactive/device test.
 
+The default-off `shader-attribution` build feature also accepts
+`ZAKURO_SHADER_ATTRIBUTION_DRIVER_COMPILER_THREADS=1` or `max`. It changes only
+the hint issued on an extension-bearing compiler context. Absence or invalid
+input retains the existing unlimited request; invalid input logs a warning.
+The external worker count, cache policy and shader quality settings remain
+separate. The diagnostic log records the requested value and context/thread;
+issuance does not prove that the driver obeyed it. The recorder still retains
+at most 256 events and does not establish worker finality or exact-program
+readiness. Use these instrumented builds for diagnostics, not timing acceptance.
+The evaluator already rejects this environment control as non-timing even when
+there is no sidecar receipt. No default promotion or benefit is established.
+
 Whole-process CPU/wall/RSS measurements include startup, loading, compilation,
 screenshots, reporting and exit. `--batch-telemetry --measure-start 1800`
 additionally selects the zero-based batch interval `[1800, frames)` without

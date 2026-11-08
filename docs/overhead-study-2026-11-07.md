@@ -345,3 +345,62 @@ the rejection gate. No native retry, factor result, resource benefit, speedup,
 audio/visual acceptance, full-matrix or device claim follows. The known async
 baseline-oracle mismatch and all historical candidate/campaign holds remain
 binding. Public runtime behavior remains unchanged.
+
+
+## R20–R25 normal one-thread feasibility and a terminal observer repair
+
+Five new CPU cases validate failure-only map-read context without changing the
+original map predicate or exit classifier. The helper preserves the original
+exception and records a bounded byte length/hash plus explicitly non-atomic
+identity observations. It reads cached returncode without polling/reaping, and
+adds no success-path clocks or proc reads. A separate CPU child fixture reached
+an independently observed zombie state, returned an empty maps buffer, and
+retained the original rejection. This proved a possible mechanism, not R19's
+unrecorded cause.
+
+A new MAX-only normal diagnostic then passed with native/guardian exit 0 and
+clean cleanup. Its strict report retained the same 59 complete keys, with
+56 build results, 55 sends/consumptions, 51 demands and 47 exact selections at
+the non-atomic snapshot. The rejection did not recur; R19 remained held.
+This was a separate diagnostic, not a prospective factor-control position.
+
+The first separately frozen one-thread feasibility observation exited native 0
+but remained observer-held. Its new context records an exact empty maps buffer
+and the same PID/start time in state Z both before and after the read. In this
+occurrence, the guardian had continued to live-address-space checks after it
+had already observed a terminal task. Historical failures with no raw map
+context retain their unknown cause and original status.
+
+A narrow private guardian repair routes an already terminal sample through the
+unchanged original exit classifier before live mapping checks. Live samples
+retain their existing checks; exit 0, live DSO identity, artifact/source checks
+and cleanup remain required. Its new source regression reproduced the missing
+control point before the repair and passed afterward, including live-state,
+identity-reuse and rejected-classifier boundaries. A new actual zombie-child
+fixture also passed through that original classifier without reaping early.
+No old failed trial was reclassified.
+
+One new one-thread feasibility generation then completed native/guardian 0,
+600 actual batches and clean cleanup. Its source/live-bound report matches all
+59 prospectively pinned canonical keys, with 59 build/finish/send observations,
+58 consumptions, 51 first demands and 49 first exact selections. These are
+scoped feasibility observations; missing selections, worker finality and full
+readiness remain unresolved. There is no prospective paired performance or
+resource result, driver-compliance proof, audio/visual acceptance, matrix or
+physical-device clearance. The async baseline oracle and all earlier holds
+remain unchanged.
+
+The smallest selector is now included in the public default-off
+`shader-attribution` feature for reproducibility. It accepts exactly `max` or
+`1`, caches the request once per process, and preserves the unlimited request
+when absent or invalid. External worker count, cache policy, quality settings
+and the 256-event cap are unchanged. The public integration passed its GPU test
+build, feature-off compile check and one exact parser case. Its evaluator
+non-timing exclusion was already present and was not modified. The normal
+feasibility captures used the separately pinned private diagnostic runtime;
+no game run of this public integration or default promotion is claimed.
+
+Next, a bounded source/retained-artifact analysis checks the actual shutdown and
+snapshot order and the demanded keys without selections. It will define the
+smallest remaining readiness evidence for G1. Source work continues; there is
+no new timing or native allowance merely because publication is complete.
