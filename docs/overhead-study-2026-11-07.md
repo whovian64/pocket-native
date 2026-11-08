@@ -526,3 +526,58 @@ existing common-serialized lane only. The historical async C1 failure remains
 held. No default promotion, timing, speedup, audio, transition, full-matrix or
 physical-device acceptance follows. Startup/GLES compiler cost remains the next
 performance priority; its next experiment needs its own scoped admission.
+
+
+## R36–R37 normal startup endpoint and sampled ALSA returns
+
+The retained R15/R16 inputs already answer the fixed 18-program compiler
+component question. Their source generation, actual compile/cache functions,
+key hashing and frozen inputs still match. No component replay was justified.
+The earlier resource observations remain descriptive single processes, and the
+normal startup key under investigation was outside those 18 inputs.
+
+A minimal private, default-off normal-audio observer adds bounded relaxed
+counters after the unchanged ALSA write return. It adds no backend call, drain,
+join, pacing change, real-time clock, allocation or lock. The main thread writes
+an exclusive process-bound sidecar after the existing GPU stop; its independent
+loads do not establish coherent totals or shutdown finality. Five source/writer
+CPU cases, feature-off compilation, the normal release build and static build
+checks passed. Eleven new fixed-endpoint guardian/audio-reader CPU cases also
+passed. These checks establish observer plumbing, not playback quality.
+
+One distinct prospectively frozen hint-1 normal startup then completed exactly
+900 batches, with native/guardian exit zero, live runtime/DSO/environment binding
+and clean cleanup. Only the quit schedule moved from 600 to 900; the entire
+original guest-input script, external compiler count, async policy, seed,
+settings and cache policy remained fixed. No old position was replayed.
+The selected complete canonical shader key recorded successful first exact
+selection entirely before the existing after-loop monotonic bracket.
+
+The bounded full-key report retained 70 attempts for 70 distinct keys, with no
+unretained population, conflicting key, unknown-clock or saturated counter.
+All 70 recorded successful build, finish and send before the endpoint. Eight
+preloads had no demand; 62 keys recorded first demand and 61 first exact
+selection. One later demanded key recorded two CPU-compiling outcomes and a
+successful send, but no consumer or selection observation. Missing observation
+is neither cancellation nor proof of a rendering failure. The unchanged event
+recorder retained its first 256 of 830 events and dropped 574; that prefix is
+not used to represent later work.
+
+The bound audio snapshot recorded 617 returned calls, 470,016 accepted frames,
+12 negative returns, zero zero-returns and no invalid-positive/overflow flag.
+This establishes sampled normal ALSA-return acceptance only. Negative error
+codes, coherent stream conservation, drain, acoustic quality, physical routing
+and playback remain unobserved. Configuration/source inspection identifies the
+normal `default` device and a PipeWire default configuration, without proving
+the live physical endpoint. It does not establish null-device playback.
+
+The single-process allowance is consumed and closed. There is no in-run
+600-batch snapshot, so no claim that selection occurred specifically during
+600–900 or that extra batches caused the result. Exact selection is before
+submission and does not establish pixels or scanout. This is non-timing evidence,
+with no G1 factor effect, resource saving, gameplay correctness or speedup claim.
+G1 promotion, old async/PGO results, closed campaigns, audio quality, transitions,
+the broader matrix and physical-device gates remain held or unobserved.
+The next source task defines the smallest prospectively bounded G1
+resource/readiness/quality screen from these retained outcomes, without an
+endpoint extension or a general telemetry expansion.
