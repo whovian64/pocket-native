@@ -423,15 +423,11 @@ impl Memory {
     /// zeroes a physical range, for BSS and freshly allocated pages.
     pub fn zero_physical(&mut self, paddr: u32, size: u32) -> bool {
         self.note_physical(paddr, size);
-        match self.phys.host_slice_mut(paddr, size) {
-            Some(slice) => {
-                slice.fill(0);
-                true
-            }
-            None => {
-                log::error!("zeroing unbacked physical address 0x{paddr:08X}");
-                false
-            }
+        if self.phys.zero(paddr, size) {
+            true
+        } else {
+            log::error!("zeroing unbacked physical address 0x{paddr:08X}");
+            false
         }
     }
 
