@@ -745,13 +745,40 @@ tests. A new bounded read-only host qualification holds: its first window has
 host/SMT contention, the second fails thermal settling, and only the third
 passes. The required two consecutive passing windows are absent. No C1 timing
 process launches and no gate is weakened. Separately, a default-off raw ALSA
-observer has 16 passing formatter/bookkeeping cases. Full frontend integration
+observer has 16 passing formatter/bookkeeping cases. The initial frontend check
 is held on mismatched retained engine metadata; actual audio, endpoint/DAC
 progress, draining and quality remain unknown.
 
+A distinct R54 source check uses matching retained local dependencies with an
+explicit recursive closure and builds fresh public GPU/core metadata before
+checking frontend metadata with the observer off and on. All four checks pass.
+One source-export preparation failure, before any compiler launches, remains
+preserved: the root runner confused Git's regular-file mode with the archive's
+permission bits. The corrected continuation retains exact source hashes,
+regular-file/path checks and all resource floors. Its 102-file source export,
+metadata and full logs remain on bounded ephemeral tmpfs; only receipt hashes
+are durably retained. These are direct `rustc` checks, not Cargo feature-resolver,
+linking, actual ALSA or device evidence.
+
+The proposed public `audio-progress-observer` feature is default off and limited
+to Linux with 64-bit pointers. Runtime activation also requires
+`ZAKURO_AUDIO_PROGRESS_OBSERVER=1` and a valid
+`ZAKURO_AUDIO_PROGRESS_RUN_ID`. It keeps returned-write and recovery error
+classes separate and records raw delay validity, optional availability/state/
+buffer observations, checked monotonic brackets and stream/recovery identity.
+Delay is not buffer fill, accepted frames are not DAC progress, and sequential
+queries are not an atomic device snapshot.
+
+There are at most two bounded observations per process: after opening and before
+the sound thread exits. The thread has no new join or drain barrier; a missing
+end remains unknown. Pacing and recovery behavior are unchanged. Three new
+evaluator cases pass: observer configuration is explicitly NON_TIMING, including
+conservative exclusion of incomplete or malformed setup. No host, oracle or
+quality gate is loosened, and no actual audio run is admitted by these checks.
+
 Root receipts are retained under
 `build/optimization-round-20261106/continuous-r1/continuation-r1l/` in
-`resume-r51-20261108`, `resume-r52-20261108` and `resume-r53-20261108`.
+`resume-r51-20261108` through `resume-r54-20261108`.
 The principal closed shader decision is `R50-ROOT-ADJUDICATION.json` in the first
 directory. None of these checks establishes a game-level speedup, resource
 saving, hardware result or default promotion. Historical failures and holds

@@ -7,6 +7,10 @@ use std::sync::mpsc;
 
 use zakuro_core::AUDIO_SAMPLE_RATE;
 
+#[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+#[path = "audio_progress_observer.rs"]
+mod audio_progress_observer;
+
 /// where the sound goes: how many frames it holds that have not played yet,
 /// and taking more, all of them before it returns.
 trait Device {
@@ -29,6 +33,8 @@ trait Device {
     }
     /// stops while no sound comes, the game paused, or starts again.
     fn idle(&mut self, _idle: bool) {}
+    #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+    fn observe_phase(&mut self, _phase: audio_progress_observer::Phase) {}
 }
 
 pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
@@ -37,6 +43,8 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
             for _ in samples {}
             return;
         };
+        #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+        device.observe_phase(audio_progress_observer::Phase::Opened);
         let mut pacer = Pacer::new(device.target(), device.catch_up());
         let mut since_log = std::time::Instant::now();
         loop {
@@ -74,6 +82,8 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
                 since_log = std::time::Instant::now();
             }
         }
+        #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+        device.observe_phase(audio_progress_observer::Phase::BeforeSoundThreadExit);
     });
 }
 
@@ -138,6 +148,8 @@ struct Alsa {
     write: unsafe extern "C" fn(*mut u8, *const u8, u64) -> i64,
     recover: unsafe extern "C" fn(*mut u8, i32, i32) -> i32,
     delay: unsafe extern "C" fn(*mut u8, *mut i64) -> i32,
+    #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+    progress: Option<audio_progress_observer::Observer>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -166,7 +178,12 @@ impl Alsa {
                 get(pcm, &mut buffer, &mut period);
                 log::info!("sound at {} Hz, the device buffering {buffer} samples in periods of {period}", AUDIO_SAMPLE_RATE.round());
             }
-            Some(Alsa { _library: alsa, pcm, write, recover, delay })
+            #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+            let progress = audio_progress_observer::Observer::configured(&alsa);
+            Some(Alsa { _library: alsa, pcm, write, recover, delay,
+                #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+                progress,
+            })
         }
     }
 }
@@ -199,14 +216,28 @@ impl Device for Alsa {
         while done < frames.len() {
             // SAFETY: the frames left, interleaved stereo as the device was set up
             let written = unsafe { (self.write)(self.pcm, frames[done..].as_ptr().cast(), (frames.len() - done) as u64) };
+            #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+            if let Some(progress) = &mut self.progress { progress.returned((frames.len() - done) as u64, written); }
             if written < 0 {
                 // SAFETY: as above
-                if unsafe { (self.recover)(self.pcm, written as i32, 1) } < 0 {
+                let recovered = unsafe { (self.recover)(self.pcm, written as i32, 1) };
+                #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+                if let Some(progress) = &mut self.progress { progress.recovered(written as i32, recovered); }
+                if recovered < 0 {
                     break;
                 }
             } else {
                 done += written as usize;
             }
+        }
+    }
+
+    #[cfg(all(feature = "audio-progress-observer", target_os = "linux", target_pointer_width = "64"))]
+    fn observe_phase(&mut self, phase: audio_progress_observer::Phase) {
+        if let Some(progress) = &mut self.progress {
+            // SAFETY: this live PCM and its original delay binding belong to
+            // this same audio thread; the library still owns all entry points.
+            unsafe { progress.observe(phase, self.pcm, self.delay) };
         }
     }
 }

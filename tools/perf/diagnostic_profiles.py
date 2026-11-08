@@ -25,6 +25,9 @@ ATTRIBUTION_ENV_KEYS = {
     "ZAKURO_HOST_PROFILE", "ZAKURO_HOST_PROFILE_SIDECAR", "ZAKURO_HOST_PROFILE_SIDECAR_RECEIPT",
     "ZAKURO_SHADER_ATTRIBUTION", "ZAKURO_SHADER_ATTRIBUTION_DRIVER_COMPILER_THREADS",
     "ZAKURO_PHASE_CPU_OUT", "ZAKURO_PHASE_CPU_RUN_ID",
+    # Runtime needs exact "1" plus a valid run ID; presence here conservatively
+    # excludes partial/malformed setup too, without asserting the observer ran.
+    "ZAKURO_AUDIO_PROGRESS_OBSERVER", "ZAKURO_AUDIO_PROGRESS_RUN_ID",
 }
 
 

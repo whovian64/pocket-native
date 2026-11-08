@@ -10,6 +10,8 @@ license.workspace = true
 profile-sidecar = []
 # Diagnostic shader events; absent from normal builds.
 shader-attribution = ["zakuro-gpu/shader-attribution"]
+# Opt-in bounded Linux ALSA phase observations; absent from normal builds.
+audio-progress-observer = []
 
 [dependencies]
 zakuro-common.workspace = true
