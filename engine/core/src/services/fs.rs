@@ -1116,29 +1116,29 @@ fn read_delay(length: u32) -> u64 {
 }
 
 fn read_file(system: &mut System, file_id: u32, offset: u64, size: u32, dest: u32) -> u32 {
-    let Some(file) = system.services.fs.files.get(&file_id).cloned() else {
+    let Some(file) = system.services.fs.files.get(&file_id) else {
         return 0;
     };
 
-    match file.backing {
+    match &file.backing {
         FileBacking::RomImage {
             offset: base,
             size: total,
         } => {
-            if offset >= total {
+            if offset >= *total {
                 return 0;
             }
-            let count = (size as u64).min(total - offset) as usize;
+            let count = (size as u64).min(*total - offset) as usize;
             let Some(title) = system.title.as_ref() else {
                 return 0;
             };
-            let start = (base + offset) as usize;
+            let start = (*base + offset) as usize;
             let Some(slice) = title.image().data().get(start..start + count) else {
                 log::warn!("fs: read past the end of the ROM image");
                 return 0;
             };
-            // copying through a temporary keeps the borrow of title from
-            // overlapping the mutable borrow of memory.
+            // Title and guest memory are disjoint fields. Keep this borrowed
+            // slice through the guest write instead of allocating a copy.
             {
                 let mut blocks = ROM_BLOCKS.lock().unwrap();
                 let (seen, order) = &mut *blocks;
@@ -1150,15 +1150,14 @@ fn read_file(system: &mut System, file_id: u32, offset: u64, size: u32, dest: u3
                 }
             }
             let started = std::time::Instant::now();
-            let data = slice.to_vec();
+            system.memory.write_bytes(dest, slice);
             ROM_READS[0].fetch_add(started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
             ROM_READS[1].fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
-            system.memory.write_bytes(dest, &data);
             count as u32
         }
         FileBacking::Host(path) => {
             let mut data = vec![0u8; size as usize];
-            let count = host_archive::read_at(&path, offset, &mut data);
+            let count = host_archive::read_at(path, offset, &mut data);
             system.memory.write_bytes(dest, &data[..count]);
             count as u32
         }
@@ -1202,6 +1201,106 @@ mod tests {
     use super::*;
     use crate::services::tests::system_with_thread;
     use crate::services::{handle_request, Target};
+
+    // Count allocations on this test's thread only. Other parallel tests and
+    // emulator worker threads cannot affect this read-path regression check.
+    thread_local! {
+        static ALLOCATED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+    struct CountingAllocator;
+    fn note_allocation(bytes: usize) {
+        let _ = ALLOCATED.try_with(|count| {
+            if let Some(previous) = count.get() { count.set(Some(previous + bytes)); }
+        });
+    }
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            note_allocation(layout.size());
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            note_allocation(layout.size());
+            unsafe { std::alloc::GlobalAlloc::alloc_zeroed(&std::alloc::System, layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout); }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+            note_allocation(size);
+            unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, ptr, layout, size) }
+        }
+    }
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn allocated_by(run: impl FnOnce()) -> usize {
+        ALLOCATED.with(|count| count.set(Some(0)));
+        run();
+        ALLOCATED.with(|count| count.replace(None).unwrap())
+    }
+
+    #[test]
+    fn memory_file_reads_borrow_payload_and_allocate_nothing() {
+        let (mut system, _) = system_with_thread();
+        let thread = system.kernel.current_thread.unwrap();
+        let dest = system.kernel.thread(thread).tls + 0x300;
+        let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let id = system.services.fs.add_file(OpenFile {
+            path: "test:/large-archive".into(), backing: FileBacking::Memory(payload.into()),
+        });
+        // Warm the destination before measuring only repeated source reads.
+        assert_eq!(read_file(&mut system, id, 1, 17, dest), 17);
+        let allocated = allocated_by(|| {
+            for _ in 0..16 { assert_eq!(read_file(&mut system, id, 1, 17, dest), 17); }
+        });
+        assert_eq!(allocated, 0, "memory-file reads must not clone the archive or allocate a staging buffer");
+        let mut bytes = [0u8; 17]; system.memory.read_bytes(dest, &mut bytes);
+        assert_eq!(bytes, std::array::from_fn(|i| (i + 1) as u8));
+        system.memory.write_bytes(dest, &[0xCC; 17]);
+        let size = 4 * 1024 * 1024u64;
+        assert_eq!(read_file(&mut system, id, size - 3, 17, dest), 3);
+        system.memory.read_bytes(dest, &mut bytes);
+        assert_eq!(&bytes[..3], &[(size - 3) as usize % 251, (size - 2) as usize % 251, (size - 1) as usize % 251].map(|b| b as u8));
+        assert_eq!(&bytes[3..], &[0xCC; 14]);
+        assert_eq!(read_file(&mut system, id, size, 17, dest), 0);
+        assert_eq!(read_file(&mut system, id, u64::MAX, 17, dest), 0);
+        assert_eq!(read_file(&mut system, id, 0, 0, dest), 0);
+        assert_eq!(read_file(&mut system, u32::MAX, 0, 17, dest), 0);
+    }
+
+    #[test]
+    fn rom_file_reads_copy_directly_without_a_staging_allocation() {
+        let (mut system, _) = system_with_thread();
+        let thread = system.kernel.current_thread.unwrap();
+        let dest = system.kernel.thread(thread).tls + 0x300;
+        let size = ROM_BLOCK * 2;
+        let mut image = vec![0u8; 0x1000 + size];
+        image[0x100..0x104].copy_from_slice(b"NCCH");
+        image[0x1A0..0x1A4].copy_from_slice(&4u32.to_le_bytes());
+        for (i, byte) in image[0x1000..].iter_mut().enumerate() { *byte = (i % 251) as u8; }
+        let path = std::env::temp_dir().join(format!("pocket-rom-read-{}.cxi", std::process::id()));
+        std::fs::write(&path, image).unwrap();
+        system.title = Some(zakuro_fs::Title::load(&path).unwrap());
+        let id = system.services.fs.add_file(OpenFile {
+            path: "romfs:/".into(), backing: FileBacking::RomImage { offset: 0x1000, size: size as u64 },
+        });
+        let offset = ROM_BLOCK as u64 - 8;
+        assert_eq!(read_file(&mut system, id, offset, 32, dest), 32);
+        let allocated = allocated_by(|| {
+            for _ in 0..16 { assert_eq!(read_file(&mut system, id, offset, 32, dest), 32); }
+        });
+        assert_eq!(allocated, 0, "ROM reads must copy directly into guest memory");
+        let mut bytes = [0u8; 32]; system.memory.read_bytes(dest, &mut bytes);
+        assert_eq!(bytes, std::array::from_fn(|i| ((offset as usize + i) % 251) as u8));
+        assert_eq!(read_file(&mut system, id, size as u64 - 3, 32, dest), 3);
+        system.memory.read_bytes(dest, &mut bytes);
+        assert_eq!(&bytes[..3], &std::array::from_fn::<_, 3, _>(|i| ((size - 3 + i) % 251) as u8));
+        assert_eq!(read_file(&mut system, id, size as u64, 32, dest), 0);
+        assert_eq!(read_file(&mut system, id, u64::MAX, 32, dest), 0);
+        assert_eq!(read_file(&mut system, id, 0, 0, dest), 0);
+        drop(system);
+        std::fs::remove_file(path).unwrap();
+    }
 
     /// Smash asks for its save's secure value and sets one: no value comes
     /// back, as a game card's, with nothing left unimplemented.
