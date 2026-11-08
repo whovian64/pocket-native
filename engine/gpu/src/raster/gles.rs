@@ -27,6 +27,7 @@ use crate::shader::{ShaderUnit, DESCRIPTOR_SIZE, INPUT_REGISTERS, PROGRAM_SIZE};
 use crate::{GpuMemory, Picture, ScreenRef};
 
 mod between;
+mod compiler_context_owner;
 mod display;
 mod programs;
 mod sources;
@@ -2917,7 +2918,9 @@ impl Gles {
                 if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached }).is_err() {
                     BUILDING.store(0, std::sync::atomic::Ordering::Relaxed);
                     BUILDING_STAND_INS.store(0, std::sync::atomic::Ordering::Relaxed);
-                    self.compiler = None;
+                    if let Some(compiler) = self.compiler.take() {
+                        compiler.stop();
+                    }
                 }
                 return Ok(None);
             }
@@ -2949,7 +2952,9 @@ impl Gles {
         let first = if block { compiler.done.recv().ok() } else { compiler.done.try_recv().ok() };
         let Some(first) = first else {
             if block {
-                self.compiler = None;
+                if let Some(compiler) = self.compiler.take() {
+                    compiler.stop();
+                }
             }
             return;
         };
@@ -4546,13 +4551,12 @@ impl Gles {
         Ok(())
     }
 
-    /// lets the compiler thread end after the program it builds, and the GL
+    /// lets every compiler thread end after the program it builds, and the GL
     /// thread finish what it was sent, before the process ends: the driver's
     /// exit freeing what a build still used corrupted the heap.
     pub fn stop(&mut self) {
-        if let Some(Compiler { jobs, thread, done, .. }) = self.compiler.take() {
-            drop((jobs, done));
-            let _ = thread.join();
+        if let Some(compiler) = self.compiler.take() {
+            compiler.stop();
         }
         self.worker.run(|| ());
     }

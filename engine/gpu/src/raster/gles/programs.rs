@@ -495,6 +495,19 @@ thread_local! {
     pub(super) static SHADERS: std::cell::RefCell<rustc_hash::FxHashMap<(u32, u64), glow::Shader>> = std::cell::RefCell::new(Default::default());
 }
 
+/// Called only by the worker context owner while that exact context is
+/// current, after the worker loop (including unwind), before EGL teardown.
+/// The map owns standalone shader objects, not linked/separable programs.
+/// Drain before deletion releases the RefCell borrow and all map ownership.
+pub(super) fn release_worker_shaders(gl: &glow::Context) {
+    let shaders: Vec<_> = SHADERS.with(|shaders| shaders.borrow_mut().drain().map(|(_, shader)| shader).collect());
+    for shader in shaders {
+        // SAFETY: the worker owner established its current sharing context.
+        // Deleting a retained shader does not delete linked program executables.
+        unsafe { gl.delete_shader(shader) };
+    }
+}
+
 pub(super) fn compiled_shader(stage: u32, source: &str) -> Option<glow::Shader> {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *OFF.get_or_init(|| crate::switch("ZAKURO_NO_SHADER_REUSE", "every program compiles both its stages")) {
@@ -714,7 +727,7 @@ impl Drop for Jobs {
 /// driver's compiler.
 pub(super) struct Compiler {
     pub(super) jobs: Jobs,
-    pub(super) thread: thread::JoinHandle<()>,
+    threads: Vec<thread::JoinHandle<()>>,
     pub(super) done: std::sync::mpsc::Receiver<(ProgramKey, Result<glow::Program, String>)>,
     pub(super) pending: rustc_hash::FxHashSet<ProgramKey>,
     pub(super) failed: rustc_hash::FxHashMap<ProgramKey, String>,
@@ -751,6 +764,7 @@ impl Compiler {
                         log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
                     let _ = ready.send(true);
+                    drop(ready);
                     // one job at a time off the shared queue, the lock let go
                     // before the build
                     while let Some(job) = received.take() {
@@ -770,14 +784,123 @@ impl Compiler {
                 threads.push(spawned);
             }
         }
-        drop(ready);
+        drop((ready, finished));
         // every thread that started says whether it has a context, the first
         // that has one is enough to go on
         let mut any = false;
         for _ in 0..threads.len() {
             any |= started.recv().unwrap_or(false);
         }
-        let thread = (!threads.is_empty()).then(|| threads.remove(0))?;
-        any.then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
+        Compiler { jobs, threads, done, pending: Default::default(), failed: Default::default() }.started(any)
+    }
+
+    fn started(self, any: bool) -> Option<Compiler> {
+        if any {
+            Some(self)
+        } else {
+            // Even a worker without a context may still be returning from
+            // startup. Retain its handle until it has actually ended.
+            self.stop();
+            None
+        }
+    }
+
+    /// Close the queue and result channel before joining every worker.
+    /// Called by the owner, never by one of these compiler threads.
+    pub(super) fn stop(self) {
+        let Compiler { jobs, threads, done, .. } = self;
+        drop((jobs, done));
+        for thread in threads {
+            // A panicked worker must not prevent joining the remaining ones.
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod compiler_worker_join_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}, mpsc};
+    use std::time::Duration;
+
+    /// Real Queue/Jobs shutdown and the production join path, without EGL.
+    /// Worker zero finishes first; the others cannot finish until released.
+    fn assert_all_joined(any_context: bool, panic_first: bool) {
+        let queue = Arc::new(Queue::new());
+        let jobs = Jobs(queue.clone());
+        let (finished, done) = mpsc::channel();
+        let (closed, saw_closed) = mpsc::channel();
+        let ended = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        let mut releases = Vec::new();
+        for index in 0..3 {
+            let (release, proceed) = mpsc::channel();
+            releases.push(release);
+            let (queue, closed, ended, finished) = (queue.clone(), closed.clone(), ended.clone(), finished.clone());
+            threads.push(thread::spawn(move || {
+                assert!(queue.take().is_none(), "Jobs must close and wake every queue waiter");
+                closed.send(index).unwrap();
+                // Dropping the test's release sender on failure also releases
+                // this worker, so an assertion cannot leave it blocked.
+                let _ = proceed.recv();
+                drop(finished);
+                ended.fetch_add(1, Ordering::Relaxed);
+                assert!(!(panic_first && index == 0), "authored worker panic");
+            }));
+        }
+        drop((closed, finished));
+        let compiler = Compiler { jobs, threads, done, pending: Default::default(), failed: Default::default() };
+        let (stopped, saw_stopped) = mpsc::channel();
+        let observed = ended.clone();
+        let stopper = thread::spawn(move || {
+            if any_context {
+                compiler.stop();
+            } else {
+                assert!(compiler.started(false).is_none());
+            }
+            stopped.send(observed.load(Ordering::Relaxed)).unwrap();
+        });
+        let mut workers = Vec::new();
+        for _ in 0..3 {
+            workers.push(saw_closed.recv_timeout(Duration::from_secs(2)).expect("queue waiter did not wake"));
+        }
+        workers.sort_unstable();
+        assert_eq!(workers, [0, 1, 2]);
+        releases[0].send(()).unwrap();
+        let premature = saw_stopped.recv_timeout(Duration::from_millis(100));
+        // Release every worker before asserting, including for the old
+        // retain/join-only-first behavior this fixture is meant to detect.
+        releases[1].send(()).unwrap();
+        releases[2].send(()).unwrap();
+        assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)), "shutdown returned with other workers blocked");
+        assert_eq!(saw_stopped.recv_timeout(Duration::from_secs(2)).unwrap(), 3);
+        stopper.join().unwrap();
+        assert_eq!(ended.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn stop_joins_every_worker_after_closing_the_queue() {
+        assert_all_joined(true, false);
+    }
+
+    #[test]
+    fn failed_start_joins_every_started_worker() {
+        assert_all_joined(false, false);
+    }
+
+    #[test]
+    fn a_panicked_worker_does_not_skip_the_other_joins() {
+        assert_all_joined(true, true);
+    }
+
+    #[test]
+    fn no_started_workers_returns_none() {
+        let (finished, done) = mpsc::channel();
+        drop(finished);
+        let compiler = Compiler {
+            jobs: Jobs(Arc::new(Queue::new())), threads: Vec::new(), done,
+            pending: Default::default(), failed: Default::default(),
+        };
+        assert!(compiler.started(false).is_none());
     }
 }
