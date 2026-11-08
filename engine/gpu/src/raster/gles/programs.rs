@@ -67,6 +67,8 @@ pub fn preparing() -> (usize, usize) {
 
 /// what the compiler threads give back for a start's program they let go.
 pub(super) const SKIPPED: &str = "skipped at the start";
+/// what they give back for a precache list's program, let go once saved.
+pub(super) const SAVED: &str = "saved for later";
 pub(super) static SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// the game starts now: the start's programs not built yet are left to be
@@ -673,6 +675,8 @@ pub(super) struct Compile {
     pub(super) cached: Option<std::path::PathBuf>,
     /// one the start prepares, which a skip lets go.
     pub(super) preload: bool,
+    /// one from the precache list, wanted for its saved copy alone.
+    pub(super) saved: bool,
 }
 
 /// the programs waiting for a compiler thread: those a draw needs now first,
@@ -796,7 +800,14 @@ impl Compiler {
                             let result = build_program(&gl, &job.vertex, &job.fragment, job.cached.as_deref());
                             // SAFETY: the context is current on this thread
                             unsafe { gl.finish() };
-                            result
+                            match result {
+                                // a list of thousands kept on the GPU fills a small one's driver
+                                Ok(program) if job.saved && job.cached.as_deref().is_some_and(std::path::Path::exists) => {
+                                    delete_program(&gl, program);
+                                    Err(SAVED.to_owned())
+                                }
+                                result => result,
+                            }
                         };
                         BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         if job.key.0[29] != 0 {

@@ -1586,6 +1586,7 @@ pub struct Gles {
     pictures: u64,
     warned_logic_op: bool,
     preloading: bool,
+    precaching: bool,
     /// the precache list's programs, built at a first start, with the setup
     /// each came from: one the game uses goes into the manifest then, as the
     /// next starts prepare the manifest and leave the list.
@@ -1714,6 +1715,7 @@ impl Gles {
                 pictures: 0,
                 warned_logic_op: false,
                 preloading: false,
+                precaching: false,
                 precached: HashMap::new(),
                 precache_stamp: None,
                 precache: None,
@@ -1925,7 +1927,7 @@ impl Gles {
         }
         let began = std::time::Instant::now();
         let queue = self.compiler.is_some();
-        self.preloading = true;
+        (self.preloading, self.precaching) = (true, true);
         while began.elapsed() < budget {
             let Some(line) = precache.lines.pop_front() else { break };
             PRECACHE_LEFT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -1967,7 +1969,7 @@ impl Gles {
             };
             // the manifest's own, or an earlier line's
             let key = (constants, writes_depth, lighting, vertex);
-            if self.programs.contains_key(&key) || self.compiler.as_ref().is_some_and(|compiler| compiler.pending.contains(&key)) {
+            if self.programs.contains_key(&key) || self.precached.contains_key(&key) || self.compiler.as_ref().is_some_and(|compiler| compiler.pending.contains(&key)) {
                 fewer();
                 continue;
             }
@@ -1979,7 +1981,7 @@ impl Gles {
                 Err(error) => log::warn!("could not prepare a shader from {}, {error}", precache.dir.join("precache.txt").display()),
             }
         }
-        self.preloading = false;
+        (self.preloading, self.precaching) = (false, false);
         if !precache.lines.is_empty() {
             self.precache = Some(precache);
             return;
@@ -3119,6 +3121,12 @@ impl Gles {
             }
             return Ok(Some(program));
         }
+        // a precached one left as a saved copy, loaded on its first use
+        if !self.preloading {
+            if let Some(setup) = self.precached.remove(&key) {
+                self.inputs.insert(key.clone(), setup);
+            }
+        }
         // what the compiler finished, still compiles or could not, and what
         // it is given, are seen to here, only a program built here and now
         // waits on the GL thread
@@ -3166,7 +3174,7 @@ impl Gles {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached, preload: self.preloading }).is_err() {
+                if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached, preload: self.preloading, saved: self.precaching }).is_err() {
                     BUILDING.store(0, std::sync::atomic::Ordering::Relaxed);
                     BUILDING_STAND_INS.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.compiler = None;
@@ -3215,6 +3223,7 @@ impl Gles {
                     self.programs.insert(key.clone(), program);
                     self.note_program(&key);
                 }
+                Err(error) if error == SAVED => {}
                 Err(error) if error == SKIPPED => {
                     self.inputs.remove(&key);
                     self.precached.remove(&key);
@@ -5250,7 +5259,7 @@ mod tests {
         let job = |name: &str, stand_in: bool| {
             let mut constants = [0u32; FRAGMENT_CONSTANTS];
             constants[29] = stand_in as u32;
-            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None, preload: false }
+            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None, preload: false, saved: false }
         };
         let queue = Queue::new();
         for (name, stand_in) in [("stand-in 1", true), ("stand-in 2", true), ("draw 1", false), ("stand-in 3", true), ("draw 2", false)] {
