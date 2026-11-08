@@ -79,8 +79,15 @@ impl TextureFormat {
 /// alpha, which follows the blocks here a byte a texel, row by row.
 pub fn etc1_blocks(data: &[u8], width: u32, height: u32, alpha: bool) -> Vec<u8> {
     let size = if alpha { 16 } else { 8 };
-    let mut out = Vec::with_capacity((width * height / 2) as usize);
-    let mut alphas = vec![0u8; if alpha { (width * height) as usize } else { 0 }];
+    // Place the colors and alpha in their final allocation. Appending a
+    // separate alpha plane would grow the color allocation while keeping
+    // the temporary plane alive, then copy the alpha into the new space.
+    let color_bytes = (width / 4 * (height / 4) * 8) as usize;
+    let alpha_bytes = if alpha { (width * height) as usize } else { 0 };
+    let mut out = Vec::with_capacity(color_bytes + alpha_bytes);
+    if alpha {
+        out.resize(color_bytes + alpha_bytes, 0);
+    }
     for by in 0..height / 4 {
         for bx in 0..width / 4 {
             let tile = (by / 2) * (width / 8).max(1) + bx / 2;
@@ -91,17 +98,20 @@ pub fn etc1_blocks(data: &[u8], width: u32, height: u32, alpha: bool) -> Vec<u8>
             }
             let (texels, color) = block[..size as usize].split_at_mut(size as usize - 8);
             color.reverse();
-            out.extend_from_slice(color);
             if alpha {
+                let (colors, alphas) = out.split_at_mut(color_bytes);
+                let color_at = ((by * (width / 4) + bx) * 8) as usize;
+                colors[color_at..color_at + 8].copy_from_slice(color);
                 for y in 0..4 {
                     for x in 0..4 {
                         alphas[((by * 4 + y) * width + bx * 4 + x) as usize] = decode_etc1a4_alpha(texels, x, y);
                     }
                 }
+            } else {
+                out.extend_from_slice(color);
             }
         }
     }
-    out.extend(alphas);
     out
 }
 
@@ -540,6 +550,31 @@ mod tests {
         assert_eq!(&packed[..blocks.len()], &blocks[..]);
         let alpha: Vec<u8> = decode_texels(&data, TextureFormat::Etc1A4, 16, 16).iter().map(|texel| texel[3]).collect();
         assert_eq!(&packed[blocks.len()..], &alpha[..]);
+    }
+
+    /// Short blocks stay zero-filled, and partial edge tiles leave the
+    /// uncovered alpha texels zero rather than shortening the plane.
+    #[test]
+    fn etc1a4_short_blocks_and_partial_dimensions() {
+        let mut block = [0xA5; 16];
+        block[8..].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        for (width, height) in [(0, 0), (3, 7), (4, 4), (5, 9), (8, 8), (12, 8)] {
+            let color_bytes = (width / 4 * (height / 4) * 8) as usize;
+            for length in [0, 15, 16] {
+                let packed = etc1_blocks(&block[..length], width, height, true);
+                assert_eq!(packed.len(), color_bytes + (width * height) as usize);
+                let mut expected = vec![0u8; packed.len()];
+                if length == 16 && width >= 4 && height >= 4 {
+                    expected[..8].copy_from_slice(&[8, 7, 6, 5, 4, 3, 2, 1]);
+                    for y in 0..4 {
+                        for x in 0..4 {
+                            expected[color_bytes + (y * width + x) as usize] = if y % 2 == 0 { 0x55 } else { 0xAA };
+                        }
+                    }
+                }
+                assert_eq!(packed, expected, "{width}x{height}, {length} bytes");
+            }
+        }
     }
 
     /// decoding a whole texture gives what reading each texel does, for
