@@ -481,3 +481,48 @@ The probe suppresses audio delivery; no audio, transition, full-matrix,
 physical-device or speedup acceptance follows. The next source gate recovers
 C1's exact retained candidate and checks its viability on the current source
 before any separately admitted matched serialized correctness comparison.
+
+## R34–R35 current-source C1 gates and serialized correctness
+
+The retained C1 proposal extracts the existing dispatch cache miss and fill into
+a private non-inlined helper. Separate current production and test exports
+change only the dispatcher source; the test export adds the unchanged placement
+fixture and is never used to build the production runtime.
+
+Both current CPU cases passed, covering hits, misses, colliding addresses,
+negative entries and placement/rebase/unload invalidation. The current release
+also passed the original final-linked gate: callback hit-path stack operations
+fell from six to two, and the complete callback, run loop and miss-helper symbol
+set fell from 883 to 842 bytes. There is exactly one 27-byte miss helper. The
+folded index, full address/Thumb tag, cached optional return and miss update are
+unchanged, without an added hit probe, load, conditional branch, call or bounds
+path. The miss call and saves remain a tradeoff of unknown gameplay cost.
+
+The first offline compiler audit stopped because four baseline crates were
+inherited rather than compiled in the current release step. That audit failure
+is retained. A separate origin audit recovered their actual earlier compiler
+records, matched the inherited artifact hashes and verified unchanged source
+dependencies. The complete 87-artifact package/feature/target/profile closure
+matches; registry dependency artifact bytes also match. Neither audit repeated
+a build or native position.
+
+Thirteen new adapter CPU cases then passed for the distinct source/build/runtime
+allowlists, positive helper/native command binding, full producer identities and
+strict oracle differences. The adapter retains both complete producers and
+compares explicit shared inputs separately. Preflight reopened both original
+serialized controls with their raw evaluator and observer artifacts.
+
+One new bounded serialized comparison passed. Its fresh baseline first matched
+both retained controls before C1 launched; C1 then matched that baseline and
+both original controls. Each arm completed 300 batches with 96,194,192 recompiled
+and 46 interpreted instructions, 93 top and 29 bottom pictures, and no skipped
+frames. All eight image hashes, full guest-trace bytes, full owner document,
+closed frames 95–97 causal document and generated settings matched. Both native
+and evaluator exits were zero, and owned cleanup was clean. The two-position
+allowance is consumed and closed.
+
+This establishes exact sampled correctness for the current C1 factor in the
+existing common-serialized lane only. The historical async C1 failure remains
+held. No default promotion, timing, speedup, audio, transition, full-matrix or
+physical-device acceptance follows. Startup/GLES compiler cost remains the next
+performance priority; its next experiment needs its own scoped admission.
