@@ -639,3 +639,36 @@ accepted speedup, resource saving or default promotion. The next source task
 attempts a complete 70-key literal GLSL export from retained CPU inputs; it must
 reject missing or ambiguous keys. A future component experiment needs its own
 prospective question and admission, and cannot clear gameplay/audio/device gates.
+
+## R40–R45 complete-input and compiler-release component checks
+
+A new CPU-only export reconstructs all 70 retained program keys and 140 literal
+stage inputs. Six new producer cases, four reader cases and all 59 literal-byte
+vertex reuse joins pass. This binds the reconstructed inputs; it does not recover
+unretained historical submitted bytes or turn the truncated event prefix into a
+complete history.
+
+A distinct two-position component question tests `glReleaseShaderCompiler`
+after application work settles on the same compiler context. Both positions use
+the same complete 70-key prefix, external worker count 1, requested compiler
+thread hint 1, cache policy and old/new sentinel programs. The control issues no
+release call; the release position issues exactly one. Both complete the old
+program draw, boundary acknowledgment, later new compilation and old-program
+revisit, with normal exit, joined workers and clean process cleanup. This is
+synthetic component correctness, not gameplay or proprietary-driver quiescence.
+
+The fixture records four checked `CLOCK_MONOTONIC` phase boundaries. Twelve new
+producer clock cases and twelve new guardian cases pass. Each observed idle
+phase admits 34 process RSS/RssAnon samples whose entire collection bracket is
+strictly inside the source boundaries. No idle RssAnon decrease appears in the
+observed endpoints of either position. Transient coverage, actual compile-count
+closure and driver compliance remain unknown; no between-position effect or
+uncertainty estimate is accepted. The two-position allowance is consumed, with
+no replay or extension. Compiler release remains held as an optimization.
+
+The next selected source correction gives compiler EGL contexts and fallback
+pbuffers explicit ownership on their worker thread. Thirteen fake EGL cases and
+the expected `!Send`/`!Sync` compile refusals pass. Actual integration, real
+worker teardown and shared-program survival still require separate validation.
+No speedup, memory saving, audio/transition acceptance or default promotion
+follows from these component checks.
