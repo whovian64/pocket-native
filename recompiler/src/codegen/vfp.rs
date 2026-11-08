@@ -177,7 +177,7 @@ pub fn register_transfer(out: &mut String, scope: &Scope, a: u32, op: u32) -> bo
         // vmrs and vmsr on fpscr
         (10 | 11, 7) if (op >> 16) & 0xF == 1 => {
             if !load {
-                emit!(out, "    *ctx->fpscr = {};", if rt == 15 { scope.at(a + 8) } else { format!("ctx->r[{rt}]") });
+                emit!(out, "    vfp_set_fpscr(ctx, {});", if rt == 15 { scope.at(a + 8) } else { format!("ctx->r[{rt}]") });
             } else if rt == 15 {
                 emit!(out, "    {{ uint32_t f = *ctx->fpscr; ctx->n = f >> 31; ctx->z = (f >> 30) & 1; ctx->c = (f >> 29) & 1; ctx->v = (f >> 28) & 1; }}");
             } else {
