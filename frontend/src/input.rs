@@ -193,10 +193,7 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
         }
     );
     // the R36S's stick each of axes 0 to 5 is, scaled to its travel
-    let sticks = if h700 {
-        // left stick on ABS_Z and ABS_RX, right on ABS_RY and ABS_RZ
-        Some([None, None, Some(0), Some(1), Some(3), Some(4)])
-    } else if osh_pb {
+    let sticks = if h700 || osh_pb {
         // left stick on ABS_Z and ABS_RX, right on ABS_RY and ABS_RZ
         Some([None, None, Some(0), Some(1), Some(3), Some(4)])
     } else if rk3566 {
