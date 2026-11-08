@@ -231,3 +231,54 @@ other games/scales/layouts, quiet-host timing and physical devices remain unknow
 The async baseline oracle and serialized observer holds, C1/P1/P2 dispositions
 and closed 170 executions / 15 held series remain unchanged. No accepted speedup
 or default runtime change follows.
+
+## R17–R18 normal startup: resource-contract failure retained, scoped capture obtained
+
+A minimal private opt-in max/one selector passed its new pure parser case and
+normal frontend release build. Feature-off/default behavior remains unlimited;
+no candidate or default runtime change is promoted. The diagnostic binary is
+SHA-256 `3d3e2c21a7c7028d93e3c9635f71371c37094cc974bf291fee599de3f0e899f9`.
+Six new guardian CPU cases passed for exact identity/binding, bounded unknowns,
+actual hint/context, settings, endpoint and unchanged exit-race classification.
+
+The first normal startup **remains held**: native SIGXFSZ, guardian exit 2,
+no readiness publication and no cleanup survivors. The guardian had applied its
+8 MiB output-file ceiling as the kernel RLIMIT_FSIZE; that limit also covers
+memfd backing. A new CPU fixture compiled the unchanged production physical-memory
+constructor: it reproduced SIGXFSZ with that limit and completed with a 135 MiB
+shared backing under a 512 MiB limit. This is source-bound mechanism evidence;
+the original faulting syscall/file descriptor was not captured. The failed
+attempt's allowance and receipts remain consumed and unchanged.
+
+A separate prospectively frozen guardian generation distinguishes the 512 MiB
+kernel file/backing limit from sampled output-file/total ceilings of 8/64 MiB.
+Its new CPU boundary case passed; the earlier six unchanged cases were reused.
+Output sampling can miss transients or overshoot before stopping. Exactly one
+new baseline normal-frontend process then completed with native/guardian exit 0,
+verified live executable/DSO/environment identity and no cleanup survivors. It
+used the unchanged runtime/title library, seed/input/profile, explicit ordinary
+async settings, 1× scale, offscreen GLES, fresh caches and the unlimited hint.
+An existing scripted FN+START supplied the polite tick endpoint; the independent
+phase sidecar actually recorded 600 completed batches. This is not a timing or
+candidate-factor comparison.
+
+The non-atomic readiness snapshot retains 59 flows: eight fallback/prewarm and
+51 draw-origin. All 59 have successful build-result, finish and send records;
+57 have successful renderer-consumption records. Fifty-one record a first demand
+and 48 a first exact selection. Two results remain unconsumed and three demanded
+flows lack an exact selection at the snapshot; these observations are not
+failure or readiness-completion claims. No unretained flow, untracked point,
+unjoined-selection, clock or saturation flag was observed in this snapshot.
+The separate event recorder attempted 707 events, retained 256 and dropped 451;
+its prefix remains incomplete and is not representative of later work.
+
+ALSA open/buffer logging was observed on the normal audio path. PCM delivery,
+backend drain, audible playback and audio quality remain unknown. No image
+review, transition, full-matrix, physical-device or game-speed conclusion follows.
+The full readiness admission, earlier oracle/observer holds, C1/P1/P2 and closed
+170 executions / 15 held series remain unchanged.
+
+The next existing Sol source lane prepares a minimal export of full program keys
+bound to the retained flow IDs, within the existing flow/event/report caps.
+Process-local IDs alone cannot match programs across processes. No extra native
+allowance or G1 promotion follows from the successful baseline observation.
