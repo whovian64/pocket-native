@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-11-08",
+  "source_revision": "6d11a58c9e8ef75415657c8bd1648ee5f388c343",
+  "source_document": "docs/overhead-study-2026-11-07.md",
+  "accepted_new_game_level_benefit": false,
+  "dispatch": {
+    "scope": "R34-R35 current x86 final-linked C1 candidate; private prototype, no default promotion",
+    "hit_path_stack_operations": {"control": 6, "prototype": 2, "unit": "operations"},
+    "selected_dispatch_text": {"control": 883, "prototype": 842, "unit": "bytes"},
+    "selected_symbols": "lookup callback, run loop and sole miss helper",
+    "correctness_scope": "300-batch Omega Ruby common-serialized sampled replay only",
+    "tradeoff": "Miss handling adds a helper call; dynamic miss rate and total gameplay effect are unmeasured.",
+    "performance_claim": false
+  },
+  "columns": ["Source / CPU checks", "Serialized sampled replay", "Normal async / quality", "Admitted game benefit"],
+  "evidence": [
+    {
+      "name": "C1 dispatch",
+      "cells": ["PASS", "PASS", "HELD", "UNPROVEN"],
+      "detail": "Current semantic/code-shape and serialized sampled replay pass. Historical asynchronous equality failure stays held; no timing or default promotion."
+    },
+    {
+      "name": "Runtime PGO",
+      "cells": ["PILOT ONLY", "NOT RUN", "HELD", "UNPROVEN"],
+      "detail": "Collection/profile-use plumbing and a game pilot exist. The asynchronous exact-work comparison failed; no serialized candidate or admitted game-performance result."
+    },
+    {
+      "name": "Shader thread hint",
+      "cells": ["COMPONENT", "NOT RUN", "PARTIAL", "UNPROVEN"],
+      "detail": "The fixed component workload and scoped normal readiness observations exist. No paired gameplay/resource benefit or complete image/audio quality acceptance."
+    },
+    {
+      "name": "Texture hashing",
+      "cells": ["AUDIT ONLY", "NOT RUN", "NOT RUN", "UNPROVEN"],
+      "detail": "The inspected x86 loop is already unrolled; the proposed missing-unroll mechanism is disproved for that binary. No justified rewrite or materiality claim."
+    }
+  ],
+  "limits": [
+    "These statuses are separate scoped observations, not percentages of completion or equivalent test populations.",
+    "PASS applies only to the named cell and recorded sampled scope.",
+    "No speedup, power, total-device RAM, full visual/audio quality or physical RG DS Plus claim.",
+    "Historical failed comparisons and 170 closed timing executions / 15 held series remain unchanged.",
+    "Single-process shader resource observations are deliberately excluded from effect graphs."
+  ]
+}
