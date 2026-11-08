@@ -147,8 +147,9 @@ pub fn pack_texels(data: &[u8], format: TextureFormat, width: u32, height: u32) 
     };
     let mut out = vec![0u8; (width * height) as usize * bytes];
     let tiles_across = width / 8;
+    let (mut tile_column, mut tile_row) = (0u32, 0u32);
     for tile in 0..tiles_across * (height / 8) {
-        let (tile_x, tile_y) = (tile % tiles_across * 8, tile / tiles_across * 8);
+        let (tile_x, tile_y) = (tile_column * 8, tile_row * 8);
         for y in 0..8 {
             for x in 0..8 {
                 let texel = (tile * 64 + morton_interleave(x, y)) as usize;
@@ -174,6 +175,11 @@ pub fn pack_texels(data: &[u8], format: TextureFormat, width: u32, height: u32) 
                     }
                 }
             }
+        }
+        tile_column += 1;
+        if tile_column == tiles_across {
+            tile_column = 0;
+            tile_row += 1;
         }
     }
     Some((packing, out))
@@ -684,5 +690,82 @@ mod tests {
         assert_eq!(gray_at(12, 0), block_gray(5));
         assert_eq!(gray_at(8, 4), block_gray(6));
         assert_eq!(gray_at(12, 4), block_gray(7));
+    }
+}
+
+#[cfg(test)]
+mod packed_row_tests {
+    use super::*;
+
+    const FORMATS: [TextureFormat; 10] = [
+        TextureFormat::Rgb565, TextureFormat::Rgba5551, TextureFormat::Rgba4,
+        TextureFormat::La8, TextureFormat::Hilo8, TextureFormat::L8,
+        TextureFormat::A8, TextureFormat::La4, TextureFormat::L4, TextureFormat::A4,
+    ];
+
+    // Visit output pixels directly and look up each source texel. This
+    // oracle has no tile counter or row-carry state shared with the packer.
+    fn check_rows(data: &[u8], format: TextureFormat, width: u32, height: u32) {
+        let (_, packed) = pack_texels(data, format, width, height).unwrap();
+        let mut expected = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let texel = morton_offset(x, y, width, 1) as usize;
+                use TextureFormat::*;
+                match format {
+                    L4 | A4 => {
+                        let value = data.get(texel / 2).map_or(0, |byte| {
+                            expand4(if texel.is_multiple_of(2) { byte & 15 } else { byte >> 4 })
+                        });
+                        expected.push(value);
+                    }
+                    La4 => {
+                        let value = data.get(texel).copied().unwrap_or(0);
+                        expected.extend_from_slice(&[expand4(value >> 4), expand4(value & 15)]);
+                    }
+                    La8 | Hilo8 => {
+                        let value = data.get(texel * 2..texel * 2 + 2).unwrap_or(&[0, 0]);
+                        expected.extend_from_slice(&[value[1], value[0]]);
+                    }
+                    L8 | A8 => expected.push(data.get(texel).copied().unwrap_or(0)),
+                    Rgb565 | Rgba5551 | Rgba4 => {
+                        expected.extend_from_slice(data.get(texel * 2..texel * 2 + 2).unwrap_or(&[0, 0]));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert_eq!(packed, expected, "{format:?} {width}x{height}, {} bytes", data.len());
+    }
+
+    #[test]
+    fn packed_rows_preserve_rectangles_and_truncated_texels() {
+        let data: Vec<u8> = (0..16385u32).map(|i| (i.wrapping_mul(37) ^ (i >> 3)) as u8).collect();
+        for format in FORMATS {
+            for (width, height) in [(0, 0), (0, 8), (8, 0), (8, 8), (8, 24),
+                                    (24, 8), (16, 64), (64, 16), (24, 32), (8, 1024), (1024, 8)] {
+                let full = (width * height * format.bits_per_pixel() / 8) as usize;
+                for length in [0, 1, full.saturating_sub(1), full, full + 1] {
+                    check_rows(&data[..length], format, width, height);
+                }
+            }
+            let full = (64 * format.bits_per_pixel() / 8) as usize;
+            for length in 0..=full + 1 {
+                check_rows(&data[..length], format, 8, 8);
+            }
+        }
+    }
+
+    #[test]
+    fn packing_rejects_partial_tiles_and_unsupported_formats() {
+        for format in FORMATS {
+            for (width, height) in [(1, 8), (8, 7), (15, 24), (24, 17)] {
+                assert!(pack_texels(&[], format, width, height).is_none());
+            }
+            assert!(pack_texels(&[], format, 0, u32::MAX - 7).unwrap().1.is_empty());
+        }
+        for format in [TextureFormat::Rgba8, TextureFormat::Rgb8, TextureFormat::Unknown(99)] {
+            assert!(pack_texels(&[], format, 8, 8).is_none());
+        }
     }
 }
