@@ -400,7 +400,41 @@ non-timing exclusion was already present and was not modified. The normal
 feasibility captures used the separately pinned private diagnostic runtime;
 no game run of this public integration or default promotion is claimed.
 
-Next, a bounded source/retained-artifact analysis checks the actual shutdown and
-snapshot order and the demanded keys without selections. It will define the
-smallest remaining readiness evidence for G1. Source work continues; there is
-no new timing or native allowance merely because publication is complete.
+The subsequent shutdown study found that compiler application handles are joined
+before the snapshot, but the completion receiver is dropped before that join
+and has no final consumer drain. A successful consumer does not replay an earlier
+draw. Neither a request nor exact selection proves queued or visible output.
+No forced draw, drain or shutdown behavior change was justified.
+
+## R27–R28 bounded request dispositions
+
+A private default-off observer now associates six typed fragment-selection
+outcomes with retained requested attempts, plus seen combinations of the existing
+small/skippable/stand-in flags and whether the existing `post_draw` call returned.
+It keeps the 128-flow, 256-event and 256 KiB report caps. Earlier returns remain
+outside its Decision-drop scope. Counts and masks are non-atomic; they establish
+neither per-request ordering nor queue acceptance, GL submission or pixels.
+
+Seven new accounting cases, six new strict-reader cases, an actual writer/reader
+boundary check, GLES feature-on/off compilation and the diagnostic release build
+passed. The first standalone module compilation failed because its harness put
+an existing `pub(super)` item at the crate root. That failure is retained; a tiny
+wrapper preserved the actual module boundary without changing observer source.
+Three further guardian cases checked the new exact source/runtime and one-process
+scope. These checks establish plumbing, not renderer behavior or speed.
+
+One separately frozen normal-mode hint-1 diagnostic then completed 600 batches,
+native/guardian exit 0 and clean cleanup. Its report contains all 59 prospectively
+pinned complete keys, 51 first demands and 50 first exact selections. One key
+recorded both generic and exact outcomes; the final demanded key recorded eight
+CPU-compiling outcomes, with no consumer or `post_draw` return observed. This
+does not explain historical missing selections retroactively.
+
+Another 877 generic outcomes lacked a retained requested-key association. They
+remain explicitly unattributed; aggregate totals cannot repair that gap. The
+new report therefore clears only its scoped observation, while G1 promotion,
+late finality, the async baseline oracle, C1/P1, audio/visual quality, transitions,
+the broader matrix and handheld claims remain held or unobserved. No prospective
+paired gameplay/resource effect or speedup is established. The next positive
+source-analysis row is texture fingerprint CPU cost; the serialized correctness
+lane also needs a source-bound observer contract before a new diagnostic.
