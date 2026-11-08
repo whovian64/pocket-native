@@ -1,6 +1,6 @@
 # Current overhead priorities and attribution limits
 
-The resumed study is based on runtime/compiler source at `6bcd630` and retained desktop evidence. The opt-in attribution implementation began at `e363601`; shutdown and phase-CPU telemetry are bound to `f800237`. Two distinct current-source diagnostic generations now provide scoped evidence; earlier failed attempts remain held. No new game-level gain is accepted. The prior 170 timing executions and 15 held series remain closed/held.
+The resumed study is based on runtime/compiler source at `6bcd630` and retained desktop evidence. The opt-in attribution implementation began at `e363601`; shutdown and phase-CPU telemetry are bound to `f800237`. Three distinct current-source diagnostic generations now provide scoped evidence; R7 required remaining-only offline finalization after a classification mismatch, and its original held receipt is preserved. No new game-level gain is accepted. The prior 170 timing executions and 15 held series remain closed/held.
 
 | Priority | Evidence and plausible benefit | Confidence and next validation |
 | --- | --- | --- |
@@ -63,3 +63,38 @@ The first bounded baseline/use correctness pair, Omega Ruby, completed 6,000 bat
 The tested runtime SHA256s are baseline `2704f0cb2478c439770fe4a37451bc91c7cc1238a37d23dc1750f8c793aeccd2`, generation `e92daceeb4d5ffb04d3e74d2d2cc76c9f0f5a6b386155a76bf4760ac9defaac5`, and use `ee4c3d24d918ebc727a2cc299b7b0a7c7ad59e80e9264f5d6ae932bba0114f50`. Baseline/use contain no LLVM profile counter/data sections or profile writer. Static `.text` is smaller in the use binary; this is neither RSS nor a gameplay/resource acceptance. No PGO candidate is promoted.
 
 The continuing finite queue preserves G1's readiness/resource hold, diagnoses the exact-work obstacle offline, and checks generated-C admission without starting a large training campaign. Actual normal-mode audio-on, authored transitions, scale/layout/aspect coverage and quiet-host performance qualification remain pending. R4/R5 allowances and all closed campaign verdicts are unchanged.
+
+
+## R7 texture-fingerprint diagnostic: scoped data, no rewrite selected
+
+A distinct, once-only 6,000-batch Omega Ruby diagnostic used the unchanged current-default title library and a private default-off hash collector. It wraps the existing raw-decode and upload-reuse hashes once, preserving hash bits, cache/equality/trust policy and quality. Fixed limits remain 65,536 observed calls, 256 timed calls and 32 MiB timed bytes per site, and 64 KiB output. No A1, shader-readiness or PGO observer was enabled. The new opt-in environment excludes throughput comparison.
+
+Nine new Rust cases, one new throughput-exclusion regression, feature-off/on frontend compilation, 20 guardian/reader CPU cases and a round trip through the retained real Rust writer artifact passed. The normal H1-only release build passed; verbose logs contain 45 actual compile invocations with unchanged cached dependencies, and static ELF inspection finds no LLVM profile counters or writer. One offline audit's incorrect one-invocation assumption was corrected for the frontend's library and binary targets without rebuilding. The runtime SHA256 is `c2fd058213ba76602c34bce597079fe281972f989329534a8879b7f18c3e3f40`.
+
+The evaluator/native exited 0 with clean resource/cleanup observations, but the guardian exited 2: its postprocessor expected the abbreviation `NON_TIMING` instead of the evaluator's canonical `NON-TIMING diagnostic evidence; ineligible for throughput comparison`. The original failure, claim and artifacts remain unchanged. Remaining-only offline processing used the pinned producer's canonical constant, completed the original schema/reader/source-boundary checks, and consumed no new native process. These are recovered partial observations, not a relabelled end-to-end guardian pass.
+
+The frozen snapshot records 22,046 observed/result-completed calls, zero call-cap tail or open calls, no clock/overflow/poison flags, and conserved histograms/results. It remains explicitly partial with late producers unknown:
+
+| Observed site | Logical input population | Timed population | Instrumented owning-thread CPU envelopes |
+| --- | --- | --- | --- |
+| Raw guest decode | 21,878 calls / 309,772,544 bytes; 21,711 hash hits and 167 misses | First 256 eligible calls / 14,980,160 bytes; 21,622 calls untimed | 1.289 ms over that timed prefix |
+| Upload reuse | 168 calls / 5,771,908 bytes; 32 exact reuses and 136 no-reuse decisions | All 168 calls in the observed prefix / 5,771,908 bytes | 0.519 ms over that observed prefix |
+
+Logical bytes are not DRAM traffic. Timings include clock/black-box effects, may aggregate different owners, and are neither total hash CPU nor additive player-visible latency. The early timed population is not representative; no extrapolation or timer-overhead subtraction is applied. Raw-decode causes remain unknown, and upload no-reuse does not prove a GL upload completed. All eight BMP hashes and 20 sampled register vectors match the R6 baseline; no exact-work, full-state, visual-review or audio pass follows.
+
+**H1 remains held; no hash rewrite is selected.** The covered envelopes do not establish a material removable endpoint cost. The once-only allowance is exhausted. G1, runtime PGO and generated-C holds remain; closed campaigns and all prior rejections are unchanged. The next finite source audit examines the existing dispatch row against current matched artifacts, rather than reusing stale lookup weights or reopening rejected cache/ABI families without evidence. Normal-mode audio, transitions, scale/layout coverage, quiet-host timing and physical devices remain pending.
+
+
+## R8 dispatch miss outlining: code shape passes; gameplay held
+
+A finite audit of the exact R4/R5 images and source confirms that the current callback plus ABI lookup contain 87 of 1,676 and 98 of 1,771 observed numeric-main-thread profile rows (5.19% and 5.53%). Those are descriptive sample shares, not CPU-time fractions, cache-miss rates or removable costs. Process-wide ITIMER_PROF delivery bias and unknown sample timing remain; the differently instrumented observations are not a controlled pair. The existing folded-index lookup is already present. Rejected cache/ABI/pointer-hoist families remain closed.
+
+One private candidate moves only the existing miss lookup/cache-fill body to a non-inlined helper, without marking it cold. The exact folded index, ARM/Thumb tag, cached `Some`/`None`, placement resets, table layout, ABI, FP and FASTMEM contracts are unchanged. Two intermediate compilations were followed by one matched, final-linked normal release build pair with the same Rust toolchain and opt-level 3 / ThinLTO / four codegen units / unwind / debug-info 1 settings. Both full logs contain 62 target and 25 host compiler invocations with matching feature/codegen closure; PGO and diagnostic features are absent.
+
+The candidate passes the prospectively frozen code-generation gate: callback text falls from 86 to 61 bytes, `Library::run` from 797 to 754, and the sole new helper occupies 27 bytes. Their combined text falls from 883 to 842 bytes. The callback hit path has two stack operations instead of six and adds no lookup, load, conditional branch, call or bounds path. The miss path gains a helper call; its frequency and end-to-end tradeoff remain unknown. This is a measured code-shape result, not a speedup or RSS claim.
+
+The existing hit/miss/collision/cached-negative case and a new CPU case using actual module placement, rebasing and unloading both pass. The latter checks stale positive and negative entries and ARM/Thumb targets. No title or GL context is exercised. Baseline runtime SHA256 is `ca3d72a719723a9c1f60297631989caad9b59e9a2094a07da943447861933904`; candidate SHA256 is `44455e9258c5bbc850b4a713a4bc3891ca407ddf5b3d537402920abfbc8dce83`. Two offline parser failures and one partial compile-log audit are retained; remaining-only parsing accounted for GNU demangled method names, executable tokens versus environment variables, and multiline Cargo environment values. No build or game was replayed for these corrections.
+
+**The candidate remains private and held for gameplay/performance.** A minimal correctness guardian is being prepared for one distinct Omega Ruby baseline/candidate pair, with exact binaries and unchanged title data, ordinary async GPU, original work/trace equality, and no timing. Its source/admission checks must pass before execution; an old PGO receipt cannot admit it. No old capture allowance is reopened. Normal-mode audio, authored transitions, other games/scales/layouts, quiet-host timing and physical devices remain unobserved.
+
+A separate R7 nohardware real-core fixture demonstrated that controlled completion delivery can change synthetic polling work (40 versus 36 cycles/instructions with matching registers). It proves a possible accounting mechanism only. The actual R6 Omega Ruby discrepancy remains unexplained; neither this fixture nor the new dispatch tests clear its failed exact-work gate.
