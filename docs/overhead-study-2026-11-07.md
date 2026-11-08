@@ -438,3 +438,46 @@ the broader matrix and handheld claims remain held or unobserved. No prospective
 paired gameplay/resource effect or speedup is established. The next positive
 source-analysis row is texture fingerprint CPU cost; the serialized correctness
 lane also needs a source-bound observer contract before a new diagnostic.
+
+
+## R29–R33 source gates and a repeatable serialized control
+
+The texture-fingerprint gate inspected the retained R5 final-linked x86 loop.
+All four lanes were already unrolled, without calls, bounds checks or spills in
+the steady body. This disproved the proposed missing-unroll mechanism for that
+binary. Material removable cost remains unknown; no rewrite or component
+benchmark was advanced, and no ARM codegen conclusion follows.
+
+A current-source control build enabled the existing owner/causality features,
+with neither C1 nor PGO. Its first separately frozen serialized screen remained
+held at the first position: an executable-symlink read failed for the Python
+evaluator helper, while the original classifier rechecked that same identity
+in state R. The native runtime had a different observed PID. The second position
+was cancelled. Actual failure context identifies the process and failed boundary;
+it does not establish a kernel lifecycle cause or repair historical failures.
+
+The next source protocol positively binds that direct evaluator helper before
+excluding it from native-role executable discrimination. A closed receipt of at
+most 4 KiB precedes an exclusive empty ready marker. It binds PID/start, parent,
+actual interpreter image, source/file closure and expected native command; the
+parent revalidates it before final publication. Thread/RSS caps and native or
+unknown-process executable, mapping, classifier, exit and cleanup gates remain.
+Eleven new publication, composed-loop and startup-boundary CPU cases passed.
+The earlier raw-profile preflight mistake is retained separately; two new
+constructor regressions use the original evaluator's profile validator without
+changing the profile or normalizing work counters.
+
+One new prospectively bounded control pair then passed both positions under the
+existing common-serialized policy: GPU-thread off and background-shaders off.
+Each completed 300 batches with 96,194,192 recompiled and 46 interpreted
+instructions, 93 top and 29 bottom pictures. All eight sampled image hashes,
+the full guest trace, full owner document and frames 95–97 causal document
+matched exactly. Both native/evaluator exits were 0 and cleanup was clean.
+
+This establishes sampled repeatability for that current serialized control,
+not complete machine equivalence or shipped-async correctness. The earlier
+async mismatch, C1/P1 failures and all historical holds remain unchanged.
+The probe suppresses audio delivery; no audio, transition, full-matrix,
+physical-device or speedup acceptance follows. The next source gate recovers
+C1's exact retained candidate and checks its viability on the current source
+before any separately admitted matched serialized correctness comparison.
