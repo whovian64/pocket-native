@@ -61,10 +61,10 @@ pub fn write(title: &Title, found: &[Shbin], dir: &Path, lists: &[&Path]) -> std
         }
     });
     let named: HashSet<Vec<u8>> = title.code().map(|code| code.split(|&byte| byte == 0).map(<[u8]>::to_vec).collect()).unwrap_or_default();
-    let mut models = cgfx::lines(&seen, found, &named);
-    bch::lines(&seen, found, &mut models);
-    let mut lines: Vec<(String, usize)> = models.into_iter().collect();
+    let mut lines = cgfx::lines(&seen, found, &named);
+    bch::lines(&seen, found, &mut lines);
     lists::add(title, found, dir, lists, &mut lines)?;
+    let mut lines: Vec<(String, usize)> = lines.into_iter().collect();
     if lines.is_empty() {
         return Ok(0);
     }

@@ -18,8 +18,8 @@ pub type Files<'a> = dyn Fn(&mut dyn FnMut(&[u8], &str)) + 'a;
 
 /// the lines of lists whose vertex programs the title has into lines, the
 /// first list being the title's own: its lines first, then the other
-/// titles'.
-pub(super) fn add(title: &Title, found: &[Shbin], dir: &Path, lists: &[&Path], lines: &mut Vec<(String, usize)>) -> std::io::Result<()> {
+/// titles', a line a model gives too taking the list's place.
+pub(super) fn add(title: &Title, found: &[Shbin], dir: &Path, lists: &[&Path], lines: &mut HashMap<String, usize>) -> std::io::Result<()> {
     let files: HashMap<String, usize> = found.iter().enumerate().map(|(n, shbin)| (format!("{:016x}", shbin.key()), n)).collect();
     let raw = raw_programs(title, found.len(), dir, lists)?;
     let mut listed = HashSet::new();
@@ -38,7 +38,8 @@ pub(super) fn add(title: &Title, found: &[Shbin], dir: &Path, lists: &[&Path], l
             };
             if let Some(line) = at.map(|at| format!("{at} {setup}")).filter(|line| listed.insert(line.clone())) {
                 known += 1;
-                lines.push((line, if own { usize::MAX } else { usize::MAX - 1 }));
+                let rank = lines.entry(line).or_default();
+                *rank = (*rank).max(if own { usize::MAX } else { usize::MAX - 1 });
             }
         }
         if known > 0 {
