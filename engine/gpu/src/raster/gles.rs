@@ -27,6 +27,7 @@ use crate::shader::{ShaderUnit, DESCRIPTOR_SIZE, INPUT_REGISTERS, PROGRAM_SIZE};
 use crate::{GpuMemory, Picture, ScreenRef};
 
 mod between;
+mod compiler_context_owner;
 mod display;
 mod memory;
 mod programs;

@@ -666,9 +666,26 @@ closure and driver compliance remain unknown; no between-position effect or
 uncertainty estimate is accepted. The two-position allowance is consumed, with
 no replay or extension. Compiler release remains held as an optimization.
 
-The next selected source correction gives compiler EGL contexts and fallback
-pbuffers explicit ownership on their worker thread. Thirteen fake EGL cases and
-the expected `!Send`/`!Sync` compile refusals pass. Actual integration, real
-worker teardown and shared-program survival still require separate validation.
-No speedup, memory saving, audio/transition acceptance or default promotion
-follows from these component checks.
+The next selected correction gives compiler EGL contexts and fallback pbuffers
+explicit ownership on their worker thread. It closes the source-reachable
+pbuffer leak when fallback binding fails and supplies matching teardown on
+worker exit. Shader-cache and Glow cleanup occurs while the owned context is
+current, before unbinding, destroying owned EGL objects and releasing thread
+state. Main-display ownership and compiler scheduling are unchanged.
+
+Thirteen fake EGL cases and the expected `!Send`/`!Sync` compile refusals pass.
+Both diagnostic feature configurations compile, and two additional ordinary
+library metadata checks cover production paths without `cfg(test)`. A separately
+admitted real smoke passes old-red/new-green/old-red draws across two sequential
+compiler lifetimes. Its two cleanup records report successful unbind, context
+destruction and thread release; both used surfaceless contexts, so actual
+fallback-pbuffer cleanup remains unobserved. Driver reclamation/finality and
+kernel-TID correspondence remain unknown.
+
+The final publication-source GPU regression passes 179 tests with eight ignored;
+the previously passed pure receipt-format case is filtered out. This includes
+all 13 portable fake owner tests. The historical private GPU gate remains held
+at 181 passed, one failed and seven ignored; this separate public-source suite
+does not repair that admission. The ownership correction is proposed in the PR.
+No speedup, memory saving, audio/transition acceptance or performance-policy
+promotion follows from these component checks.

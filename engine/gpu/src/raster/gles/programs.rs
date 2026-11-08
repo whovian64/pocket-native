@@ -623,6 +623,19 @@ thread_local! {
     pub(super) static SHADERS: std::cell::RefCell<rustc_hash::FxHashMap<(u32, u64), glow::Shader>> = std::cell::RefCell::new(Default::default());
 }
 
+/// Called only by the worker context owner while that exact context is
+/// current, after the worker loop (including unwind), before EGL teardown.
+/// The map owns standalone shader objects, not linked/separable programs.
+/// Drain before deletion releases the RefCell borrow and all map ownership.
+pub(super) fn release_worker_shaders(gl: &glow::Context) {
+    let shaders: Vec<_> = SHADERS.with(|shaders| shaders.borrow_mut().drain().map(|(_, shader)| shader).collect());
+    for shader in shaders {
+        // SAFETY: the worker owner established its current sharing context.
+        // Deleting a retained shader does not delete linked program executables.
+        unsafe { gl.delete_shader(shader) };
+    }
+}
+
 pub(super) fn compiled_shader(stage: u32, source: &str) -> Option<glow::Shader> {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *OFF.get_or_init(|| crate::switch("ZAKURO_NO_SHADER_REUSE", "every program compiles both its stages")) {
@@ -921,7 +934,7 @@ impl Compiler {
                         // SAFETY: the context is current, the extension names it
                         unsafe { observe!(ParallelHint, &gl, requested as u64, gl.max_shader_compiler_threads(requested)) };
                         #[cfg(feature = "shader-attribution")]
-                        log::info!("diagnostic driver compiler hint: requested={requested} worker={index} tid={} opaque_context={:x}; extension=GL_KHR_parallel_shader_compile; driver_compliance=unknown", attribution::thread(), &gl as *const glow::Context as usize);
+                        log::info!("diagnostic driver compiler hint: requested={requested} worker={index} tid={} opaque_context={:x}; extension=GL_KHR_parallel_shader_compile; driver_compliance=unknown", attribution::thread(), &*gl as *const glow::Context as usize);
                         log::info!("the driver compiles this thread's shaders in threads of its own");
                     }
                     let _ = ready.send(true);
@@ -1888,6 +1901,95 @@ mod compiler_release_tests {
 
     const BINARY_VERTEX: &str = "#version 310 es\nvoid main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
     const BINARY_FRAGMENT: &str = "#version 310 es\nprecision highp float;\nlayout(location=0) out vec4 color;\nvoid main() { color = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+
+    // Source-only finite test of two actual Compiler lifetimes and one main context.
+    // Root must run this ignored case alone in a fresh admitted process.
+    const GREEN_FRAGMENT: &str = "#version 310 es\nprecision highp float;\nlayout(location=0) out vec4 color;\nvoid main() { color = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+
+    struct FixtureCompiler(Option<Compiler>);
+    impl Drop for FixtureCompiler {
+        fn drop(&mut self) { if let Some(compiler) = self.0.take() { compiler.stop(); } }
+    }
+    impl FixtureCompiler {
+        fn stop(&mut self) { if let Some(compiler) = self.0.take() { compiler.stop(); } }
+        fn build(&mut self, tag: u64, fragment: &str) -> glow::Program {
+            let compiler = self.0.as_mut().expect("live actual compiler");
+            let key = ([0u32; FRAGMENT_CONSTANTS], false, Vec::new(), tag);
+            BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if compiler.jobs.send(Compile { key: key.clone(), vertex: BINARY_VERTEX.to_owned(), fragment: fragment.to_owned(), cached: None }).is_err() {
+                BUILDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                panic!("actual compiler queue closed");
+            }
+            let (returned, program) = compiler.done.recv_timeout(std::time::Duration::from_secs(30)).expect("actual compiler result missing");
+            assert_eq!(returned,key); program.expect("actual compiler program failed")
+        }
+    }
+    fn render_cleanup_receipts(rows: &[Option<super::super::display::WorkerCleanupReceipt>; 2], overflow: bool, case_ok: bool) -> String {
+        let mut s = format!("egl_owned_worker_smoke_v1 gl_sequence_ok={case_ok} overflow={overflow} slots=2 snapshot=after_scope finality=unknown\n");
+        for (i,row) in rows.iter().enumerate() {
+            match row {
+                None => s.push_str(&format!("worker={i} receipt=missing cleanup=unknown\n")),
+                Some(r) => s.push_str(&format!("worker={i} thread={:?} context={:?} surface={:?} gl_cleanup_attempted={} unbind={:?} destroy_surface={:?} destroy_context={:?} release_thread={:?} foreign={} wrong_thread={} already_closed={} failed={} gl_driver_reclamation=unknown\n", r.thread, r.context, r.surface, r.gl_cleanup_attempted, r.report.unbind, r.report.destroy_surface, r.report.destroy_context, r.report.release_thread, r.report.foreign_current, r.report.wrong_thread, r.report.already_closed, r.report.failed())),
+            }
+        }
+        s
+    }
+    #[test]
+    fn owned_worker_receipt_format_preserves_missing_and_failure() {
+        use super::super::display::WorkerCleanupReceipt;
+        let report = super::super::compiler_context_owner::CleanupReport { destroy_context: Some(false), ..Default::default() };
+        let row = WorkerCleanupReceipt { thread: std::thread::current().id(), context: Some(1), surface: None, gl_cleanup_attempted: false, report };
+        let text = render_cleanup_receipts(&[Some(row),None],false,false);
+        assert!(text.contains("destroy_context=Some(false)")); assert!(text.contains("receipt=missing cleanup=unknown"));
+        assert!(text.contains("gl_driver_reclamation=unknown")); assert!(text.len() < 4096);
+    }
+    #[test]
+    #[ignore = "real EGL/GL; root-admitted fresh process only"]
+    fn owned_compiler_worker_old_new_old_program_smoke() {
+        use std::io::Write;
+        let destination=std::env::var_os("ZAKURO_EGL_WORKER_RECEIPT").expect("fresh receipt path required");
+        super::super::display::fixture_cleanup_reset();
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(compilers(),1,"requires ZAKURO_COMPILERS=1");
+            assert!(std::env::var_os("ZAKURO_SYNC_SHADERS").is_none());
+            assert!(std::env::var_os("ZAKURO_SEPARABLE_SHADERS").is_none());
+            let (worker, _gl, first)=Worker::start().expect("real main EGL worker");
+            let mut first=FixtureCompiler(Some(first.expect("first actual compiler")));
+            assert_eq!(first.0.as_ref().unwrap().threads.len(),1);
+            let old=first.build(1,BINARY_FRAGMENT);
+            let red=[255,0,0,255].repeat(4); let green=[0,255,0,255].repeat(4);
+            worker.run_keeping(|| { let gl=GL_CONTEXT.get().expect("main GL"); assert_eq!(red_pixels(gl,old).as_slice(),red.as_slice()); });
+            first.stop(); // closes queue, joins worker, drops owned EGL context
+            worker.run_keeping(|| { let gl=GL_CONTEXT.get().expect("main GL"); assert_eq!(red_pixels(gl,old).as_slice(),red.as_slice()); });
+            let raw=worker.run_keeping(|| SHARE_GROUP.get()); assert_ne!(raw,0);
+            // SAFETY: Worker::start leaks its Egl for the main worker's lifetime;
+            // the worker remains live throughout this call and this fixture.
+            let egl: &'static Egl=unsafe { &*(raw as *const Egl) };
+            let mut second=FixtureCompiler(Some(Compiler::start(egl).expect("replacement actual compiler")));
+            assert_eq!(second.0.as_ref().unwrap().threads.len(),1);
+            let new=second.build(2,GREEN_FRAGMENT);
+            worker.run_keeping(|| { let gl=GL_CONTEXT.get().expect("main GL"); assert_eq!(red_pixels(gl,new).as_slice(),green.as_slice()); });
+            second.stop();
+            worker.run_keeping(|| { let gl=GL_CONTEXT.get().expect("main GL");
+                assert_eq!(red_pixels(gl,old).as_slice(),red.as_slice());
+                // SAFETY: both linked programs have finished their readback on this current context.
+                unsafe { gl.delete_program(old); gl.delete_program(new); }
+            });
+        }));
+        let (rows,overflow)=super::super::display::fixture_cleanup_snapshot();
+        let text=render_cleanup_receipts(&rows,overflow,result.is_ok());
+        assert!(text.len() < 4096);
+        let mut f=std::fs::OpenOptions::new().write(true).create_new(true).open(destination).expect("exclusive receipt");
+        f.write_all(text.as_bytes()).expect("receipt write"); f.flush().expect("receipt flush");
+        if let Err(panic)=result { std::panic::resume_unwind(panic); }
+        assert!(!overflow); assert!(rows.iter().all(Option::is_some));
+        for row in rows.into_iter().flatten() {
+            assert!(row.context.is_some() && row.gl_cleanup_attempted);
+            assert!(!row.report.failed() && !row.report.already_closed && row.report.unbind==Some(true));
+            assert_eq!(row.report.destroy_context,Some(true)); assert_eq!(row.report.release_thread,Some(true));
+            assert_eq!(row.report.destroy_surface,if row.surface.is_some(){Some(true)}else{None});
+        }
+    }
 
     #[test]
     fn program_binary_none_and_some_paths_preserve_exact_pixels() {

@@ -1287,6 +1287,107 @@ pub(super) struct Egl {
     pub(super) surface: std::sync::atomic::AtomicPtr<c_void>,
 }
 
+/// A backend owns ONLY one compiler's context/pbuffer on this display. It
+/// borrows the intentionally static parent Egl; it never destroys that parent
+/// context, its panel surfaces, the shared display or EGL libraries.
+struct CompilerEgl<'a> { egl: &'a Egl }
+impl super::compiler_context_owner::EglApi for CompilerEgl<'_> {
+    fn create_context(&self) -> usize {
+        let attributes = [egl::CONTEXT_CLIENT_VERSION as i32, 3, egl::CONTEXT_MINOR_VERSION as i32, 1, egl::NONE as i32];
+        let context = unsafe { self.egl.egl.CreateContext(self.egl.display, self.egl.config, self.egl.context, attributes.as_ptr()) as usize };
+        if context == 0 { log::warn!("no context to compile shaders in: error=0x{:x}", unsafe { self.egl.egl.GetError() }); }
+        context
+    }
+    fn create_pbuffer(&self) -> usize {
+        let attributes = [egl::WIDTH as i32, 16, egl::HEIGHT as i32, 16, egl::NONE as i32];
+        let surface = unsafe { self.egl.egl.CreatePbufferSurface(self.egl.display, self.egl.config, attributes.as_ptr()) as usize };
+        if surface == 0 { log::warn!("compiler EGL pbuffer create failed: error=0x{:x}", unsafe { self.egl.egl.GetError() }); }
+        surface
+    }
+    fn make_current(&self, context: usize, surface: usize) -> bool {
+        let ok = unsafe { self.egl.egl.MakeCurrent(self.egl.display, surface as egl::types::EGLSurface, surface as egl::types::EGLSurface, context as egl::types::EGLContext) != 0 };
+        if !ok && (surface != 0 || context == 0) { log::warn!("compiler EGL bind/unbind failed: context={context:x} surface={surface:x} error=0x{:x}", unsafe { self.egl.egl.GetError() }); }
+        ok
+    }
+    fn current_context(&self) -> usize { unsafe { self.egl.egl.GetCurrentContext() as usize } }
+    fn destroy_surface(&self, surface: usize) -> bool {
+        let ok = unsafe { self.egl.egl.DestroySurface(self.egl.display, surface as egl::types::EGLSurface) != 0 };
+        if !ok { log::warn!("compiler EGL surface destroy failed: handle={surface:x} error=0x{:x}", unsafe { self.egl.egl.GetError() }); }
+        ok
+    }
+    fn destroy_context(&self, context: usize) -> bool {
+        let ok = unsafe { self.egl.egl.DestroyContext(self.egl.display, context as egl::types::EGLContext) != 0 };
+        if !ok { log::warn!("compiler EGL context destroy failed: handle={context:x} error=0x{:x}", unsafe { self.egl.egl.GetError() }); }
+        ok
+    }
+    fn release_thread(&self) -> bool {
+        let ok = unsafe { self.egl.egl.ReleaseThread() != 0 };
+        if !ok { log::warn!("compiler EGL thread release failed: error=0x{:x}", unsafe { self.egl.egl.GetError() }); }
+        ok
+    }
+}
+
+// Test-only receipt for at most two actual compiler context owners.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(super) struct WorkerCleanupReceipt {
+    pub thread: std::thread::ThreadId,
+    pub context: Option<usize>,
+    pub surface: Option<usize>,
+    pub gl_cleanup_attempted: bool,
+    pub report: super::compiler_context_owner::CleanupReport,
+}
+#[cfg(test)]
+static WORKER_CLEANUP_FIXTURE: std::sync::Mutex<([Option<WorkerCleanupReceipt>; 2], bool)> =
+    std::sync::Mutex::new(([None, None], false));
+#[cfg(test)]
+pub(super) fn fixture_cleanup_reset() {
+    *WORKER_CLEANUP_FIXTURE.lock().unwrap_or_else(|e| e.into_inner()) = ([None, None], false);
+}
+#[cfg(test)]
+pub(super) fn fixture_cleanup_snapshot() -> ([Option<WorkerCleanupReceipt>; 2], bool) {
+    WORKER_CLEANUP_FIXTURE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+#[cfg(test)]
+fn fixture_cleanup_record(receipt: WorkerCleanupReceipt) {
+    let mut state = WORKER_CLEANUP_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = state.0.iter_mut().find(|slot| slot.is_none()) { *slot = Some(receipt); }
+    else { state.1 = true; }
+}
+
+pub(super) struct SharedCompilerContext<'a> {
+    gl: std::mem::ManuallyDrop<glow::Context>,
+    owner: super::compiler_context_owner::ContextOwner<CompilerEgl<'a>>,
+}
+impl std::ops::Deref for SharedCompilerContext<'_> {
+    type Target = glow::Context;
+    fn deref(&self) -> &Self::Target { &self.gl }
+}
+impl Drop for SharedCompilerContext<'_> {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        let (fixture_context, fixture_surface) = (self.owner.context(), self.owner.surface());
+        let current_for_cleanup = self.owner.ensure_current_for_cleanup();
+        if current_for_cleanup {
+            // Worker-owned standalone shader objects only; linked programs,
+            // shared separable-stage leases and main renderer objects survive.
+            super::programs::release_worker_shaders(&self.gl);
+            // Glow::Context::drop may unset a debug callback through GL.
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.gl) };
+        } else {
+            // No GL call on a missing/foreign context. ManuallyDrop intentionally
+            // retains the wrapper/callback allocation in this exceptional path;
+            // shader/driver reclamation is unknown, not falsely called complete.
+            log::warn!("compiler context unavailable for GL cache/Glow cleanup; retained shader and callback reclamation unknown");
+        }
+        let report = self.owner.close();
+        #[cfg(test)]
+        fixture_cleanup_record(WorkerCleanupReceipt { thread: std::thread::current().id(), context: fixture_context, surface: fixture_surface, gl_cleanup_attempted: current_for_cleanup, report });
+        if report.failed() { log::warn!("compiler EGL cleanup incomplete: {report:?}"); }
+        // ContextOwner::drop is now an explicit no-op; no second destroy attempt.
+    }
+}
+
 // SAFETY: EGL's entry points can be called from any thread, and the handles
 // here are only read once made
 unsafe impl Send for Egl {}
@@ -1650,39 +1751,26 @@ impl Egl {
         Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface: std::sync::atomic::AtomicPtr::new(surface as *mut c_void) }, gl))
     }
 
-    /// a context sharing this one's objects, made current on the calling
-    /// thread with no surface, or a small pbuffer where EGL wants one.
-    pub(super) fn shared_context(&self) -> Option<glow::Context> {
-        // SAFETY: plain EGL calls with attribute lists that end in NONE and
-        // live as long as each call
-        unsafe {
-            let attributes = [egl::CONTEXT_CLIENT_VERSION as i32, 3, egl::CONTEXT_MINOR_VERSION as i32, 1, egl::NONE as i32];
-            let context = self.egl.CreateContext(self.display, self.config, self.context, attributes.as_ptr());
-            if context.is_null() {
-                log::warn!("no context to compile shaders in, 0x{:X}", self.egl.GetError());
+    /// An owned context sharing this one's objects. The guard is thread-bound
+    /// and tears down its worker caches/Glow dispatch before raw EGL handles.
+    pub(super) fn shared_context(&self) -> Option<SharedCompilerContext<'_>> {
+        let owner = match super::compiler_context_owner::ContextOwner::create(CompilerEgl { egl: self }) {
+            Ok(owner) => owner,
+            Err(error) => {
+                log::warn!("compiler EGL context startup failed: {error:?}");
                 return None;
             }
-            let mut current = self.egl.MakeCurrent(self.display, egl::NO_SURFACE, egl::NO_SURFACE, context) != 0;
-            if !current {
-                let size = [egl::WIDTH as i32, 16, egl::HEIGHT as i32, 16, egl::NONE as i32];
-                let surface = self.egl.CreatePbufferSurface(self.display, self.config, size.as_ptr());
-                current = !surface.is_null() && self.egl.MakeCurrent(self.display, surface, surface, context) != 0;
-            }
-            if !current {
-                log::warn!("could not make the context to compile shaders in current, 0x{:X}", self.egl.GetError());
-                self.egl.DestroyContext(self.display, context);
-                return None;
-            }
-            let gles = self.libraries.1.as_ref();
-            Some(glow::Context::from_loader_function(|name| {
-                let direct = gles.map_or(std::ptr::null(), |gles| symbol(gles, name));
-                if !direct.is_null() {
-                    return direct;
-                }
-                let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
-                self.egl.GetProcAddress(c_name.as_ptr()) as *const c_void
-            }))
-        }
+        };
+        // The owner already exists: if Glow construction panics, its raw EGL
+        // context/pbuffer still have a matching cleanup owner on this thread.
+        let gles = self.libraries.1.as_ref();
+        let gl = unsafe { glow::Context::from_loader_function(|name| {
+            let direct = gles.map_or(std::ptr::null(), |gles| symbol(gles, name));
+            if !direct.is_null() { return direct; }
+            let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
+            self.egl.GetProcAddress(c_name.as_ptr()) as *const c_void
+        }) };
+        Some(SharedCompilerContext { gl: std::mem::ManuallyDrop::new(gl), owner })
     }
 
     pub(super) fn new_with_panel() -> Result<(Egl, glow::Context, Option<Output>), String> {
