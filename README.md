@@ -78,7 +78,7 @@ working or not.
 |---|---|---|---|
 | R36S and its clones | RK3326, Mali-G31 | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones, ROCKNIX | The main target, developed and tested on an R36S with ArkOS |
 | Powkiddy RX6H | RK3326, Mali-G31 | dArkOS for clones | Played by testers. No FN button: L3 does its job. Its Mali driver crashes while building some games' shaders: from 0.5.0 the game notes the shader and gets past it on its next start |
-| Anbernic RG351P | RK3326, Mali-G31 | ArkOS | Buttons not found yet |
+| Anbernic RG351P | RK3326, Mali-G31 | ArkOS | OSH PB buttons and sticks mapped; needs on-device verification |
 | Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | H700, Mali-G31 | Knulli, muOS | Played by testers: Super Mario 3D Land, A Link Between Worlds, Smash, Project X Zone 1 and 2, Shantae and the Pirate's Curse, Dragon Ball Z: Extreme Butoden, Kingdom Hearts 3D, Pokémon Omega Ruby, Donkey Kong Country Returns 3D |
 | Anbernic RG353 and RG503 | RK3566, Mali-G52 | ArkOS, ROCKNIX | Buttons mapped, no tester report yet |
 | Miyoo Flip | RK3566, Mali-G52 | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |

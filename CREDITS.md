@@ -48,6 +48,7 @@ pull requests:
 - **kadeshar**: the DSP filter fix that keeps PCM sound from going silent ([#37](https://github.com/whovian64/pocket-native/pull/37))
 - **ecer96**: culling that leaves a mesh drawn more than once alone,
   which made Super Mario 3D Land's coins and blocks flicker
+- **birgitzprinz**: the RG351P/M's OSH PB pad ([#45](https://github.com/whovian64/pocket-native/pull/45))
 
 ## Menu font
 

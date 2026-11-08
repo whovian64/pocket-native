@@ -4,7 +4,7 @@
 //!
 //! ZAKURO_KMS=1 ZAKURO_RECOMPILED=title.so ZAKURO_DATA=dir pocket-native <rom>
 //!
-//! A tap of FN, or L3 and R2 together, opens the menu, FN+Start quits, a tap
+//! A tap of FN, or L3 and R2 together, opens the menu, FN+Start quits (Select+Start on the RG351P/M), a tap
 //! of L2 or FN+L1 swaps the screens, FN+R1 shows both or one big, FN+Select
 //! turns the d-pad into the circle pad or the touch cursor, L3 doing for FN
 //! in these, the right stick moves the touch cursor and R2 touches, or tilts
@@ -267,13 +267,13 @@ pub fn run(mut args: Vec<String>) {
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
     loop {
         let began = Instant::now();
-        let (mut keys, mut axes, fingers, second_touch, pad_used) = {
+        let (mut keys, mut axes, fingers, second_touch, pad_used, osh_pb) = {
             let mut pad = pad.lock().unwrap();
             let keys: HashSet<u16> = pad.keys.union(&pad.let_go).copied().collect();
             let fingers: Vec<(i32, f32, f32)> = pad.fingers.iter().chain(&pad.lifted).copied().collect();
             pad.let_go.clear();
             pad.lifted.clear();
-            (keys, pad.axes, fingers, pad.second_touch, pad.pad_used)
+            (keys, pad.axes, fingers, pad.second_touch, pad.pad_used, pad.osh_pb)
         };
         if input::QUIT.load(std::sync::atomic::Ordering::Relaxed) {
             log::info!("asked to quit");
@@ -390,7 +390,7 @@ pub fn run(mut args: Vec<String>) {
 
         // L3 stands in for FN on handhelds with no FN
         let hotkey = keys.contains(&FN) || keys.contains(&L3);
-        if hotkey && start {
+        if input::exit_combo(&keys, start, osh_pb) {
             break;
         }
         if l2 {
