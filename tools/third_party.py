@@ -30,7 +30,8 @@ generated from Montserrat (SIL Open Font License 1.1) and GNU Unifont 10.0.05
 A game's sysdata/CFL_Res.placeholder.dat, where there is one, is the
 open-source placeholder for the 3DS's Mii parts, taken at build time from the
 same archives, which citra_system_archives (GPL-2.0) generated. A
-sysdata/CFL_Res.dat came from the player's own console or game.
+sysdata/CFL_Res.dat came from the player's own console or game, or from
+Nintendo's update servers, opened with the player's own keys.
 """
 
 

@@ -86,13 +86,17 @@ cp LICENSE CREDITS.md assets/fonts/OFL.txt "$pn/"
 python3 tools/third_party.py "$pn/THIRD_PARTY_LICENSES.txt" >/dev/null
 aarch64-linux-gnu-strip -o "$pn/games/$id/title.so" "/work/recomp/$id/$id.so"
 cp /work/shared_font.bin "$pn/games/$id/sysdata/shared_font.bin"
-# Mii heads, experimental: the console's Mii parts from the kit's folder or
-# a game that carries them, Animal Crossing: New Leaf does, into every game
-# built, else Azahar's placeholder
+# Mii heads, experimental: the console's Mii parts from the kit's folder, a
+# game that carries them (Animal Crossing: New Leaf does) or Nintendo's
+# servers with the keys' common key, into every game built, else Azahar's
+# placeholder
 for own in CFL_Res.dat 00000000.app.romfs; do
     [ -f "$own" ] && python3 tools/mii_parts.py "$own" /work/mii_parts.dat && break
 done
 [ -f "/work/recomp/$id/CFL_Res.dat" ] && [ ! -f /work/mii_parts.dat ] && cp "/work/recomp/$id/CFL_Res.dat" /work/mii_parts.dat
+if [ ! -f /work/mii_parts.dat ] && [ -n "$keys" ]; then
+    python3 tools/mii_download.py "$keys" /work/mii_parts.dat || true
+fi
 if [ ! -f /work/mii_parts.dat ] && [ ! -f /work/mii_placeholder.dat ]; then
     curl -sSfL "$MII_URL" -o /work/mii.app.romfs.h && python3 tools/mii_parts.py /work/mii.app.romfs.h /work/mii_placeholder.dat || echo "== no Mii placeholder, Mii heads stay blank"
 fi

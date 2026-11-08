@@ -229,12 +229,16 @@ Start it, wait until it says it's running, and build again.
 
 **Miis have no heads, or heads with no faces (experimental).** Mii heads
 are drawn from the console's Mii parts, which are Nintendo's and can't come
-with Pocket Native. The build looks for them and copies them into every game
-it builds:
+with Pocket Native. The build gets them and copies them into every game it
+builds:
+- with your console's full `aes_keys.txt` in the kit's folder (one with the
+  `slot0x3DKeyX` and `common0` lines), it downloads them from Nintendo's
+  update servers and opens them with your keys, as a 3DS gets its system
+  data;
 - a `CFL_Res.dat` from your own console, or the `00000000.app.romfs` Citra
   and Azahar keep them in (`nand/.../title/0004009b/00010202/content/`), put
-  in the kit's folder;
-- a game you build that carries them, as Animal Crossing: New Leaf does.
+  in the kit's folder, works too, as does a game you build that carries
+  them (Animal Crossing: New Leaf does).
 
 Without them, Miis get an open-source placeholder head with no face. After
 adding them, run `Rebuild all games` and copy the folder onto the card again.
