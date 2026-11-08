@@ -162,3 +162,72 @@ Eight new changed-policy CPU cases passed for one separate 300-batch baseline A/
 The first position completes with native/evaluator 0 and valid strict evidence. The second position is stopped by the unchanged fail-closed observer: **live process has missing proc evidence**. Cleanup has no errors/survivors, but the second native's normal exit is unknown and its evaluator manifest remains incomplete. That generation's two allowances are consumed and its hold is preserved. Offline parsing finds identical raw recompiled/interpreted totals (**96,194,192 / 46**), screenshots, guest trace and complete owner/causality documents. These matching artifacts do not repair missing exit or observer admission; serialized repeatability remains unaccepted and all C1/PGO holds remain.
 
 The historical helper discarded the missing read's filename and exact classifier state, so the cause cannot be reconstructed. A separate failure-only wrapper now preserves bounded path/errno/call context through the same literal classifier, without adding proc reads or changing its predicate. Five new CPU cases—including an actual missing self-proc read—and two new wired-guardian/one-native-boundary cases pass. One distinct, prospectively declared lifecycle observation then completes native/evaluator 0 with no missing-read incident. Its one-run allowance is consumed; no-incident was an allowed diagnostic outcome, not a reason for another run or retrospective clearance of the failed screen. No timing, gameplay gain, shipped-async correctness, audio, transition, matrix or device claim follows. Source-only preparation next checks whether the already-selected G1 resource question can use a small exact retained shader workload with complete readiness/quality evidence, separately from full-game candidate acceptance.
+
+## R15 retained shader sources: fixed work before a driver-hint diagnostic
+
+A new CPU-only source gate regenerated all 18 unique program rows from the
+unchanged retained baseline cache, using the existing translation and GLSL
+paths. The result contains seven unique vertex sources, 18 unique fragment
+sources and 18 unique canonical full keys. Full keys preserve all lighting
+words: seven rows contain 31 words; the others contain none. SHA-256 binds
+the complete literal sources and key bytes. No driver binary was used as a
+substitute for compiling source.
+
+One new ignored CPU case passed on the frozen private test binary SHA-256
+`34a7e87112f16fe5b2076b5976a36740a212869c127fe1b58f5917704ca73a57`.
+The original private build failure and first offline-reader failure are retained;
+a separate test-only initializer correction and remaining-only reader correction
+produced this result. No old GPU suite, title, hint or timing run was replayed.
+This establishes a finite source worklist, not driver readiness or benefit.
+
+The next private fixture uses the actual single background compiler worker and
+its hinted context. Ordinary preload uses the owner context and cannot stand
+in for that path. The prospective factor is only the issued unlimited-versus-one
+compiler-thread request, with the literal worklist, source order, stage reuse,
+external worker count and cache policy fixed. An issued hint does not establish
+driver compliance. Each row must compile/link, return its matching full key and
+finish before another is submitted; the independent 18-row ledger does not
+interpret the existing first-256-event recorder as complete. Fixture closure
+can prove application job/worker completion only, not late driver retirement,
+pixels, audio, game speed or handheld behavior.
+
+## R16 actual compiler-context hint: exact fixed work completes
+
+The new private fixture build and one new pure CPU key-validation case passed.
+Exactly two fresh GL processes then ran, one per prospectively frozen hint
+position, on the same test binary SHA-256
+`5893e807ade5383a1d4826153e1123a1aa0867fc9e65d4a7aea57cf5d38d1199`.
+Each used one existing application compiler worker, the same ordered 18 literal
+pairs/full keys, monolithic compilation, existing stage reuse, no application
+binary load/save and fresh application cache with driver disk caches disabled.
+Each actual worker context advertised the extension and issued its requested
+hint. The NVIDIA GLES context reported an RTX 4060 Laptop GPU and version
+615.78.08; this is not Android/Mali or physical handheld evidence.
+
+Both processes returned normally with all 18 exact-key results and positive
+links. Per-row stage dispositions match: 25 fresh stage compiles and 11 reuses,
+each reuse bound to an earlier successful identical source and actual shader
+handle. Application workers joined, BUILDING and in-flight jobs were zero,
+and cleanup recorded no survivors or resource errors. Each bounded attribution
+snapshot contained 161 completed records, zero open/reserved/dropped, under the
+unchanged 256-event cap. The independent full-work ledger supplies fixture
+closure; no prefix-representativeness assumption is used.
+
+The unlimited-hint position reached 11 sampled process threads and 315,248,640
+bytes sampled owned RSS; hint=1 reached four and 228,474,880 bytes. Owned RSS
+includes the root observer. Reaped process user/system CPU was 5.097/0.342 s
+and 5.045/0.253 s respectively. These are **non-timing diagnostic observations**:
+one process per position, fixed order, sampled peaks and instrumentation do not
+establish effect uncertainty, a resource saving, driver compliance, exact
+compiler-thread ownership or gameplay improvement. The finite two-process
+allowance is exhausted; it will not be replayed.
+
+**G1 remains held for promotion.** A separate source-only preparation now reuses
+the existing opt-in policy/readiness interfaces to define the smallest normal-mode,
+audio-on startup observation. It must distinguish demanded exact-program
+readiness from aggregate completion and preserve known observer limits. Compile
+success is not pixel or audio correctness; late driver retirement, transitions,
+other games/scales/layouts, quiet-host timing and physical devices remain unknown.
+The async baseline oracle and serialized observer holds, C1/P1/P2 dispositions
+and closed 170 executions / 15 held series remain unchanged. No accepted speedup
+or default runtime change follows.
