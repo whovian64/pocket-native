@@ -36,4 +36,6 @@ case "$1" in
 esac
 [ "$4" = - ] || set_to "$dmc/governor" "$4"
 [ "$1" = saver ] && set_to "$cpu/scaling_max_freq" 1200000
+# what took, for the game's log
+echo "power $1: cpu $(governor "$cpu" scaling_governor) $(governor "$cpu" scaling_cur_freq) kHz, gpu $(governor "$gpu" governor) $(governor "$gpu" min_freq)-$(governor "$gpu" max_freq) Hz at $(governor "$gpu" cur_freq), memory $(governor "$dmc" governor)"
 exit 0
