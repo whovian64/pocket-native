@@ -179,8 +179,18 @@ impl ShaderUnit {
 
     /// float uniforms arrive component by component, three words carry four
     /// packed 24-bit floats, or four words carry plain singles.
-    pub fn upload_float_uniforms(&mut self, words: &[u32]) {
-        for &word in words {
+    pub fn upload_float_uniforms(&mut self, mut words: &[u32]) {
+        // a vector begun before goes on word by word, whole ones at once
+        while self.float_uniform_component != 0 && !words.is_empty() {
+            self.upload_float_uniform(words[0]);
+            words = &words[1..];
+        }
+        let size = if self.float_uniform_wide { 4 } else { 3 };
+        let whole = words.len() / size * size;
+        for staged in words[..whole].chunks_exact(size) {
+            self.store_float_uniform(staged);
+        }
+        for &word in &words[whole..] {
             self.upload_float_uniform(word);
         }
     }
@@ -209,8 +219,11 @@ impl ShaderUnit {
 
         let staged = self.float_uniform_staging;
         self.float_uniform_component = 0;
+        self.store_float_uniform(&staged);
+    }
 
-        let value = float_uniform(&staged, self.float_uniform_wide);
+    fn store_float_uniform(&mut self, staged: &[u32]) {
+        let value = float_uniform(staged, self.float_uniform_wide);
 
         if value.iter().any(|c| c.is_nan()) {
             log::trace!(
@@ -860,6 +873,24 @@ fn flow_condition(unit: &ShaderUnit, state: &ShaderState, instruction: Instructi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_burst_of_uniforms_lands_as_word_by_word() {
+        let words: Vec<u32> = (0..29u32).map(|i| i.wrapping_mul(0x9E37_79B9) ^ 0x3F80_0000).collect();
+        for raw in [5, 0x8000_0007] {
+            let (mut burst, mut single) = (ShaderUnit::new(), ShaderUnit::new());
+            for unit in [&mut burst, &mut single] {
+                unit.set_float_uniform_index(raw);
+                unit.upload_float_uniform(words[0]);
+            }
+            burst.upload_float_uniforms(&words[1..]);
+            for &word in &words[1..] {
+                single.upload_float_uniform(word);
+            }
+            assert_eq!(burst.float_uniforms.map(|v| v.map(f32::to_bits)), single.float_uniforms.map(|v| v.map(f32::to_bits)));
+            assert_eq!((burst.float_uniform_index, burst.float_uniform_component), (single.float_uniform_index, single.float_uniform_component));
+        }
+    }
 
     fn unit_with(program: &[u32], descriptors: &[u32]) -> ShaderUnit {
         let mut unit = ShaderUnit::new();
