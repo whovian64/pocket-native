@@ -93,6 +93,7 @@ fn component(bytes: &[u8], ty: u32) -> f32 {
 }
 
 /// where an attribute sits in a loader's vertex.
+#[derive(Clone, Copy, Default)]
 struct Field {
     id: usize,
     offset: u32,
@@ -100,46 +101,74 @@ struct Field {
     count: u32,
 }
 
+/// up to twelve, in place rather than on the heap: a draw has at most twelve
+/// arrays of at most twelve attributes, and lays them out anew every time
+#[derive(Clone, Copy, Default)]
+struct Twelve<T> {
+    items: [T; 12],
+    len: usize,
+}
+
+impl<T> std::ops::Deref for Twelve<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.items[..self.len]
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Twelve<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T> Twelve<T> {
+    fn push(&mut self, item: T) {
+        self.items[self.len] = item;
+        self.len += 1;
+    }
+}
+
 /// one attribute array, as a vertex of it is laid out.
+#[derive(Clone, Copy, Default)]
 struct LoaderLayout {
     offset: u32,
     stride: u32,
     /// the bytes of a vertex the fields take.
     size: u32,
-    fields: Vec<Field>,
+    fields: Twelve<Field>,
 }
 
 /// how the attribute arrays lay out a vertex, worked out once for a draw
 /// rather than for every vertex.
 struct VertexLayout {
-    loaders: Vec<LoaderLayout>,
+    loaders: Twelve<LoaderLayout>,
 }
 
 impl VertexLayout {
     fn read(registers: &[u32]) -> VertexLayout {
-        let loaders = read_loaders(registers)
-            .iter()
-            .filter(|loader| loader.component_count > 0)
-            .map(|loader| {
-                let mut offset = 0u32;
-                let mut fields = Vec::new();
-                for slot in 0..loader.component_count.min(12) {
-                    let id = ((loader.components >> (slot * 4)) & 0xF) as usize;
-                    if id >= 12 {
-                        // padding, aligned to a word, then 4, 8, 12 or 16 bytes.
-                        offset = offset.next_multiple_of(4) + (id as u32 - 11) * 4;
-                        continue;
-                    }
-                    let (ty, count) = attribute_format(registers, id as u32);
-                    let size = component_size(ty);
-                    // each attribute starts aligned to its component size.
-                    offset = offset.next_multiple_of(size);
-                    fields.push(Field { id, offset, ty, count });
-                    offset += size * count;
+        let mut loaders = Twelve::default();
+        for loader in read_loaders(registers).iter().filter(|loader| loader.component_count > 0) {
+            let mut offset = 0u32;
+            let mut fields = Twelve::default();
+            for slot in 0..loader.component_count.min(12) {
+                let id = ((loader.components >> (slot * 4)) & 0xF) as usize;
+                if id >= 12 {
+                    // padding, aligned to a word, then 4, 8, 12 or 16 bytes.
+                    offset = offset.next_multiple_of(4) + (id as u32 - 11) * 4;
+                    continue;
                 }
-                LoaderLayout { offset: loader.offset, stride: loader.stride, size: offset, fields }
-            })
-            .collect();
+                let (ty, count) = attribute_format(registers, id as u32);
+                let size = component_size(ty);
+                // each attribute starts aligned to its component size.
+                offset = offset.next_multiple_of(size);
+                fields.push(Field { id, offset, ty, count });
+                offset += size * count;
+            }
+            loaders.push(LoaderLayout { offset: loader.offset, stride: loader.stride, size: offset, fields });
+        }
         VertexLayout { loaders }
     }
 }
@@ -471,7 +500,7 @@ fn fetch_arrays<M: GpuMemory>(
         }
     }
     let mut arrays: Vec<host::FetchedArray> = Vec::new();
-    let mut uploaded: Vec<Option<usize>> = vec![None; layout.loaders.len()];
+    let mut uploaded: [Option<usize>; 12] = [None; 12];
     let mut inputs = [host::Input::Constant(shader::ZERO); shader::INPUT_REGISTERS];
     for id in 0..count {
         let register = ((map >> (id * 4)) & 0xF) as usize;
