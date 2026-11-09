@@ -698,6 +698,8 @@ impl<T> Pool<T> {
 
 static WORDS: Pool<u32> = Pool::new();
 static BYTES: Pool<u8> = Pool::new();
+static ARRAYS: Pool<Arc<[u8]>> = Pool::new();
+static SLOTS: Pool<(usize, Attribute)> = Pool::new();
 
 enum Submit {
     Triangles { viewport: [i32; 4], vertices: Vec<u8>, count: i32 },
@@ -992,8 +994,13 @@ impl DrawJob {
                                         gl.disable_vertex_attrib_array(slot);
                                     }
                                     local.cache.stride = None;
-                                    local.cache.resident = Some((key, slots));
+                                    if let Some((_, old)) = local.cache.resident.replace((key, slots)) {
+                                        SLOTS.give(old);
+                                    }
+                                } else {
+                                    SLOTS.give(slots);
                                 }
+                                ARRAYS.give(arrays);
                                 0
                             }
                             Attributes::Packed { bytes, stride } => {
@@ -4537,16 +4544,14 @@ impl Gles {
                 let attributes = match shading.fetched {
                     Some(fetched) if crate::fast_with(crate::speedup::ARRAYS) => {
                         let read = shading.unit.inputs_read();
-                        let slots = (0..INPUT_REGISTERS)
-                            .filter(|r| read & (1 << r) != 0)
-                            .map(|register| match fetched.inputs[register] {
-                                Input::Array { array, offset, ty, count } => {
-                                    (array, Attribute::Array { offset: offset as usize, ty, count, stride: fetched.arrays[array].stride })
-                                }
-                                Input::Constant(value) => (0, Attribute::Constant(value)),
-                            })
-                            .collect();
-                        Attributes::Resident { arrays: fetched.arrays.iter().map(|array| array.bytes.clone()).collect(), slots }
+                        let mut slots = SLOTS.take(INPUT_REGISTERS);
+                        slots.extend((0..INPUT_REGISTERS).filter(|r| read & (1 << r) != 0).map(|register| match fetched.inputs[register] {
+                            Input::Array { array, offset, ty, count } => (array, Attribute::Array { offset: offset as usize, ty, count, stride: fetched.arrays[array].stride }),
+                            Input::Constant(value) => (0, Attribute::Constant(value)),
+                        }));
+                        let mut arrays = ARRAYS.take(fetched.arrays.len());
+                        arrays.extend(fetched.arrays.iter().map(|array| array.bytes.clone()));
+                        Attributes::Resident { arrays, slots }
                     }
                     Some(fetched) => {
                         let mut bytes = BYTES.take(fetched.arrays.iter().map(|array| array.bytes.len() + 16).sum());

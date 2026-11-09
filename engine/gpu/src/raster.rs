@@ -499,7 +499,7 @@ fn fetch_arrays<M: GpuMemory>(
             sources[field.id] = Some((l, f));
         }
     }
-    let mut arrays: Vec<host::FetchedArray> = Vec::new();
+    let mut arrays: Vec<host::FetchedArray> = Vec::with_capacity(layout.loaders.len());
     let mut uploaded: [Option<usize>; 12] = [None; 12];
     let mut inputs = [host::Input::Constant(shader::ZERO); shader::INPUT_REGISTERS];
     for id in 0..count {
