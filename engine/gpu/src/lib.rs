@@ -72,6 +72,8 @@ struct Twins {
     /// stays off, a copy over failed.
     off: bool,
     seen: bool,
+    /// twin_ahead's lists, kept from draw to draw rather than made for each
+    scratch: (Vec<(usize, u32)>, Vec<u32>),
 }
 
 fn overlap(a: Span, b: Span) -> bool {
@@ -1238,7 +1240,10 @@ impl Gpu {
             return false;
         }
         let here = self.draw_buffers(memory);
-        let pair = self.twin_ahead(memory, words, index, register).and_then(|next| self.twin_pair(here, next));
+        let mut scratch = std::mem::take(&mut self.twins.scratch);
+        let ahead = self.twin_ahead(memory, words, index, register, &mut scratch);
+        self.twins.scratch = scratch;
+        let pair = ahead.and_then(|next| self.twin_pair(here, next));
         let Some((_, _, first)) = pair else {
             self.twins_settle();
             if self.twins.pair.is_some_and(|(first, other, _)| first.iter().chain(&other).any(|&span| here.iter().any(|&drawn| overlap(span, drawn)))) {
@@ -1271,21 +1276,22 @@ impl Gpu {
 
     /// the buffers the next draw goes to, when the commands up to it change
     /// nothing else: the same draw into other buffers.
-    fn twin_ahead<M: GpuMemory>(&self, memory: &M, words: &[u32], mut index: usize, draw: usize) -> Option<[Span; 2]> {
+    fn twin_ahead<M: GpuMemory>(&self, memory: &M, words: &[u32], mut index: usize, draw: usize, (plain, uniform_words): &mut (Vec<(usize, u32)>, Vec<u32>)) -> Option<[Span; 2]> {
         let mut buffers = (self.internal[REG_COLOR_BUFFER_ADDRESS], self.internal[REG_DEPTH_BUFFER_ADDRESS]);
         // what plain registers hold by the next draw, which must be what
         // they hold now, a register set and set back changing nothing
-        let mut plain: Vec<(usize, u32)> = Vec::new();
-        let mut uniforms: Option<(u32, Vec<u32>)> = None;
+        plain.clear();
+        uniform_words.clear();
+        let mut uniforms: Option<u32> = None;
         let uniform_data = REG_VS_BLOCK + SHADER_UNIFORM_DATA..=REG_VS_BLOCK + SHADER_UNIFORM_DATA_END;
-        let same_uniforms = |uniforms: &Option<(u32, Vec<u32>)>| uniforms.as_ref().is_none_or(|(raw, words)| self.vertex_shader.uploads_nothing_new(*raw, words));
+        let same_uniforms = |uniforms: Option<u32>, words: &[u32]| uniforms.is_none_or(|raw| self.vertex_shader.uploads_nothing_new(raw, words));
         while index + 1 < words.len() {
             let header = words[index + 1];
             let (register, mask, extra, consecutive) = ((header & 0xFFFF) as usize, (header >> 16) & 0xF, ((header >> 20) & 0xFF) as usize, header & 0x8000_0000 != 0);
             let values = std::iter::once(words[index]).chain(words[index + 2..(index + 2 + extra).min(words.len())].iter().copied());
             for (i, value) in values.enumerate() {
                 let register = if consecutive { register + i } else { register };
-                if !uniform_data.contains(&register) && !same_uniforms(&uniforms) {
+                if !uniform_data.contains(&register) && !same_uniforms(uniforms, uniform_words) {
                     return None;
                 }
                 if !uniform_data.contains(&register) {
@@ -1304,9 +1310,12 @@ impl Gpu {
                     REG_DEPTH_BUFFER_ADDRESS => buffers.1 = written(buffers.1),
                     // the framebuffer flush and invalidate triggers
                     0x110 | 0x111 => {}
-                    _ if register == REG_VS_BLOCK + SHADER_UNIFORM_INDEX => uniforms = Some((value, Vec::new())),
-                    _ if uniform_data.contains(&register) => match uniforms.as_mut() {
-                        Some((_, words)) => words.push(value),
+                    _ if register == REG_VS_BLOCK + SHADER_UNIFORM_INDEX => {
+                        uniforms = Some(value);
+                        uniform_words.clear();
+                    }
+                    _ if uniform_data.contains(&register) => match uniforms {
+                        Some(_) => uniform_words.push(value),
                         None => return None,
                     },
                     _ if register >= INTERNAL_REGISTER_WORDS => return None,
