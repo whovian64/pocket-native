@@ -487,13 +487,12 @@ struct Ring {
     mapped: Option<(*mut u8, [Option<glow::Fence>; 4])>,
 }
 
-/// whether rings are mapped for good: on Android, or with
-/// ZAKURO_PERSISTENT, where the driver has buffer storage.
+/// whether rings are mapped for good, where the driver has buffer storage,
+/// unless ZAKURO_NO_PERSISTENT: the R36S's Mali took 11 us a push to map and
+/// unmap, mario kart 7 4% slower.
 fn persistent(gl: &glow::Context) -> bool {
     static PERSISTENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PERSISTENT.get_or_init(|| {
-        (cfg!(target_os = "android") || std::env::var_os("ZAKURO_PERSISTENT").is_some()) && gl.supported_extensions().contains("GL_EXT_buffer_storage")
-    })
+    *PERSISTENT.get_or_init(|| gl.supported_extensions().contains("GL_EXT_buffer_storage") && !crate::switch("ZAKURO_NO_PERSISTENT", "rings written through GL"))
 }
 
 impl Ring {
