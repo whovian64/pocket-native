@@ -222,6 +222,8 @@ pub fn run(mut args: Vec<String>) {
     let fixed_skip: Option<u32> = std::env::var("ZAKURO_FRAMESKIP").ok().and_then(|value| value.parse().ok());
     let mut most_skipped = fixed_skip.unwrap_or(advanced.frame_skip);
     let mut shown_only = advanced.shown_only;
+    // a probe timing as a player plays leaves out the unshown frames too
+    let as_played = !probing || std::env::var_os("ZAKURO_PROBE_NO_WATCH").is_some();
     let mut skipped = 0;
     // interpolation waits for a second without skipping, it has no time then
     let mut last_skip = 0u64;
@@ -445,7 +447,7 @@ pub fn run(mut args: Vec<String>) {
         // a frame the panel will not show, which a title making a picture
         // every frame need not draw
         let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
-        let unshown = shown_only && probe.is_none() && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
+        let unshown = shown_only && as_played && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
         system.skip_frames(skip, unshown, most_skipped);
         let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
         let (c_stick_x, c_stick_y) = if c_stick && !hotkey { (input::stick(axes[3]), -input::stick(axes[4])) } else { (0.0, 0.0) };
