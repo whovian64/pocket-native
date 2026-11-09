@@ -137,6 +137,9 @@ struct Immediate {
 pub type Picture = (std::sync::Arc<Vec<u8>>, u32);
 
 /// a screen's picture for the panel the GPU shows the screens on itself,
+/// microseconds the GPU thread waited for the panel to take a picture.
+pub static PANEL_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// the buffer the GPU drew or the screen's pixels upright as RGBA.
 pub enum PanelImage {
     Gpu(ScreenRef),

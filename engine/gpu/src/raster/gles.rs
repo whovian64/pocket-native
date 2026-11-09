@@ -3851,9 +3851,11 @@ impl Gles {
         // with two waiting for the panel already, this one waits its turn:
         // dropped, its frame would have been drawn for nothing, where held
         // up, the title falls behind and skips drawing frames instead
+        let held = std::time::Instant::now();
         while self.presenting.load(std::sync::atomic::Ordering::Acquire) >= 2 {
             std::thread::sleep(std::time::Duration::from_micros(500));
         }
+        crate::PANEL_HELD.fetch_add(held.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
         self.presenting.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let presenting = self.presenting.clone();
         let gl = self.gl;
