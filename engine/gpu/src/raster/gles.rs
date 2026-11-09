@@ -3234,7 +3234,21 @@ impl Gles {
         let size = self.surfaces[index].size();
         let row = self.surfaces[index].row_bytes();
         let (from, to) = rows.map_or((addr, size), |(start, end)| (addr + start * row, (end - start) * row));
-        let others = self.adopt_all(index, from, to)?;
+        let mut others = self.adopt_all(index, from, to)?;
+        // a depth buffer a colour buffer is drawn over is another buffer's
+        // memory by now, as one a fill runs over is: Kid Icarus draws a small
+        // colour buffer where its scene's depth was, every frame
+        if matches!(self.surfaces[index].kind, Kind::Color(_)) && crate::fast_with(crate::speedup::CLEARS) {
+            for &other in &others {
+                let s = &mut self.surfaces[other];
+                if matches!(s.kind, Kind::Depth(_)) {
+                    s.shadow.resize(s.size() as usize, 0);
+                    memory.read(s.addr, &mut s.shadow);
+                    (s.dirty, s.checked, s.picture) = (None, false, None);
+                }
+            }
+            others.retain(|&other| !matches!(self.surfaces[other].kind, Kind::Depth(_)));
+        }
         if !others.is_empty() {
             self.write_back(memory, others)?;
         }
