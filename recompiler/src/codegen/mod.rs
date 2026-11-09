@@ -90,10 +90,16 @@ fn jump(out: &mut String, scope: &Scope, target: u32, thumb: bool) -> bool {
 /// instructions per source file, so the files compile in parallel.
 const FILE_SIZE: usize = 20_000;
 
+/// the most instructions a function becomes C with: Star Fox 64 3D's European
+/// release had discovery run one to about 400,000, two million lines no C
+/// compiler got through, where the biggest in the tested games is about 22,000.
+/// a bigger one is left to the interpreter.
+const MOST_INSTRUCTIONS: usize = 100_000;
+
 /// whether a function becomes C, which it does unless its entry turned
-/// out not to be code.
+/// out not to be code or it is too big to compile.
 pub fn recompiles(entry: u32, function: &Function) -> bool {
-    function.labels.contains(&entry)
+    function.labels.contains(&entry) && function.instructions.len() <= MOST_INSTRUCTIONS
 }
 
 /// an address as the host looks it up, bit 0 set for Thumb.
@@ -168,6 +174,11 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
     for (index, unit) in units.iter().enumerate() {
         let prefix = if unit.module.is_some() { format!("m{index:03}_") } else { String::new() };
         let header = format!("{}functions.h", prefix);
+        for (entry, function) in &unit.analysis.functions {
+            if function.instructions.len() > MOST_INSTRUCTIONS && function.labels.contains(entry) {
+                eprintln!("the function at {entry:08X} has {} instructions, too many to compile: the interpreter runs it", function.instructions.len());
+            }
+        }
         let mut functions: BTreeMap<u32, &Function> =
             unit.analysis.functions.iter().filter(|&(&entry, f)| recompiles(entry, f)).map(|(&e, f)| (e, f)).collect();
         let containers = containers(&functions);
@@ -421,6 +432,18 @@ mod tests {
         let analysis = discover::analyze(&program);
         let units = [Unit { module: None, program: &program, analysis: &analysis }];
         generate(&units, overrides).into_iter().collect()
+    }
+
+    #[test]
+    fn a_function_too_big_to_compile_is_left_to_the_interpreter() {
+        let function = |count: usize| Function {
+            source: crate::discover::Source::Entry,
+            mode: Mode::Arm,
+            instructions: (0..count as u32).map(|i| 0x100000 + i * 4).collect(),
+            labels: [0x100000].into(),
+        };
+        assert!(recompiles(0x100000, &function(MOST_INSTRUCTIONS)));
+        assert!(!recompiles(0x100000, &function(MOST_INSTRUCTIONS + 1)));
     }
 
     #[test]
