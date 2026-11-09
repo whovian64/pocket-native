@@ -143,16 +143,44 @@ struct LoaderLayout {
 
 /// how the attribute arrays lay out a vertex, worked out once for a draw
 /// rather than for every vertex.
+#[derive(Default)]
 struct VertexLayout {
     loaders: Twelve<LoaderLayout>,
 }
 
+/// the registers a vertex layout is read from, the attribute formats and
+/// the twelve arrays.
+const LAYOUT_REGISTERS: std::ops::Range<usize> = REG_ATTRIBUTE_FORMAT_LOW..REG_ATTRIBUTE_LOADER + REG_ATTRIBUTE_LOADER_COUNT * REG_ATTRIBUTE_LOADER_STRIDE;
+
+/// the last draw's vertex layout and the registers it was read from, which
+/// the next draws mostly keep.
+struct LayoutCache {
+    registers: [u32; LAYOUT_REGISTERS.end - LAYOUT_REGISTERS.start],
+    layout: VertexLayout,
+}
+
+impl Default for LayoutCache {
+    fn default() -> Self {
+        LayoutCache { registers: [0; LAYOUT_REGISTERS.end - LAYOUT_REGISTERS.start], layout: VertexLayout::default() }
+    }
+}
+
 impl VertexLayout {
+    #[cfg(test)]
     fn read(registers: &[u32]) -> VertexLayout {
-        let mut loaders = Twelve::default();
+        let mut layout = VertexLayout::default();
+        layout.fill(registers);
+        layout
+    }
+
+    /// the layout the registers give, in place of the one held.
+    fn fill(&mut self, registers: &[u32]) {
+        let loaders = &mut self.loaders;
+        loaders.len = 0;
         for loader in read_loaders(registers).iter().filter(|loader| loader.component_count > 0) {
             let mut offset = 0u32;
-            let mut fields = Twelve::default();
+            let fields = &mut loaders.items[loaders.len].fields;
+            fields.len = 0;
             for slot in 0..loader.component_count.min(12) {
                 let id = ((loader.components >> (slot * 4)) & 0xF) as usize;
                 if id >= 12 {
@@ -167,9 +195,10 @@ impl VertexLayout {
                 fields.push(Field { id, offset, ty, count });
                 offset += size * count;
             }
-            loaders.push(LoaderLayout { offset: loader.offset, stride: loader.stride, size: offset, fields });
+            let slot = &mut loaders.items[loaders.len];
+            (slot.offset, slot.stride, slot.size) = (loader.offset, loader.stride, offset);
+            loaders.len += 1;
         }
-        VertexLayout { loaders }
     }
 }
 
@@ -932,6 +961,7 @@ pub struct Resources {
     /// again for every picture.
     #[cfg(feature = "gles")]
     pub(crate) redrawn_bottom: Option<(u32, u32)>,
+    layout: Box<LayoutCache>,
 }
 
 /// in fast mode, index buffers and vertex arrays as draws read them, kept
@@ -2164,7 +2194,11 @@ pub fn draw<M: GpuMemory>(
     }
 
     let attribute_base = loc_register(registers, REG_ATTRIBUTE_BASE);
-    let layout = VertexLayout::read(registers);
+    if resources.layout.registers[..] != registers[LAYOUT_REGISTERS] {
+        resources.layout.registers.copy_from_slice(&registers[LAYOUT_REGISTERS]);
+        resources.layout.layout.fill(registers);
+    }
+    let layout = &resources.layout.layout;
 
     // resolve each of the vertex_count draw indices to an actual vertex
     // array index, sequential for DrawArrays, looked up in the index buffer
@@ -2296,7 +2330,7 @@ pub fn draw<M: GpuMemory>(
     };
     let inputs: Vec<_> = unique
         .iter()
-        .map(|&vertex_index| fetch_vertex(registers, memory, attribute_base, &layout, fixed_attributes, vertex_index))
+        .map(|&vertex_index| fetch_vertex(registers, memory, attribute_base, &resources.layout.layout, fixed_attributes, vertex_index))
         .collect();
     let vertices = Vertices::Unshaded { vertex_shader, geometry_shader, inputs: &inputs, order: order.as_deref() };
     rasterize(registers, memory, resources, vertices);
