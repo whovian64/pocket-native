@@ -32,6 +32,7 @@ enum Field {
     ShowFps,
     ShowClock,
     ShowBuilding,
+    ShowSaving,
     Rotation,
     FrameCap,
     Power,
@@ -175,7 +176,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
     let only = |fields: Vec<Field>| fields.into_iter().filter(|&field| useful(field)).collect();
     match page {
         Page::Main => vec![
-            ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::ShowBuilding, Field::Rotation])),
+            ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::ShowBuilding, Field::ShowSaving, Field::Rotation])),
             ("Performance", only(vec![Field::FrameCap, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
             ("Controls", only(vec![Field::TouchSpeed, Field::Cursor, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
@@ -237,6 +238,7 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
         Field::ShowFps => ("Show fps", if settings.show_fps { "On" } else { "Off" }.into()),
         Field::ShowClock => ("Clock and battery", if settings.show_clock { "On" } else { "Off" }.into()),
         Field::ShowBuilding => ("Shader popup", if settings.show_building { "On" } else { "Off" }.into()),
+        Field::ShowSaving => ("Saving popup", if settings.show_saving { "On" } else { "Off" }.into()),
         Field::Rotation => {
             let rotation = match settings.rotation {
                 Rotation::Auto => "Auto",
@@ -312,6 +314,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::ShowFps => settings.show_fps = !settings.show_fps,
         Field::ShowClock => settings.show_clock = !settings.show_clock,
         Field::ShowBuilding => settings.show_building = !settings.show_building,
+        Field::ShowSaving => settings.show_saving = !settings.show_saving,
         Field::Rotation => settings.rotation = step(&[Rotation::Auto, Rotation::Clockwise, Rotation::CounterClockwise, Rotation::Off], settings.rotation, by),
         Field::FrameCap => settings.frame_cap = step(&CAPS, settings.frame_cap, by),
         Field::Power => settings.power = step(&[Power::Saver, Power::Balanced, Power::Performance], settings.power, by),
@@ -360,6 +363,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::ShowFps => "Pictures a second and the temperature, in the bottom right corner.",
         Field::ShowClock => "The battery and a 12-hour clock, in the bottom left corner.",
         Field::ShowBuilding => "The box in the top left corner while new shaders build. Off hides it, they still build.",
+        Field::ShowSaving => "The word in the top right corner while the game saves, to leave the power on. Off hides it.",
         Field::Rotation => "Turns the picture for a screen that shows it the wrong way round. Takes effect when the game starts again.",
         Field::FrameCap => "The most pictures shown a second. Lower lasts longer and runs cooler.",
         Field::Power => "How fast the CPU and GPU run. Performance is fastest and warmest, Saver lasts longest.",
@@ -617,9 +621,9 @@ impl Status {
             clock: settings.show_clock.then(clock),
             note,
             building: building.filter(|_| settings.show_building),
-            saving,
+            saving: saving && settings.show_saving,
         };
-        (status.fps.is_some() || status.clock.is_some() || note.is_some() || status.building.is_some() || saving).then_some(status)
+        (status.fps.is_some() || status.clock.is_some() || note.is_some() || status.building.is_some() || status.saving).then_some(status)
     }
 
     pub fn draw(&self, canvas: &mut Canvas, (width, height): (u32, u32)) {
