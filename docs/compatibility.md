@@ -41,10 +41,16 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Game | Status | Tried on | Notes |
 |---|---|---|---|
 | Andro Dunos II | Starts | Reported: H700 (muOS), 0.4.6 | Full speed for the half minute its log covers, European version |
-| Animal Crossing: New Leaf | Playable | R36S, PC, reported: RG DS (Android), 0.4.6 | Tuned on the US version. A steady 30 fps on the RG DS, where its own bottom screen used to show the game's bottom screen at half the rate, fixed now. The first visit to town takes a few minutes building shaders. One report of things no longer drawing after a long session on a Mali-G31 handheld is being looked into |
+| Animal Crossing: New Leaf | Playable | R36S, PC, reported: RG DS (Android), 0.4.6 | Tuned on the US version. A steady 30 fps on the RG DS, where its own bottom screen used to show the game's bottom screen at half the rate, fixed now. The first visit to town takes a few minutes building shaders. One report of things no longer drawing after a long session on a Mali-G31 handheld is being looked into. A rock solid 30 fps on an H700 under knulli on the 0.6 test |
 | Azure Striker Gunvolt: Striker Pack | Playable | Reported: RX6H, 0.2 | Frame skipping in the game select menu, fine in game |
 | Ben 10: Omniverse 2 | Slow | Reported: RG DS (Android), 0.4.6 | Doesn't run well, textures flicker all the time |
-| Bravely Default | Starts | Reported: RX6H, 0.2 | Sometimes crashed at the title on 0.2.0, got past the opening on a later version |
+| BoxBoxBoy! | Plays well | Reported: H700 (knulli), 0.6 test | Full speed through the first world |
+| BoxBoy! | Plays well | Reported: H700 (knulli), 0.6 test | Full speed through the first world |
+| Bravely Default | Starts | Reported: RX6H, 0.2 | Sometimes crashed at the title on 0.2.0, got past the opening on a later version. Its intro videos ran at about 6 fps on an H700 on the 0.6 test, the game itself at full speed on an RK3326 handheld once its shaders were built |
+| Bye-Bye BoxBoy! | Plays well | Reported: H700 (knulli), 0.6 test | Full speed through the first six levels. Finds the first two games' saves, as on the console |
+| Captain Toad: Treasure Tracker | Slow | Reported: H700 (knulli), 0.6 test | 4 to 8 fps in the first level with choppy sound, on a first run while its shaders built: not tried again since |
+| Chicken Wiggle | Starts | Reported: H700 (knulli), 0.6 test | Runs at full speed but shows only the backgrounds: the main character and most of the game are missing |
+| Corpse Party | Playable | Reported: H700 (knulli), 0.6 test | The opening runs at 8 to 9 fps with choppy sound, the game decoding its video on the CPU, then it plays at full speed |
 | Donkey Kong Country Returns 3D | Starts | Reported: RX6H, 0.4.6, RG CubeXX, 0.4.7 | Keeps up full speed by skipping pictures, about 20 a second on the RG CubeXX. Crashed once in the Mali driver's shader compiler on the RX6H |
 | Dragon Ball Z: Extreme Butoden | Playable | Reported: H700 (muOS), 0.4.7 | 95% speed on average in a tester's log |
 | Fantasy Life | Plays well | Reported: RG DS (ROCKNIX), 0.5.0 | Full speed through a 48-minute log, dipping only while its shaders built |
@@ -65,6 +71,7 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Mario Kart 7 | Playable | R36S, PC | Tuned on the US version. Races run well once a track's shaders are built, the first race on a track stutters. Some testers report it slower than that. On 0.5.5 races run at full speed on the R36S on the default settings, dipping at the countdown. Since 0.4.3 a first start goes straight to the menus, where it used to stop at "There are currently no Mii characters" |
 | Metroid Prime: Federation Force | Slow | PC, R36S sim | The opening plays into the training. About 6 fps in the R36S sim, its GPU flat out |
 | Metroid: Samus Returns | Starts | R36S, PC | The intro plays into the game. The black frames between its intro pictures are the game's own fades. About 60% of full speed on the R36S on 0.4.3, against about a third on 0.4.0 |
+| Mom Hid My Game! | Plays well | Reported: H700 (knulli), 0.6 test | Full speed |
 | Monster Hunter 3 Ultimate | Slow | Reported: Mali-G31 handheld (ArkOS), 0.5.0 | Full speed in places, then 13% in a video, where it ran out of memory. Asks for an SD card that isn't there when you pick Yes, pick No. 0.5.5 fixes the memory and the SD card |
 | My Hero Academia: Battle for All | Starts | PC, R36S sim | Japanese version. The opening plays into the first tutorial. About 15 fps in the R36S sim |
 | Monster Hunter 4 Ultimate | Slow | PC, reported: RX6H, 0.2 | Starts into Character Creation without errors on the PC. 6 fps on the defaults on 0.2. Its profile now turns on **Real-time GPU**, which a tester found faster. 30 to 98% speed on an RX6H on 0.4.6, which crashed in the Mali driver's shader compiler |
