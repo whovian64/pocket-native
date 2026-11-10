@@ -47,7 +47,43 @@ def ctr_cipher(key, partition_id, kind, byte_off):
     return AES.new(key, AES.MODE_CTR, counter=Counter.new(128, initial_value=base + byte_off // 16))
 
 
-def cia_contents(f):
+def body(signed):
+    """where a ticket's or TMD's body starts, past its signature"""
+    kind = struct.unpack_from(">I", signed)[0]
+    return {0x10000: 0x240, 0x10001: 0x140, 0x10002: 0x80, 0x10003: 0x240, 0x10004: 0x140, 0x10005: 0x80}[kind]
+
+
+def title_key(ticket, keys):
+    """the ticket's title key, opened with the common key it names"""
+    at = body(ticket)
+    common = f"common{ticket[at + 0xB1]}"
+    if keys is None or common not in keys:
+        sys.exit(f"the .cia is encrypted with its title key, as eShop games are: it needs your console's full aes_keys.txt, with the slot0x3DKeyX and {common} lines")
+    common_key = normal_key(keys, 0x3D, keys[common])
+    return AES.new(common_key, AES.MODE_CBC, ticket[at + 0x9C:at + 0xA4] + bytes(8)).decrypt(ticket[at + 0x7F:at + 0x8F])
+
+
+class Opened:
+    """a content encrypted with the title key, read as if it weren't: a block
+    in CBC needs only the one before it"""
+
+    def __init__(self, f, base, key, index):
+        self.f, self.base, self.key, self.iv, self.pos = f, base, key, struct.pack(">H", index) + bytes(14), 0
+
+    def seek(self, pos):
+        self.pos = pos - self.base
+
+    def read(self, n):
+        start = self.pos // 16 * 16
+        self.f.seek(self.base + start - (16 if start else 0))
+        iv = self.f.read(16) if start else self.iv
+        data = self.f.read((self.pos + n + 15) // 16 * 16 - start)
+        out = AES.new(self.key, AES.MODE_CBC, iv).decrypt(data[:len(data) // 16 * 16])[self.pos - start:][:n]
+        self.pos += len(out)
+        return out
+
+
+def cia_contents(f, keys=None):
     hs, _, _, cs, ts, tmds = struct.unpack("<IHHIII", f.read(0x14))
     al = lambda x: (x + 63) & ~63
     tmdo = al(al(al(hs) + cs) + ts)
@@ -58,12 +94,13 @@ def cia_contents(f):
     b = tmd[sig:]
     count = struct.unpack(">H", b[0x9E:0xA0])[0]
     rec = b[0xC4 + 64 * 0x24:]
-    out, off = [], co
+    out, off, key = [], co, None
     for i in range(count):
         _, idx, typ, size = struct.unpack(">IHHQ", rec[i * 0x30:i * 0x30 + 16])
-        if typ & 1:
-            sys.exit(f"content {i} is CIA-layer encrypted (titlekey); not supported")
-        out.append((idx, off, size))
+        if typ & 1 and key is None:
+            f.seek(al(al(hs) + cs))
+            key = title_key(f.read(ts), keys)
+        out.append((idx, off, size, Opened(f, off, key, idx) if typ & 1 else f))
         off += al(size)
     return out
 
@@ -165,16 +202,16 @@ def main():
             print(f"wrote {dst_path}: {sum(1 for _, size in table if size)} partition(s), {end} bytes")
             return
         src.seek(0)
-        contents = cia_contents(src)
+        contents = cia_contents(src, keys)
         table, pos = [], 0x4000
-        for idx, off, size in contents:
+        for idx, off, size, content in contents:
             if idx >= 8:
                 continue
-            decrypt_ncch(src, dst, off, pos, size, keys)
+            decrypt_ncch(content, dst, off, pos, size, keys)
             table.append((idx, pos, size))
             pos += (size + MU - 1) // MU * MU
-        src.seek(contents[0][1] + 0x108)
-        title_id = src.read(8)
+        contents[0][3].seek(contents[0][1] + 0x108)
+        title_id = contents[0][3].read(8)
         ncsd = bytearray(0x200)
         ncsd[0x100:0x104] = b"NCSD"
         ncsd[0x104:0x108] = struct.pack("<I", pos // MU)

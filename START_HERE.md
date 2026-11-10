@@ -248,7 +248,9 @@ to work in every game.
 
 **The build says the game is encrypted.** Put your console's
 `aes_keys.txt` next to the game or in the kit's folder and build again,
-or decrypt the dump first (GodMode9: Decrypt file).
+or decrypt the dump first (GodMode9: Decrypt file). An eShop game's
+`.cia` is encrypted with its title key too: that needs the full
+`aes_keys.txt`, with the `slot0x3DKeyX` and `common0` lines.
 
 **The build stops with `KeyError: 'generator'` or another key's name,
 or says your aes_keys.txt has no line for one.** Your aes_keys.txt is
