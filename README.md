@@ -78,12 +78,12 @@ working or not.
 |---|---|---|---|
 | R36S and its clones | RK3326, Mali-G31 | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones, ROCKNIX | The main target, developed and tested on an R36S with ArkOS |
 | Powkiddy RX6H | RK3326, Mali-G31 | dArkOS for clones | Played by testers. No FN button: L3 does its job. Its Mali driver crashes while building some games' shaders: from 0.5.0 the game notes the shader and gets past it on its next start |
-| Anbernic RG351P | RK3326, Mali-G31 | ArkOS | OSH PB buttons and sticks mapped; needs on-device verification |
+| Anbernic RG351P and RG351M | RK3326, Mali-G31 | ArkOS | From 0.5.5 the OSH PB board's buttons and sticks are mapped, not yet tried on one |
 | Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | H700, Mali-G31 | Knulli, muOS | Played by testers: Super Mario 3D Land, A Link Between Worlds, Smash, Project X Zone 1 and 2, Shantae and the Pirate's Curse, Dragon Ball Z: Extreme Butoden, Kingdom Hearts 3D, Pokémon Omega Ruby, Donkey Kong Country Returns 3D |
 | Anbernic RG353 and RG503 | RK3566, Mali-G52 | ArkOS, ROCKNIX | Buttons mapped, no tester report yet |
 | Miyoo Flip | RK3566, Mali-G52 | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
 | Anbernic RG52 Mini | RK3562 | dArkOS | Played by testers |
-| Anbernic RG DS | RK3568, Mali-G52, two screens | ROCKNIX, Android | Both screens and both touch screens. Played under ROCKNIX: Pokémon Alpha Sapphire at full speed. Anbernic's own Linux not yet: one screen only, buttons not found |
+| Anbernic RG DS | RK3568, Mali-G52, two screens | ROCKNIX, Android | Both screens and both touch screens. Played under ROCKNIX: Pokémon Alpha Sapphire at full speed. Anbernic's own Linux not yet: one screen only, buttons not found. Banana OS: from 0.5.5 the bottom panel gets its own mode, where it stayed dark, not yet confirmed |
 | AYN Thor | Snapdragon 8 Gen 2, two screens | Android | Works, both screens |
 | Android phones | | Android | Works, with touch controls or a gamepad |
 
@@ -97,11 +97,11 @@ Rotation** turns the picture for a panel mounted sideways.
 |---|---|
 | ArkOS | The main target. Its EmulationStation lists the `Pocket Native` folder under Ports only with **Scan Ports folder on boot** on (Start > UI Settings) |
 | dArkOS, dArkOSRE, ArkOS and dArkOS for clones | Played by testers on R36S clones, the RX6H and the RG52 Mini |
-| Knulli | Played by testers on H700 handhelds. Ports run as root, with no sudo |
+| Knulli | Played by testers on H700 handhelds. Ports run as root, with no sudo. From 0.5.5 **Power**'s Balanced and Performance hold the H700's GPU at its top speed, where it stayed at 240 MHz |
 | muOS | Played by testers on H700 handhelds. The screens go through `/dev/fb0`, muOS having no `libgbm`, and both of muOS's pads are read: its kernel's `muOS-Keys` and the one muOS makes itself. From 0.5.0 **Power**'s Balanced and Performance raise the H700's GPU clock as well as the CPU's |
-| spruceOS 4.2 | Played on the Miyoo Flip |
+| spruceOS 4.2 | Played on the Miyoo Flip. From 0.5.5 the TrimUI Smart Pro's pad is found under it too |
 | ROCKNIX | Played on the RG DS, with Mali's own driver. The launcher hands sway's panels to the game and back. Pads numbering their buttons the usual way are read (the R36S's `r36s_Gamepad` among them), and from 0.5.0 the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. On the R36S, its Mali driver crashed before the first picture until the 0.4.9 test build, Panfrost worked: not confirmed since |
-| Android 11 or newer, 64-bit | Works on phones, the AYN Thor and the RG DS, with one screen or two. On one RK3566 handheld 0.4.7 drew on the CPU, its driver refusing a kind of buffer: 0.5.0 uses the GPU there |
+| Android 11 or newer, 64-bit | Works on phones, the AYN Thor and the RG DS, with one screen or two. On one RK3566 handheld 0.4.7 drew on the CPU, its driver refusing a kind of buffer: 0.5.0 uses the GPU there. From 0.5.5 the device's motion sensors stand in for the console's |
 | AmberELEC | Not yet |
 
 ### The RG DS under ROCKNIX
@@ -141,7 +141,7 @@ report.
 | R2 | Touches the bottom screen under the cursor |
 | R3 | Switches the right stick to the C-stick, with L2 and R2 as ZL and ZR, and back |
 | Touch screen | Touches the bottom screen where it is shown (RG DS under ROCKNIX) |
-| L2 held + right stick | Tilts the console, for games that use motion |
+| L2 held + right stick | Tilts the console, for games that use motion. On Android, tilting the device does too |
 | Start / Select | Start / Select |
 
 | Hotkey | Does |

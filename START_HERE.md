@@ -22,7 +22,8 @@ Before you start, check [which games work](docs/compatibility.md),
   - a Linux handheld from the [list](README.md#handhelds), or
   - an Android phone or handheld with Android 11 or newer, 64-bit (almost
     any from the last few years)
-- **A PC** with Windows or Linux. It does the heavy work, your device
+- **A PC** with Windows or Linux and an Intel or AMD processor: the
+  build doesn't run on ARM PCs yet. It does the heavy work, your device
   never builds anything.
   - Windows: Docker Desktop or Podman Desktop. If neither is
     installed, the build offers to install Docker Desktop for you.
