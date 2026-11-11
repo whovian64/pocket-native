@@ -72,6 +72,7 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Fire Emblem: Awakening | Starts | PC | Reaches the avatar maker. If it stutters, try **Frame skip** off in the advanced settings |
 | Fire Emblem Fates | Slow | Reported: Logitech G Cloud (Android), 0.4.0, 0.4.6 | US Special Edition. Plays without crashing, battles and cutscenes at 10 to 15 fps. From chapter 2 most character sprites on the map show as grey boxes, still on 0.4.6. Didn't start with **Most compatible** on |
 | Hyrule Warriors Legends | Starts | PC | The opening plays, but it keeps the 3DS's CPU three quarters busy, so expect it to be slow on a handheld |
+| Inazuma Eleven 3: Team Ogre Attacks! | Playable | Reported: RG DS (Android), 0.5.5 | European release with an undub patch. 16 to 18 fps, the sound no longer stutters and the touch screen answers. Its intro flashes less than before |
 | Kid Icarus: Uprising | Starts | PC | Plays into the first chapter. Text in menus and dialogue showed as bars up to 0.4.7, fixed in 0.5.0, which also draws its effects made with the geometry shader's fixed primitive mode, left out before. Crashed a few seconds in on 0.4.5. 0.5.5 stops reading a depth buffer back every frame, a third faster on the PC |
 | Kingdom Hearts 3D: Dream Drop Distance | Slow | PC, R36S sim, reported: H700 (muOS), 0.4.7 | The opening plays into Destiny Islands. About 60% speed in the R36S sim, three quarters on average on an H700, dropping to a fifth in places |
 | Kirby Battle Royale | Playable | PC, R36S sim | Full speed at 30 fps in the R36S sim, not played on a handheld yet |
@@ -112,6 +113,7 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Super Smash Bros. for Nintendo 3DS | Playable | R36S, PC, reported: RG DS (Android), 0.4.3, R36S clone, RX6H, 0.4.6, H700 (muOS), 0.4.7 | Menus are fine. 25 to 30 fps in matches on an R36S clone on 0.4.6, about three quarters speed on our R36S on a busy stage. Frequent slowdowns on the RG DS on 0.4.3. Crashed once in the Mali driver's shader compiler on an RX6H. 96% speed on average on an H700 on 0.4.7, but crashed about three minutes in: 0.5.0 answers the system calls Smash got nothing back from (the console's country, its save's secure value), likely the cause |
 | Tomodachi Life | Plays well | Reported: RG DS (ROCKNIX), 0.5.0 | Full speed through a 6-minute log |
 | Xenoblade Chronicles 3D | Starts | PC | A New 3DS title. Gets into the opening battle. Its top screen was tinted red and its bottom screen wrong up to 0.4.7, fixed in 0.5.0 |
+| Yo-kai Watch | Starts | Reported: RG DS (Android), 0.5.5 | European release. The intro plays at about 12 fps and the menu at full speed, then the top screen stays black from the first dialogue |
 | Yoshi's New Island | Playable | Reported: 0.2 | Hold L2 and use the right stick for the parts you tilt the console in |
 
 ## Games with a profile but no report
