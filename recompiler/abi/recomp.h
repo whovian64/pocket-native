@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define RECOMP_ABI 6
+#define RECOMP_ABI 7
 
 typedef struct Context Context;
 typedef void (*Code)(Context *);
@@ -411,6 +411,13 @@ static inline uint32_t shift_ror(uint32_t value, uint32_t amount, uint8_t *carry
 #define FPSCR_DN (1u << 25)
 /* the short vector length, zero when an instruction works on one register. */
 #define FPSCR_LEN (7u << 16)
+/* ARM64 flushes to zero and gives the default NaN itself, by FPCR's bits in
+   the same places as fpscr's, which the host sets before it runs the code. */
+#if defined(__aarch64__)
+#define RECOMP_HARDWARE_FLOAT 1
+#else
+#define RECOMP_HARDWARE_FLOAT 0
+#endif
 
 static inline float (vfp_s)(Context *ctx, int r) {
     union { uint32_t u; float f; } val;
@@ -429,8 +436,8 @@ static inline void (vfp_set_s)(Context *ctx, int r, float value) {
     union { float f; uint32_t u; } val;
     val.f = value;
     uint32_t bits = val.u;
-    if ((*ctx->fpscr & FPSCR_FZ) && !(bits & 0x7F800000u) && (bits & 0x007FFFFFu)) bits &= 0x80000000u;
-    if ((bits & 0x7FFFFFFFu) > 0x7F800000u && (*ctx->fpscr & FPSCR_DN)) bits = 0x7FC00000u;
+    if (!RECOMP_HARDWARE_FLOAT && (*ctx->fpscr & FPSCR_FZ) && !(bits & 0x7F800000u) && (bits & 0x007FFFFFu)) bits &= 0x80000000u;
+    if (!RECOMP_HARDWARE_FLOAT && (bits & 0x7FFFFFFFu) > 0x7F800000u && (*ctx->fpscr & FPSCR_DN)) bits = 0x7FC00000u;
     ctx->vfp[r] = bits;
 }
 
@@ -438,9 +445,10 @@ static inline void (vfp_set_d)(Context *ctx, int d, double value) {
     union { double d; uint64_t u; } val;
     val.d = value;
     uint64_t bits = val.u;
-    if ((*ctx->fpscr & FPSCR_FZ) && !(bits & 0x7FF0000000000000ull) && (bits & 0x000FFFFFFFFFFFFFull))
+    if (!RECOMP_HARDWARE_FLOAT && (*ctx->fpscr & FPSCR_FZ) && !(bits & 0x7FF0000000000000ull) && (bits & 0x000FFFFFFFFFFFFFull))
         bits &= 0x8000000000000000ull;
-    if ((bits & 0x7FFFFFFFFFFFFFFFull) > 0x7FF0000000000000ull && (*ctx->fpscr & FPSCR_DN)) bits = 0x7FF8000000000000ull;
+    if (!RECOMP_HARDWARE_FLOAT && (bits & 0x7FFFFFFFFFFFFFFFull) > 0x7FF0000000000000ull && (*ctx->fpscr & FPSCR_DN))
+        bits = 0x7FF8000000000000ull;
     ctx->vfp[2 * d] = (uint32_t)bits;
     ctx->vfp[2 * d + 1] = (uint32_t)(bits >> 32);
 }
@@ -455,10 +463,19 @@ static inline void (vfp_set_d)(Context *ctx, int d, double value) {
     union { float f; uint32_t u; } __v; \
     __v.f = (val); \
     uint32_t __b = __v.u; \
-    if ((*((ctx)->fpscr) & FPSCR_FZ) && !(__b & 0x7F800000u) && (__b & 0x007FFFFFu)) __b &= 0x80000000u; \
-    if ((__b & 0x7FFFFFFFu) > 0x7F800000u && (*((ctx)->fpscr) & FPSCR_DN)) __b = 0x7FC00000u; \
+    if (!RECOMP_HARDWARE_FLOAT && (*((ctx)->fpscr) & FPSCR_FZ) && !(__b & 0x7F800000u) && (__b & 0x007FFFFFu)) __b &= 0x80000000u; \
+    if (!RECOMP_HARDWARE_FLOAT && (__b & 0x7FFFFFFFu) > 0x7F800000u && (*((ctx)->fpscr) & FPSCR_DN)) __b = 0x7FC00000u; \
     (ctx)->vfp[r] = __b; \
 } while (0)
+
+/* writes fpscr, and on ARM64 the FPCR bits the code leaves its flushing and
+   NaNs to. */
+static inline void vfp_set_fpscr(Context *ctx, uint32_t value) {
+    *ctx->fpscr = value;
+#if RECOMP_HARDWARE_FLOAT
+    __asm__ volatile("msr fpcr, %0" : : "r"((uint64_t)(value & (FPSCR_FZ | FPSCR_DN))) : "memory");
+#endif
+}
 
 /* the comparison result in fpscr's top bits, the nzcv encoding. */
 static inline void vfp_compare(Context *ctx, double a, double b) {

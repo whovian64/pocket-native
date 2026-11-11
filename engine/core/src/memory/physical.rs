@@ -272,6 +272,29 @@ impl PhysicalMemory {
         (offset + size as u64 <= store.len as u64).then_some((shared.fd, start + offset))
     }
 
+    /// zeroes size bytes from paddr, false when it isn't real memory. the
+    /// whole pages of the shared file go back to the host, reading as zeros
+    /// and costing no memory until written again, where writing zeros made
+    /// every page a game reserves resident.
+    pub fn zero(&mut self, paddr: u32, size: u32) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some((fd, offset)) = self.backing(paddr, size) {
+            const PAGE: u64 = 0x1000;
+            let (start, end) = (offset.next_multiple_of(PAGE), (offset + size as u64) / PAGE * PAGE);
+            // SAFETY: a range of the file the memories are in, which every
+            // view of them then reads as zeros
+            if end > start && unsafe { libc::fallocate(fd, libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE, start as libc::off_t, (end - start) as libc::off_t) } == 0 {
+                let (head, tail) = ((start - offset) as u32, (offset + size as u64 - end) as u32);
+                return self.fill(paddr, head) && self.fill(paddr + size - tail, tail);
+            }
+        }
+        self.fill(paddr, size)
+    }
+
+    fn fill(&mut self, paddr: u32, size: u32) -> bool {
+        self.host_slice_mut(paddr, size).map(|slice| slice.fill(0)).is_some()
+    }
+
 }
 
 #[inline]
@@ -282,6 +305,25 @@ const fn align_up(value: u32, align: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeroing_lets_whole_pages_go_and_fills_the_ends() {
+        let mut phys = PhysicalMemory::new(false, 64 * 1024 * 1024);
+        let base = FCRAM_PADDR + 0x10_0000;
+        phys.host_slice_mut(base, 0x5000).unwrap().fill(0xAB);
+        assert!(phys.zero(base + 0x0800, 0x3000));
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some((fd, offset)) = phys.backing(base, 0x5000) {
+            // the two whole pages inside are a hole in the file again, until
+            // something touches them
+            let data = unsafe { libc::lseek(fd, (offset + 0x1000) as libc::off_t, libc::SEEK_DATA) };
+            assert_eq!(data as u64, offset + 0x3000);
+        }
+        let after = phys.host_slice_mut(base, 0x5000).unwrap().to_vec();
+        assert!(after[..0x800].iter().all(|&byte| byte == 0xAB));
+        assert!(after[0x800..0x3800].iter().all(|&byte| byte == 0));
+        assert!(after[0x3800..].iter().all(|&byte| byte == 0xAB));
+    }
 
     #[test]
     fn allocates_contiguously_and_frees() {

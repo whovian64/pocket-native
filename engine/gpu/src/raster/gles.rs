@@ -489,13 +489,12 @@ struct Ring {
     mapped: Option<(*mut u8, [Option<glow::Fence>; 4])>,
 }
 
-/// whether rings are mapped for good: on Android, or with
-/// ZAKURO_PERSISTENT, where the driver has buffer storage.
+/// whether rings are mapped for good, where the driver has buffer storage,
+/// unless ZAKURO_NO_PERSISTENT: the R36S's Mali took 11 us a push to map and
+/// unmap, mario kart 7 4% slower.
 fn persistent(gl: &glow::Context) -> bool {
     static PERSISTENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PERSISTENT.get_or_init(|| {
-        (cfg!(target_os = "android") || std::env::var_os("ZAKURO_PERSISTENT").is_some()) && gl.supported_extensions().contains("GL_EXT_buffer_storage")
-    })
+    *PERSISTENT.get_or_init(|| gl.supported_extensions().contains("GL_EXT_buffer_storage") && !crate::switch("ZAKURO_NO_PERSISTENT", "rings written through GL"))
 }
 
 impl Ring {
@@ -700,6 +699,8 @@ impl<T> Pool<T> {
 
 static WORDS: Pool<u32> = Pool::new();
 static BYTES: Pool<u8> = Pool::new();
+static ARRAYS: Pool<Arc<[u8]>> = Pool::new();
+static SLOTS: Pool<(usize, Attribute)> = Pool::new();
 
 enum Submit {
     Triangles { viewport: [i32; 4], vertices: Vec<u8>, count: i32 },
@@ -994,8 +995,13 @@ impl DrawJob {
                                         gl.disable_vertex_attrib_array(slot);
                                     }
                                     local.cache.stride = None;
-                                    local.cache.resident = Some((key, slots));
+                                    if let Some((_, old)) = local.cache.resident.replace((key, slots)) {
+                                        SLOTS.give(old);
+                                    }
+                                } else {
+                                    SLOTS.give(slots);
                                 }
+                                ARRAYS.give(arrays);
                                 0
                             }
                             Attributes::Packed { bytes, stride } => {
@@ -1080,20 +1086,29 @@ impl std::ops::Deref for GlRef {
 /// spares the GPU shading the vertices of scenery out of view.
 #[derive(Default)]
 struct Occlusion {
-    meshes: rustc_hash::FxHashMap<u64, Hidden>,
+    meshes: rustc_hash::FxHashMap<u64, Copies>,
     free: Vec<glow::Query>,
+}
+
+/// a mesh's copies, the first drawn in a picture, the second and so on: a
+/// mesh the game draws in more than one place, as Super Mario 3D Land does
+/// its coins, blocks and enemies, is one mesh to the key, and one copy out
+/// of view left out all of them
+#[derive(Default)]
+struct Copies {
+    picture: u64,
+    drawn: usize,
+    /// how many the last two pictures drew
+    counts: [usize; 2],
+    copies: Vec<Hidden>,
 }
 
 #[derive(Default)]
 struct Hidden {
     query: Option<(glow::Query, u64)>,
     until: u64,
-    /// the picture it was last drawn in, and whether it was drawn twice in
-    /// one: a mesh the game draws in more than one place, as Super Mario 3D
-    /// Land does its coins, blocks and enemies, is the same mesh to the key,
-    /// and one of them out of view would leave out all of them
-    seen: Option<u64>,
-    shared: bool,
+    /// found on screen, drawn without a query until then
+    next: u64,
 }
 
 /// heavy draws left out and heavy draws looked at, for ZAKURO_GLES_TIMES.
@@ -1101,29 +1116,49 @@ static CULLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::A
 
 /// pictures a mesh found off screen is left out for, two or three frames.
 const HIDDEN_PICTURES: u64 = 8;
+/// pictures one found on screen is drawn without a query: each query costs a
+/// tiled GPU's driver work, and what is on screen mostly stays there
+const SEEN_PICTURES: u64 = 4;
 
 impl Occlusion {
     /// whether to draw the mesh, and the query to draw it inside when it is
     /// tried again.
     /// SAFETY: on the GL thread
     unsafe fn check(&mut self, gl: &glow::Context, key: u64, picture: u64) -> (bool, Option<glow::Query>) {
-        if self.meshes.len() > 8192 {
-            self.meshes.retain(|_, mesh| mesh.query.is_some() || mesh.shared);
-        }
         let Occlusion { meshes, free } = self;
-        let mesh = meshes.entry(key).or_default();
-        if mesh.seen == Some(picture) {
-            mesh.shared = true;
+        if meshes.len() > 8192 {
+            meshes.retain(|_, mesh| {
+                let recent = mesh.picture + HIDDEN_PICTURES >= picture;
+                if !recent {
+                    free.extend(mesh.copies.drain(..).filter_map(|copy| copy.query.map(|(query, _)| query)));
+                }
+                recent
+            });
         }
-        mesh.seen = Some(picture);
-        if mesh.shared {
+        let copies = meshes.entry(key).or_default();
+        if copies.picture != picture {
+            copies.counts = [copies.drawn, copies.counts[0]];
+            (copies.picture, copies.drawn) = (picture, 0);
+        }
+        let index = copies.drawn;
+        copies.drawn += 1;
+        if copies.copies.len() <= index {
+            copies.copies.resize_with(index + 1, Hidden::default);
+        }
+        let stable = copies.counts[0] == copies.counts[1] && copies.drawn <= copies.counts[0];
+        let mesh = &mut copies.copies[index];
+        if !stable {
+            mesh.until = 0;
+            free.extend(mesh.query.take().map(|(query, _)| query));
             return (true, None);
         }
         unsafe {
             if let Some((query, tried)) = mesh.query {
-                if gl.get_query_parameter_u32(query, glow::QUERY_RESULT_AVAILABLE) != 0 {
+                if picture > tried && gl.get_query_parameter_u32(query, glow::QUERY_RESULT_AVAILABLE) != 0 {
                     if gl.get_query_parameter_u32(query, glow::QUERY_RESULT) == 0 {
                         mesh.until = tried + HIDDEN_PICTURES;
+                    } else {
+                        mesh.next = picture + SEEN_PICTURES;
                     }
                     free.push(query);
                     mesh.query = None;
@@ -1134,7 +1169,7 @@ impl Occlusion {
                 CULLED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return (false, None);
             }
-            if mesh.query.is_some() {
+            if mesh.query.is_some() || picture < mesh.next {
                 return (true, None);
             }
             let Some(query) = free.pop().or_else(|| gl.create_query().ok()) else { return (true, None) };
@@ -3158,7 +3193,21 @@ impl Gles {
         let size = self.surfaces[index].size();
         let row = self.surfaces[index].row_bytes();
         let (from, to) = rows.map_or((addr, size), |(start, end)| (addr + start * row, (end - start) * row));
-        let others = self.adopt_all(index, from, to)?;
+        let mut others = self.adopt_all(index, from, to)?;
+        // a depth buffer a colour buffer is drawn over is another buffer's
+        // memory by now, as one a fill runs over is: Kid Icarus draws a small
+        // colour buffer where its scene's depth was, every frame
+        if matches!(self.surfaces[index].kind, Kind::Color(_)) && crate::fast_with(crate::speedup::CLEARS) {
+            for &other in &others {
+                let s = &mut self.surfaces[other];
+                if matches!(s.kind, Kind::Depth(_)) {
+                    s.shadow.resize(s.size() as usize, 0);
+                    memory.read(s.addr, &mut s.shadow);
+                    (s.dirty, s.checked, s.picture) = (None, false, None);
+                }
+            }
+            others.retain(|&other| !matches!(self.surfaces[other].kind, Kind::Depth(_)));
+        }
         if !others.is_empty() {
             self.write_back(memory, others)?;
         }
@@ -3785,9 +3834,11 @@ impl Gles {
         // with two waiting for the panel already, this one waits its turn:
         // dropped, its frame would have been drawn for nothing, where held
         // up, the title falls behind and skips drawing frames instead
+        let held = std::time::Instant::now();
         while self.presenting.load(std::sync::atomic::Ordering::Acquire) >= 2 {
             std::thread::sleep(std::time::Duration::from_micros(500));
         }
+        crate::PANEL_HELD.fetch_add(held.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
         self.presenting.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let presenting = self.presenting.clone();
         let gl = self.gl;
@@ -4469,16 +4520,14 @@ impl Gles {
                 let attributes = match shading.fetched {
                     Some(fetched) if crate::fast_with(crate::speedup::ARRAYS) => {
                         let read = shading.unit.inputs_read();
-                        let slots = (0..INPUT_REGISTERS)
-                            .filter(|r| read & (1 << r) != 0)
-                            .map(|register| match fetched.inputs[register] {
-                                Input::Array { array, offset, ty, count } => {
-                                    (array, Attribute::Array { offset: offset as usize, ty, count, stride: fetched.arrays[array].stride })
-                                }
-                                Input::Constant(value) => (0, Attribute::Constant(value)),
-                            })
-                            .collect();
-                        Attributes::Resident { arrays: fetched.arrays.iter().map(|array| array.bytes.clone()).collect(), slots }
+                        let mut slots = SLOTS.take(INPUT_REGISTERS);
+                        slots.extend((0..INPUT_REGISTERS).filter(|r| read & (1 << r) != 0).map(|register| match fetched.inputs[register] {
+                            Input::Array { array, offset, ty, count } => (array, Attribute::Array { offset: offset as usize, ty, count, stride: fetched.arrays[array].stride }),
+                            Input::Constant(value) => (0, Attribute::Constant(value)),
+                        }));
+                        let mut arrays = ARRAYS.take(fetched.arrays.len());
+                        arrays.extend(fetched.arrays.iter().map(|array| array.bytes.clone()));
+                        Attributes::Resident { arrays, slots }
                     }
                     Some(fetched) => {
                         let mut bytes = BYTES.take(fetched.arrays.iter().map(|array| array.bytes.len() + 16).sum());

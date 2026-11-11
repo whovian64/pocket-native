@@ -5,7 +5,7 @@ depends on a particular emulator. It runs against a small interface, declared
 in [`recomp.h`](../abi/recomp.h). Any program that implements that
 interface can run the code. This document calls that program the host.
 
-This page describes version 4 of the interface.
+This page describes version 7 of the interface.
 
 ## What build writes
 
@@ -126,6 +126,12 @@ context. The context does not need to live between two runs.
 
 `vfp` and `fpscr` are pointers so that the code and an interpreter can work on
 the same registers without copying them back and forth.
+
+Built for ARM64, the code leaves flush-to-zero and the default NaN to the CPU:
+the host sets FPCR's FZ and DN bits, which sit where FPSCR has them, from
+FPSCR before it calls the code, and again whenever something else changes
+FPSCR while the code runs. The code's own `vmsr` sets them itself. Built for
+anything else, the code does both in software.
 
 `r[15]` is only kept up to date at the points where the code hands control
 back: when it returns, and when it calls `lookup`. It is not current inside

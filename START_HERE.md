@@ -22,7 +22,8 @@ Before you start, check [which games work](docs/compatibility.md),
   - a Linux handheld from the [list](README.md#handhelds), or
   - an Android phone or handheld with Android 11 or newer, 64-bit (almost
     any from the last few years)
-- **A PC** with Windows or Linux. It does the heavy work, your device
+- **A PC** with Windows or Linux and an Intel or AMD processor: the
+  build doesn't run on ARM yet. It does the heavy work, your device
   never builds anything.
   - Windows: Docker Desktop or Podman Desktop. If neither is
     installed, the build offers to install Docker Desktop for you.
@@ -248,9 +249,29 @@ as above.
 **The Windows build can't reach Docker.** Docker Desktop isn't running.
 Start it, wait until it says it's running, and build again.
 
+**Miis have no heads, or heads with no faces (experimental).** Mii heads
+are drawn from the console's Mii parts, which are Nintendo's and can't come
+with Pocket Native. The build gets them and copies them into every game it
+builds:
+- with your console's full `aes_keys.txt` in the kit's folder (one with the
+  `slot0x3DKeyX` and `common0` lines), it downloads them from Nintendo's
+  update servers and opens them with your keys, as a 3DS gets its system
+  data;
+- a `CFL_Res.dat` from your own console, or the `00000000.app.romfs` Citra
+  and Azahar keep them in (`nand/.../title/0004009b/00010202/content/`), put
+  in the kit's folder, works too, as does a game you build that carries
+  them (Animal Crossing: New Leaf does).
+
+Without them, Miis get an open-source placeholder head with no face. After
+adding them, run `Rebuild all games` and copy the folder onto the card again.
+This is experimental and may not work in every game. The game's log says
+which head it used, so if your Miis look wrong, please send it.
+
 **The build says the game is encrypted.** Put your console's
 `aes_keys.txt` next to the game or in the kit's folder and build again,
-or decrypt the dump first (GodMode9: Decrypt file).
+or decrypt the dump first (GodMode9: Decrypt file). An eShop game's
+`.cia` is encrypted with its title key too: that needs the full
+`aes_keys.txt`, with the `slot0x3DKeyX` and `common0` lines.
 
 **The build stops with `KeyError: 'generator'` or another key's name,
 or says your aes_keys.txt has no line for one.** Your aes_keys.txt is

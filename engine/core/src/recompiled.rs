@@ -130,6 +130,30 @@ fn ctx_thumb(ctx: *mut Context) -> u32 {
     unsafe { ((*ctx).thumb != 0) as u32 }
 }
 
+/// sets the cpu's flush-to-zero and default NaN as fpscr has them, which the
+/// code built for ARM64 leaves to it, handing back what it had.
+#[cfg(target_arch = "aarch64")]
+fn float_mode(fpscr: u32) -> u64 {
+    let old: u64;
+    // SAFETY: only the two bits change, which nothing but float results reads
+    unsafe { std::arch::asm!("mrs {old}, fpcr", "msr fpcr, {new}", old = out(reg) old, new = in(reg) (fpscr & 0x0300_0000) as u64) };
+    old
+}
+
+#[cfg(target_arch = "aarch64")]
+fn restore_float_mode(fpcr: u64) {
+    // SAFETY: as float_mode
+    unsafe { std::arch::asm!("msr fpcr, {fpcr}", fpcr = in(reg) fpcr) };
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn float_mode(_fpscr: u32) -> u64 {
+    0
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn restore_float_mode(_fpcr: u64) {}
+
 /// runs one instruction the code left to the interpreter.
 unsafe extern "C" fn interpret(ctx: *mut Context, address: u32, _opcode: u32) {
     unsafe {
@@ -140,7 +164,11 @@ unsafe extern "C" fn interpret(ctx: *mut Context, address: u32, _opcode: u32) {
         let system = &mut *machine.system;
         load(ctx, &mut system.cpu);
         system.cpu.regs[15] = address;
+        let fpscr = system.cpu.vfp.fpscr;
         let exit = system.cpu.step(&mut system.memory);
+        if system.cpu.vfp.fpscr != fpscr {
+            float_mode(system.cpu.vfp.fpscr);
+        }
         store(&system.cpu, ctx);
         let step = if ctx.thumb != 0 { 2 } else { 4 };
         if exit.is_some() || ctx.r[15] != address.wrapping_add(step) {
@@ -185,7 +213,11 @@ unsafe extern "C" fn svc(ctx: *mut Context, number: u32) {
         machine.ran += ran;
         load(ctx, &mut system.cpu);
         system.cpu.cycles = machine.cycles + ran;
+        let fpscr = system.cpu.vfp.fpscr;
         let next = system.svc_in_place(number, machine.event, machine.deadline, machine.library);
+        if system.cpu.vfp.fpscr != fpscr {
+            float_mode(system.cpu.vfp.fpscr);
+        }
         store(&system.cpu, ctx);
         machine.cycles = system.cpu.cycles;
         match next {
@@ -344,6 +376,7 @@ impl Library {
             fastmem,
         };
         store(&system.cpu, &mut ctx);
+        let host_float_mode = float_mode(system.cpu.vfp.fpscr);
         // everything the code reaches of the system goes through this one
         // pointer from here, until the run is over
         let system: *mut System = system;
@@ -378,6 +411,7 @@ impl Library {
             }
         };
 
+        restore_float_mode(host_float_mode);
         // SAFETY: the code is done with the system
         let cpu = unsafe { &mut (*system).cpu };
         load(&ctx, cpu);
@@ -392,6 +426,16 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_float_mode_flushes_on_arm64_and_goes_back() {
+        let subnormal = || std::hint::black_box(f32::from_bits(1)) * std::hint::black_box(1.0);
+        let host = float_mode(0x0300_0000);
+        let flushed = std::hint::black_box(subnormal());
+        restore_float_mode(host);
+        assert_eq!(flushed.to_bits(), if cfg!(target_arch = "aarch64") { 0 } else { 1 });
+        assert_eq!(subnormal().to_bits(), 1);
+    }
 
     #[test]
     fn arm_and_thumb_code_use_every_slot() {

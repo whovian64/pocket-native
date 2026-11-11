@@ -84,6 +84,7 @@ impl Replay {
                         circle_y: y.parse().ok()?,
                         touch: (tx >= 0).then_some((tx as u16, ty as u16)),
                         tilt,
+                        motion: None,
                         c_stick_x: c_stick[0],
                         c_stick_y: c_stick[1],
                     },
@@ -126,6 +127,7 @@ mod tests {
             circle_y: -1.0,
             touch: Some((10, 20)),
             tilt: (0.25, -0.5),
+            motion: None,
             c_stick_x: -0.75,
             c_stick_y: 1.0,
         };

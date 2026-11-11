@@ -330,7 +330,9 @@ impl System {
 
         if self.kernel.current_thread.is_none() && self.gpu_busy() {
             if !self.realtime_gpu {
+                let start = std::time::Instant::now();
                 self.wait_gpu();
+                GPU_IDLE_WAITED.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
                 self.kernel.reschedule_pending = true;
                 return StepOutcome::Ran;
             }
@@ -1134,7 +1136,9 @@ impl System {
         let presents = self.gpu_queue.as_ref().map(|queue| (queue.presents.clone(), queue.waiter.clone()));
         let frame = self.frames;
         if let Some((presents, waiter)) = &presents {
+            let start = std::time::Instant::now();
             waiter.wait(|| presents.load(Ordering::SeqCst) == 0);
+            PRESENT_WAITED.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
             presents.fetch_add(1, Ordering::AcqRel);
         }
         self.gpu_work(&[], move |gpu, _, guest| {
@@ -1418,6 +1422,10 @@ type GpuJob = Box<dyn FnOnce() + Send>;
 
 /// microseconds the CPU's thread spent waiting on the GPU thread.
 pub static GPU_WAITED: AtomicU64 = AtomicU64::new(0);
+/// the part of it with no thread of the title's able to run.
+pub static GPU_IDLE_WAITED: AtomicU64 = AtomicU64::new(0);
+/// microseconds the CPU's thread waited for the last picture to go up.
+pub static PRESENT_WAITED: AtomicU64 = AtomicU64::new(0);
 
 /// how many times each thing asked for the GPU's drawings to be in memory,
 /// logged every few hundred, for telling what stalls the GPU in a game.

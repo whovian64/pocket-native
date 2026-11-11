@@ -66,7 +66,10 @@ impl Busy {
         used.sort_by_key(|&(ticks, _)| std::cmp::Reverse(ticks));
         let mut out: Vec<String> = used.iter().take(4).map(|(ticks, name)| format!("{name} {:.0}%", *ticks as f64 / seconds)).collect();
         let waited = zakuro_core::GPU_WAITED.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        out.push(format!("waiting on gpu {:.0}%", waited / seconds * 100.0));
+        let idle = zakuro_core::GPU_IDLE_WAITED.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let present = zakuro_core::PRESENT_WAITED.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let panel = zakuro_gpu::PANEL_HELD.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        out.push(format!("waiting on gpu {:.0}% (idle {:.0}%, present {:.0}%, gpu on panel {:.0}%)", waited / seconds * 100.0, idle / seconds * 100.0, present / seconds * 100.0, panel / seconds * 100.0));
         if let Some((gpu, loads)) = &self.gpu {
             let (sum, count, mhz) = (gpu.0.swap(0, Ordering::Relaxed), gpu.1.swap(0, Ordering::Relaxed), gpu.2.swap(0, Ordering::Relaxed));
             if let (Some(load), Some(mhz)) = (sum.checked_div(count), mhz.checked_div(count)) {

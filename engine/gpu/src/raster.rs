@@ -93,6 +93,7 @@ fn component(bytes: &[u8], ty: u32) -> f32 {
 }
 
 /// where an attribute sits in a loader's vertex.
+#[derive(Clone, Copy, Default)]
 struct Field {
     id: usize,
     offset: u32,
@@ -100,47 +101,104 @@ struct Field {
     count: u32,
 }
 
+/// up to twelve, in place rather than on the heap: a draw has at most twelve
+/// arrays of at most twelve attributes, and lays them out anew every time
+#[derive(Clone, Copy, Default)]
+struct Twelve<T> {
+    items: [T; 12],
+    len: usize,
+}
+
+impl<T> std::ops::Deref for Twelve<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.items[..self.len]
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Twelve<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T> Twelve<T> {
+    fn push(&mut self, item: T) {
+        self.items[self.len] = item;
+        self.len += 1;
+    }
+}
+
 /// one attribute array, as a vertex of it is laid out.
+#[derive(Clone, Copy, Default)]
 struct LoaderLayout {
     offset: u32,
     stride: u32,
     /// the bytes of a vertex the fields take.
     size: u32,
-    fields: Vec<Field>,
+    fields: Twelve<Field>,
 }
 
 /// how the attribute arrays lay out a vertex, worked out once for a draw
 /// rather than for every vertex.
+#[derive(Default)]
 struct VertexLayout {
-    loaders: Vec<LoaderLayout>,
+    loaders: Twelve<LoaderLayout>,
+}
+
+/// the registers a vertex layout is read from, the attribute formats and
+/// the twelve arrays.
+const LAYOUT_REGISTERS: std::ops::Range<usize> = REG_ATTRIBUTE_FORMAT_LOW..REG_ATTRIBUTE_LOADER + REG_ATTRIBUTE_LOADER_COUNT * REG_ATTRIBUTE_LOADER_STRIDE;
+
+/// the last draw's vertex layout and the registers it was read from, which
+/// the next draws mostly keep.
+struct LayoutCache {
+    registers: [u32; LAYOUT_REGISTERS.end - LAYOUT_REGISTERS.start],
+    layout: VertexLayout,
+}
+
+impl Default for LayoutCache {
+    fn default() -> Self {
+        LayoutCache { registers: [0; LAYOUT_REGISTERS.end - LAYOUT_REGISTERS.start], layout: VertexLayout::default() }
+    }
 }
 
 impl VertexLayout {
+    #[cfg(test)]
     fn read(registers: &[u32]) -> VertexLayout {
-        let loaders = read_loaders(registers)
-            .iter()
-            .filter(|loader| loader.component_count > 0)
-            .map(|loader| {
-                let mut offset = 0u32;
-                let mut fields = Vec::new();
-                for slot in 0..loader.component_count.min(12) {
-                    let id = ((loader.components >> (slot * 4)) & 0xF) as usize;
-                    if id >= 12 {
-                        // padding, aligned to a word, then 4, 8, 12 or 16 bytes.
-                        offset = offset.next_multiple_of(4) + (id as u32 - 11) * 4;
-                        continue;
-                    }
-                    let (ty, count) = attribute_format(registers, id as u32);
-                    let size = component_size(ty);
-                    // each attribute starts aligned to its component size.
-                    offset = offset.next_multiple_of(size);
-                    fields.push(Field { id, offset, ty, count });
-                    offset += size * count;
+        let mut layout = VertexLayout::default();
+        layout.fill(registers);
+        layout
+    }
+
+    /// the layout the registers give, in place of the one held.
+    fn fill(&mut self, registers: &[u32]) {
+        let loaders = &mut self.loaders;
+        loaders.len = 0;
+        for loader in read_loaders(registers).iter().filter(|loader| loader.component_count > 0) {
+            let mut offset = 0u32;
+            let fields = &mut loaders.items[loaders.len].fields;
+            fields.len = 0;
+            for slot in 0..loader.component_count.min(12) {
+                let id = ((loader.components >> (slot * 4)) & 0xF) as usize;
+                if id >= 12 {
+                    // padding, aligned to a word, then 4, 8, 12 or 16 bytes.
+                    offset = offset.next_multiple_of(4) + (id as u32 - 11) * 4;
+                    continue;
                 }
-                LoaderLayout { offset: loader.offset, stride: loader.stride, size: offset, fields }
-            })
-            .collect();
-        VertexLayout { loaders }
+                let (ty, count) = attribute_format(registers, id as u32);
+                let size = component_size(ty);
+                // each attribute starts aligned to its component size.
+                offset = offset.next_multiple_of(size);
+                fields.push(Field { id, offset, ty, count });
+                offset += size * count;
+            }
+            let slot = &mut loaders.items[loaders.len];
+            (slot.offset, slot.stride, slot.size) = (loader.offset, loader.stride, offset);
+            loaders.len += 1;
+        }
     }
 }
 
@@ -470,8 +528,8 @@ fn fetch_arrays<M: GpuMemory>(
             sources[field.id] = Some((l, f));
         }
     }
-    let mut arrays: Vec<host::FetchedArray> = Vec::new();
-    let mut uploaded: Vec<Option<usize>> = vec![None; layout.loaders.len()];
+    let mut arrays: Vec<host::FetchedArray> = Vec::with_capacity(layout.loaders.len());
+    let mut uploaded: [Option<usize>; 12] = [None; 12];
     let mut inputs = [host::Input::Constant(shader::ZERO); shader::INPUT_REGISTERS];
     for id in 0..count {
         let register = ((map >> (id * 4)) & 0xF) as usize;
@@ -903,6 +961,7 @@ pub struct Resources {
     /// again for every picture.
     #[cfg(feature = "gles")]
     pub(crate) redrawn_bottom: Option<(u32, u32)>,
+    layout: Box<LayoutCache>,
 }
 
 /// in fast mode, index buffers and vertex arrays as draws read them, kept
@@ -2135,7 +2194,11 @@ pub fn draw<M: GpuMemory>(
     }
 
     let attribute_base = loc_register(registers, REG_ATTRIBUTE_BASE);
-    let layout = VertexLayout::read(registers);
+    if resources.layout.registers[..] != registers[LAYOUT_REGISTERS] {
+        resources.layout.registers.copy_from_slice(&registers[LAYOUT_REGISTERS]);
+        resources.layout.layout.fill(registers);
+    }
+    let layout = &resources.layout.layout;
 
     // resolve each of the vertex_count draw indices to an actual vertex
     // array index, sequential for DrawArrays, looked up in the index buffer
@@ -2267,7 +2330,7 @@ pub fn draw<M: GpuMemory>(
     };
     let inputs: Vec<_> = unique
         .iter()
-        .map(|&vertex_index| fetch_vertex(registers, memory, attribute_base, &layout, fixed_attributes, vertex_index))
+        .map(|&vertex_index| fetch_vertex(registers, memory, attribute_base, &resources.layout.layout, fixed_attributes, vertex_index))
         .collect();
     let vertices = Vertices::Unshaded { vertex_shader, geometry_shader, inputs: &inputs, order: order.as_deref() };
     rasterize(registers, memory, resources, vertices);

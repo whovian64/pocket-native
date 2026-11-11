@@ -11,7 +11,7 @@ use std::path::PathBuf;
 pub const HEADER: &str = include_str!("../recomp.h");
 
 /// the interface version, which code has to match to be run.
-pub const ABI: u32 = 6;
+pub const ABI: u32 = 7;
 
 /// the oldest version the host still runs, whose code stops at every svc
 /// and never reaches the host's.

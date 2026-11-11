@@ -96,6 +96,9 @@ impl Probe {
 
     /// looks at both screens, counting a black one between two that are not.
     pub fn watch(&mut self, system: &mut System) {
+        if std::env::var_os("ZAKURO_PROBE_NO_WATCH").is_some() {
+            return;
+        }
         for (index, screen) in [zakuro_common::Screen::Top, zakuro_common::Screen::Bottom].into_iter().enumerate() {
             let (pixels, _, _) = system.read_screen_scaled(screen);
             let black = pixels.chunks(4).all(|pixel| pixel[0] < 8 && pixel[1] < 8 && pixel[2] < 8);
