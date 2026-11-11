@@ -97,7 +97,7 @@ Rotation** turns the picture for a panel mounted sideways.
 |---|---|
 | ArkOS | The main target. Its EmulationStation lists the `Pocket Native` folder under Ports only with **Scan Ports folder on boot** on (Start > UI Settings) |
 | dArkOS, dArkOSRE, ArkOS and dArkOS for clones | Played by testers on R36S clones, the RX6H and the RG52 Mini |
-| Knulli | Played by testers on H700 handhelds. Ports run as root, with no sudo. From 0.5.5 **Power**'s Balanced and Performance hold the H700's GPU at its top speed, where it stayed at 240 MHz |
+| Knulli | Played by testers on H700 handhelds. Ports run as root, with no sudo. From 0.5.5 **Power**'s Balanced and Performance should hold the H700's GPU at its top speed, where it stayed at 240 MHz, and the game's log says what it got |
 | muOS | Played by testers on H700 handhelds. The screens go through `/dev/fb0`, muOS having no `libgbm`, and both of muOS's pads are read: its kernel's `muOS-Keys` and the one muOS makes itself. From 0.5.0 **Power**'s Balanced and Performance raise the H700's GPU clock as well as the CPU's |
 | spruceOS 4.2 | Played on the Miyoo Flip. From 0.5.5 the TrimUI Smart Pro's pad is found under it too |
 | ROCKNIX | Played on the RG DS, with Mali's own driver. The launcher hands sway's panels to the game and back. Pads numbering their buttons the usual way are read (the R36S's `r36s_Gamepad` among them), and from 0.5.0 the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. On the R36S, its Mali driver crashed before the first picture until the 0.4.9 test build, Panfrost worked: not confirmed since |

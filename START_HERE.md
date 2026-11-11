@@ -23,7 +23,7 @@ Before you start, check [which games work](docs/compatibility.md),
   - an Android phone or handheld with Android 11 or newer, 64-bit (almost
     any from the last few years)
 - **A PC** with Windows or Linux and an Intel or AMD processor: the
-  build doesn't run on ARM PCs yet. It does the heavy work, your device
+  build doesn't run on ARM yet. It does the heavy work, your device
   never builds anything.
   - Windows: Docker Desktop or Podman Desktop. If neither is
     installed, the build offers to install Docker Desktop for you.
@@ -243,8 +243,8 @@ builds:
 
 Without them, Miis get an open-source placeholder head with no face. After
 adding them, run `Rebuild all games` and copy the folder onto the card again.
-The game's log says which it used. This is experimental and not guaranteed
-to work in every game.
+This is experimental and may not work in every game. The game's log says
+which head it used, so if your Miis look wrong, please send it.
 
 **The build says the game is encrypted.** Put your console's
 `aes_keys.txt` next to the game or in the kit's folder and build again,
