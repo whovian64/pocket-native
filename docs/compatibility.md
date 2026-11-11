@@ -40,10 +40,21 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 
 | Game | Status | Tried on | Notes |
 |---|---|---|---|
+| 2048 | Plays well | Reported: H700 (knulli), 0.6 test | 25 to 30 fps, the music sounding a little choppy |
+| 6180 the Moon | Slow | Reported: H700 (knulli), 0.6 test | Mostly above 25 fps in play, with dips to 15 to 20 and the level select at 10 fps with stuttering sound. The bottom screen disappears and comes back now and then. The same in New 3DS mode |
+| Aero Porter | Plays well | Reported: H700 (knulli), 0.6 test | The splash video at about 6 fps, then 30 fps with no dips |
+| Alien on the Run | Playable | Reported: H700 (knulli), 0.6 test | In the low 20s fps. Some things looked wrong with Speed hacks on, fine with them off |
 | Andro Dunos II | Starts | Reported: H700 (muOS), 0.4.6 | Full speed for the half minute its log covers, European version |
+| The Angry Video Game Nerd Adventures | Plays well | Reported: H700 (knulli), 0.6 test | 30 fps with no problems |
 | Animal Crossing: New Leaf | Playable | R36S, PC, reported: RG DS (Android), 0.4.6 | Tuned on the US version. A steady 30 fps on the RG DS, where its own bottom screen used to show the game's bottom screen at half the rate, fixed now. The first visit to town takes a few minutes building shaders. One report of things no longer drawing after a long session on a Mali-G31 handheld is being looked into. A rock solid 30 fps on an H700 under knulli on the 0.6 test |
+| Apollo Justice: Ace Attorney | Slow | Reported: H700 (knulli), 0.6 test | The intro videos, which can't be skipped, at about 5 fps with choppy sound, then over 20 fps in the game |
+| Art of Balance TOUCH! | Slow | Reported: H700 (knulli), 0.6 test | 10 to 15 fps in play, with choppy sound |
+| Attack of the Friday Monsters! A Tokyo Tale | Plays well | Reported: H700 (knulli), 0.6 test | The splash video is choppy, then 30 fps. A train in the distance came and went with Hide scenery out of view on |
 | Azure Striker Gunvolt: Striker Pack | Plays well | Reported: RX6H, 0.2, H700 (knulli), 0.6 test | Full speed on an H700 on the 0.6 test through the first game's first level and its boss, menus included. Skipped frames in the game select menu on 0.2 |
+| Banana Bliss: Jungle Puzzles | Plays well | Reported: H700 (knulli), 0.6 test | Full speed |
+| The Battle Cats POP! | Plays well | Reported: H700 (knulli), 0.6 test | Full speed |
 | Ben 10: Omniverse 2 | Slow | Reported: RG DS (Android), 0.4.6 | Doesn't run well, textures flicker all the time |
+| Bloodstained: Curse of the Moon | Slow | Reported: H700 (knulli), 0.6 test | 12 fps in play, with choppy sound |
 | BoxBoxBoy! | Plays well | Reported: H700 (knulli), 0.6 test | Full speed through the first world |
 | BoxBoy! | Plays well | Reported: H700 (knulli), 0.6 test | Full speed through the first world |
 | Bravely Default | Starts | Reported: RX6H, 0.2 | Sometimes crashed at the title on 0.2.0, got past the opening on a later version. Its intro videos ran at about 6 fps on an H700 on the 0.6 test, the game itself at full speed on an RK3326 handheld once its shaders were built |
@@ -51,6 +62,8 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Captain Toad: Treasure Tracker | Slow | Reported: H700 (knulli), 0.6 test | 4 to 8 fps in the first level with choppy sound, on a first run while its shaders built: not tried again since |
 | Chicken Wiggle | Starts | Reported: H700 (knulli), 0.6 test | Runs at full speed but shows only the backgrounds: the main character and most of the game are missing |
 | Corpse Party | Playable | Reported: H700 (knulli), 0.6 test | The opening runs at 8 to 9 fps with choppy sound, the game decoding its video on the CPU, then it plays at full speed |
+| Crashmo | Playable | Reported: H700 (knulli), 0.6 test | Menus and cutscenes at full speed, the levels at 12 to 20 fps |
+| Crimson Shroud | Playable | Reported: H700 (knulli), 0.6 test | The opening video and menu at about 6 fps with choppy sound, then 21 to 30 fps |
 | Donkey Kong Country Returns 3D | Starts | Reported: RX6H, 0.4.6, RG CubeXX, 0.4.7 | Keeps up full speed by skipping pictures, about 20 a second on the RG CubeXX. Crashed once in the Mali driver's shader compiler on the RX6H |
 | Dragon Ball Z: Extreme Butoden | Playable | Reported: H700 (muOS), 0.4.7 | 95% speed on average in a tester's log |
 | Fantasy Life | Plays well | Reported: RG DS (ROCKNIX), 0.5.0 | Full speed through a 48-minute log, dipping only while its shaders built |
