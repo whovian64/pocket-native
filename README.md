@@ -83,7 +83,7 @@ working or not.
 | Anbernic RG353 and RG503 | RK3566, Mali-G52 | ArkOS, ROCKNIX | Buttons mapped, no tester report yet |
 | Miyoo Flip | RK3566, Mali-G52 | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
 | Anbernic RG52 Mini | RK3562 | dArkOS | Played by testers |
-| Anbernic RG DS | RK3568, Mali-G52, two screens | ROCKNIX, Android | Both screens and both touch screens. Played under ROCKNIX: Pokémon Alpha Sapphire at full speed. Anbernic's own Linux not yet: one screen only, buttons not found. Banana OS: from 0.5.5 the bottom panel gets its own mode, where it stayed dark, not yet confirmed |
+| Anbernic RG DS | RK3568, Mali-G52, two screens | ROCKNIX, Android, BananaOS | Both screens and both touch screens. Played under ROCKNIX: Pokémon Alpha Sapphire at full speed. BananaOS gives each panel its own surface, so both screens should light there too; not yet confirmed on hardware. Anbernic's own Linux not yet: one screen only, buttons not found |
 | AYN Thor | Snapdragon 8 Gen 2, two screens | Android | Works, both screens |
 | Android phones | | Android | Works, with touch controls or a gamepad |
 
@@ -101,6 +101,7 @@ Rotation** turns the picture for a panel mounted sideways.
 | muOS | Played by testers on H700 handhelds. The screens go through `/dev/fb0`, muOS having no `libgbm`, and both of muOS's pads are read: its kernel's `muOS-Keys` and the one muOS makes itself. From 0.5.0 **Power**'s Balanced and Performance raise the H700's GPU clock as well as the CPU's |
 | spruceOS 4.2 | Played on the Miyoo Flip. From 0.5.5 the TrimUI Smart Pro's pad is found under it too |
 | ROCKNIX | Played on the RG DS, with Mali's own driver. The launcher hands sway's panels to the game and back. Pads numbering their buttons the usual way are read (the R36S's `r36s_Gamepad` among them), and from 0.5.0 the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. On the R36S, its Mali driver crashed before the first picture until the 0.4.9 test build, Panfrost worked: not confirmed since |
+| BananaOS | The RG DS's light Linux. Each panel gets its own KMS connector, so Pocket Native gives each its own surface: the 3DS's top screen goes on the top panel and its bottom screen on the bottom one. BananaOS's port launcher darkens the bottom panel for one-panel programs; Pocket Native turns it back on and clears `/run/banana/panel-off` |
 | Android 11 or newer, 64-bit | Works on phones, the AYN Thor and the RG DS, with one screen or two. On one RK3566 handheld 0.4.7 drew on the CPU, its driver refusing a kind of buffer: 0.5.0 uses the GPU there. From 0.5.5 the device's motion sensors stand in for the console's |
 | AmberELEC | Not yet |
 
@@ -129,6 +130,19 @@ If something comes out wrong, these go in `run.sh` next to the other
 The game's log is `log.txt` in its `data` folder: please add it to a
 report.
 
+### The RG DS under BananaOS
+
+BananaOS gives each panel its own KMS connector, so Pocket Native gives
+each its own GBM surface and window instead of stacking them: the top
+screen goes on the top panel and the bottom screen on the bottom one,
+as under ROCKNIX. BananaOS's launcher sets `BANANA_TOP` to the top panel
+(`DSI-2`); `ZAKURO_KMS_TOP` still wins over it. BananaOS's port launcher
+darkens the bottom panel for programs that draw on one panel; Pocket
+Native turns both backlights back on and clears `/run/banana/panel-off`,
+so the bottom screen stays lit, including after a wake-up. The settings
+above that name a panel or a touch screen work here too, and
+`BANANA_TOUCH` names the bottom panel's touch screen.
+
 ## Controls
 
 | Handheld | 3DS |
@@ -140,7 +154,7 @@ report.
 | Right stick | Moves the touch cursor |
 | R2 | Touches the bottom screen under the cursor |
 | R3 | Switches the right stick to the C-stick, with L2 and R2 as ZL and ZR, and back |
-| Touch screen | Touches the bottom screen where it is shown (RG DS under ROCKNIX) |
+| Touch screen | Touches the bottom screen where it is shown (RG DS under ROCKNIX and BananaOS) |
 | L2 held + right stick | Tilts the console, for games that use motion. On Android, tilting the device does too |
 | Start / Select | Start / Select |
 
