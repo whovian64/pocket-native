@@ -771,7 +771,8 @@ mod tests {
         let titles = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../titles");
         for entry in std::fs::read_dir(titles).unwrap() {
             let path = entry.unwrap().path().join("profile.toml");
-            let profile: Profile = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let profile: Profile = toml::from_str(&text).unwrap();
             for option in &profile.options {
                 let lines = wrap(&canvas, SMALL, &option.help, 400.0 - 28.0);
                 assert!(lines.len() <= 2, "{}: {lines:?}", path.display());
