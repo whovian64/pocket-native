@@ -1554,9 +1554,17 @@ impl Egl {
             if loaded.ChooseConfig(display, attributes.as_ptr(), &mut config, 1, &mut count) == 0 || count == 0 {
                 return Err("no EGL config for /dev/fb0".into());
             }
-            // the driver flips on the framebuffer, at the next refresh
-            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, window.as_ptr() as glutin_egl_sys::EGLNativeWindowType, 1)?;
-            Ok((egl, gl, window))
+            // the driver flips on the framebuffer, at the next refresh. A
++           // PowerVR driver such as the TrimUI Smart Pro's takes no window
++           // for the screen and faults on the size Mali's takes, so
++           // ZAKURO_FBDEV_NULL_WINDOW gives it none
++            let native = if std::env::var_os("ZAKURO_FBDEV_NULL_WINDOW").is_some() {
++                std::ptr::null_mut::<c_void>() as glutin_egl_sys::EGLNativeWindowType
++            } else {
++                window.as_ptr() as glutin_egl_sys::EGLNativeWindowType
++            };
++            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, native, 1)?;    
+             Ok((egl, gl, window))
         }
     }
 
