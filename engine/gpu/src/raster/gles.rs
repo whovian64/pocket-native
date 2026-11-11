@@ -1557,7 +1557,12 @@ pub struct Gles {
     surfaces: Vec<Surface>,
     framebuffers: rustc_hash::FxHashMap<(Option<usize>, Option<usize>), glow::Framebuffer>,
     textures: rustc_hash::FxHashMap<usize, Texture>,
-    samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap, Lod, bool), glow::Sampler>,
+    /// texture pack pictures on the GPU, by the hash of the texture each
+    /// replaces.
+    // ponytail: kept for the whole game, a budget and letting the least used
+    // go if a pack ever outgrows the GPU's memory
+    replaced: rustc_hash::FxHashMap<u64, glow::Texture>,
+        samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap, Lod, bool), glow::Sampler>,
     blank: glow::Texture,
     transfer: Option<glow::Program>,
     reinterpreter: Option<glow::Program>,
@@ -1685,6 +1690,7 @@ impl Gles {
                 surfaces: Vec::new(),
                 framebuffers: Default::default(),
                 textures: Default::default(),
+                replaced: Default::default(),
                 samplers: Default::default(),
                 blank,
                 transfer: None,
@@ -4085,6 +4091,11 @@ impl Gles {
 
     fn texture(&mut self, bound: &BoundTexture) -> Result<(glow::Texture, Option<glow::Texture>), String> {
         let _timed = timed(6);
+        if let Some(material) = &bound.replacement {
+            if let Some(texture) = self.replacement(material)? {
+                return Ok((texture, None));
+            }
+        }
         let key = bound.packed.as_ref().map_or(Arc::as_ptr(&bound.texels) as *const u8, |(_, bytes)| Arc::as_ptr(bytes) as *const u8) as usize;
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.flushes;
@@ -4168,6 +4179,35 @@ impl Gles {
         });
         self.textures.insert(key, Texture { texture, alpha, texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
         Ok((texture, alpha))
+    }
+
+    /// a texture pack's picture on the GPU, once it has been read, none
+    /// until then, the texture drawing as it is meanwhile.
+    fn replacement(&mut self, material: &Arc<crate::pack::Material>) -> Result<Option<glow::Texture>, String> {
+        if let Some(&texture) = self.replaced.get(&material.hash()) {
+            return Ok(Some(texture));
+        }
+        // read in the background, asked for again by each draw until it is
+        let Some(picture) = material.picture(4096) else { return Ok(None) };
+        let texture = self.texture_name()?;
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            disturb();
+            // SAFETY: on the GL thread, the name is new and each level's
+            // texels lie inside the picture's
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_storage_2d(glow::TEXTURE_2D, picture.levels.len() as i32, glow::RGBA8, picture.width as i32, picture.height as i32);
+                for (index, level) in picture.levels.iter().enumerate() {
+                    let bytes = &picture.texels[level.offset..level.offset + (level.width * level.height * 4) as usize];
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, index as i32, 0, 0, level.width as i32, level.height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(bytes)));
+                }
+            }
+        });
+        // the GPU's copy is the one kept, read again should it go
+        material.release();
+        self.replaced.insert(material.hash(), texture);
+        Ok(Some(texture))
     }
 
     /// a sampler magnifying bilinear or not, minifying as lod has it,

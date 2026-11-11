@@ -161,6 +161,17 @@ pub fn run(mut args: Vec<String>) {
         }
     };
 
+    // a Citra or Azahar texture pack in the game's data folder, what the pack
+    // puts in load/textures/<title id>/
+    let pack_dir = data.join("textures");
+    if let Some(pack) = zakuro_gpu::pack::Pack::open(&pack_dir) {
+        if system.gpu.set_texture_pack(Some(std::sync::Arc::new(pack))) {
+            log::info!("texture pack from {}", pack_dir.display());
+        } else {
+            log::warn!("a texture pack in {} needs the GPU drawing", pack_dir.display());
+        }
+    }
+
     let title_id = system.title.as_ref().map_or(0, |title| title.program_id());
     let title = if profile.name.is_empty() { format!("{title_id:016X}") } else { profile.name.clone() };
     log::info!("Pocket Native {}, {title}, {} options", env!("CARGO_PKG_VERSION"), profile.options.len());
