@@ -83,7 +83,7 @@ working or not.
 | Anbernic RG353 and RG503 | RK3566, Mali-G52 | ArkOS, ROCKNIX | Buttons mapped, no tester report yet |
 | Miyoo Flip | RK3566, Mali-G52 | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
 | Anbernic RG52 Mini | RK3562 | dArkOS | Played by testers |
-| Anbernic RG DS | RK3568, Mali-G52, two screens | ROCKNIX, Android, BananaOS | Both screens and both touch screens. Played under ROCKNIX: Pokémon Alpha Sapphire at full speed. BananaOS gives each panel its own surface, so both screens should light there too; not yet confirmed on hardware. Anbernic's own Linux not yet: one screen only, buttons not found |
+| Anbernic RG DS | RK3568, Mali-G52, two screens | ROCKNIX, Android, BananaOS | Both screens and both touch screens. Played under ROCKNIX: Pokémon Alpha Sapphire at full speed. BananaOS working both screens and both touch screens. Anbernic's own Linux not yet: one screen only, buttons not found |
 | AYN Thor | Snapdragon 8 Gen 2, two screens | Android | Works, both screens |
 | Android phones | | Android | Works, with touch controls or a gamepad |
 
