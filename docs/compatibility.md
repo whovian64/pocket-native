@@ -101,6 +101,7 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Pokémon X and Y | Playable | R36S, PC, reported: RG DS (Android) | 20 to 30 fps in towns on the R36S. The intro runs heavy, it settles once you're in the game |
 | Project X Zone | Playable | Reported: H700 (muOS), 0.4.7 | Close to full speed with **Frame skip** at 3. Text in the intro and dialogue glitched up to 0.4.7, fixed in 0.5.0 |
 | Project X Zone 2 | Playable | Reported: H700 (muOS), 0.4.7 | Close to the console, with dips in demanding scenes that **Frame skip** at 2 smooths out |
+| Radiant Historia: Perfect Chronology | Playable | Reported: RG DS (Android), 0.5.5 | Text and some 3D pieces get black pops and shadows, and the bottom screen clips against the top. With **Clears on the GPU** off only the text keeps its pops |
 | Rayman Origins | Playable | Reported: R36S clone, 0.2, RG DS (Android), 0.4.6 | Plays well. The intro stutters, and the picture holds for a second when changing characters or skins |
 | Resident Evil: Revelations | Starts | PC, reported: RX6H, 0.4.6, 0.4.9 | The opening runs at full speed, then the RX6H's Mali driver crashed in its shader compiler within a minute, every time, and at the start on 0.4.9. From 0.5.0 the next start should get past that. On the PC it plays into the first episode |
 | Shantae and the Pirate's Curse | Playable | Reported: H700 (muOS), 0.4.7 | Full speed with **Frame skip** on |
