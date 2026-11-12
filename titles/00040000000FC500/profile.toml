@@ -1,1 +1,5 @@
 name = "Bravely Default"
+
+# Real-time GPU function is able to minimize stuttering for this game
+[advanced]
+realtime_gpu = true

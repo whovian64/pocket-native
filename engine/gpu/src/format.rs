@@ -88,6 +88,7 @@ impl ColorFormat {
     }
 
     /// encodes straight 8-bit RGBA into this format.
+    #[inline]
     pub fn encode(self, rgba: [u8; 4], out: &mut [u8]) {
         match self {
             ColorFormat::Rgba8 => {
