@@ -19,6 +19,7 @@ mod busy;
 mod crash;
 mod font;
 pub mod input;
+mod keyboard;
 mod layout;
 mod menu;
 mod probe;
@@ -199,6 +200,8 @@ pub fn run(mut args: Vec<String>) {
     let mut controls = touch::Controls::load();
     // whether the menu went up, and with which of the touch controls' overlays
     let (mut menu_drawn, mut menu_controls) = (false, None);
+    // the software keyboard a title has open, and whether it went up
+    let (mut typing, mut typing_drawn): (Option<keyboard::Keyboard>, bool) = (None, false);
     let (mut fps, mut last_fps, mut status, mut fps_since) = (0u32, 0u32, None, Instant::now());
     // since when shaders have been building, said on screen after a second
     let mut building_since: Option<Instant> = None;
@@ -336,6 +339,34 @@ pub fn run(mut args: Vec<String>) {
         fn_alone &= !tapped;
         // L3 and R2 together do the same, for handhelds with no FN
         let tapped = tapped || [L3, R2].iter().all(|key| keys.contains(key)) && ![L3, R2].iter().all(|key| held.contains(key));
+
+        if let Some(open) = typing.as_mut() {
+            // a finger in the keyboard's pixels, which sit as the menu's do
+            let (width, height) = zakuro_gpu::layout_size();
+            let down = if zakuro_gpu::stacked() || height > width { 0.0 } else { (height as f32 - 480.0) / 2.0 };
+            let finger = fingers.first().map(|&(_, x, y)| (x - (width as f32 - 640.0) / 2.0, y - down));
+            match open.input(&keys, finger) {
+                keyboard::Outcome::None => {}
+                keyboard::Outcome::Redraw => typing_drawn = false,
+                keyboard::Outcome::Answer(text, button) => {
+                    log::info!("keyboard: answered with button {button}, {} characters", text.chars().count());
+                    system.answer_keyboard(&text, button);
+                    (typing, overlay, status, next) = (None, None, None, Instant::now());
+                }
+            }
+            held = keys.clone();
+            if let Some(open) = &typing {
+                if !typing_drawn {
+                    let mut canvas = Canvas::new(&font, PANEL);
+                    open.draw(&mut canvas);
+                    overlay = Some(Arc::new(canvas.finish()));
+                    system.present_panel(layout::shown(&settings), None, overlays(&overlay, &controls_overlay), settings.smooth, false);
+                    typing_drawn = true;
+                }
+                std::thread::sleep(frame);
+                continue;
+            }
+        }
 
         if menu.open || tapped {
             let action = if !menu.open {
@@ -525,9 +556,14 @@ pub fn run(mut args: Vec<String>) {
                 break;
             }
         }
-        if let Some(request) = system.keyboard_request() {
-            let confirm = request.buttons.len().saturating_sub(1);
-            system.answer_keyboard("Zakuro", confirm);
+        if let Some(request) = system.keyboard_request().filter(|_| typing.is_none()) {
+            // a probe has nobody to type
+            if probe.is_some() {
+                let confirm = request.buttons.len().saturating_sub(1);
+                system.answer_keyboard("Zakuro", confirm);
+            } else {
+                (typing, typing_drawn) = (Some(keyboard::Keyboard::new(request.clone(), &keys, !fingers.is_empty())), false);
+            }
         }
         let audio = system.take_audio();
         if !audio.is_empty() && probe.is_none() {
