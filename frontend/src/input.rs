@@ -308,11 +308,14 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
 }
 
 /// the handheld's touch screens, those giving ABS_MT_POSITION_X, and
-/// whether each is the bottom panel's: on the RG DS under ROCKNIX the one on
-/// fe5e0000.i2c, or where ZAKURO_TOUCH_BOTTOM says.
+/// whether each is the bottom panel's: on the RG DS under ROCKNIX and
+/// BananaOS the one on fe5e0000.i2c, or where ZAKURO_TOUCH_BOTTOM or
+/// BANANA_TOUCH says.
 pub fn touchscreens() -> Vec<(String, bool)> {
     let devices = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
-    let bottom = std::env::var("ZAKURO_TOUCH_BOTTOM").unwrap_or_else(|_| "fe5e0000.i2c".into());
+    let bottom = std::env::var("ZAKURO_TOUCH_BOTTOM")
+        .or_else(|_| std::env::var("BANANA_TOUCH"))
+        .unwrap_or_else(|_| "fe5e0000.i2c".into());
     devices
         .split("\n\n")
         .filter_map(|block| {

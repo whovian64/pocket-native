@@ -288,23 +288,45 @@ pub(super) fn monotonic_micros() -> u64 {
 
 pub(super) const GBM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 
+/// one panel driven through KMS: the GBM surface the context draws into,
+/// the CRTC and connector that drive it, and its mode.
+pub(super) struct KmsPanel {
+    pub(super) surface: *mut c_void,
+    pub(super) crtc: u32,
+    pub(super) connector: u32,
+    pub(super) mode: DrmModeInfo,
+    pub(super) shown: Option<(*mut c_void, u32)>,
+    pub(super) pending: Option<(*mut c_void, u32)>,
+    pub(super) set: bool,
+}
+
+/// the bottom panel of a dual-screen handheld: on BananaOS it has a GBM
+/// surface and a window of its own, elsewhere it shows the bottom half of
+/// the primary's surface, twice the panel's height.
+pub(super) enum Second {
+    Stacked { crtc: u32, connector: u32, mode: DrmModeInfo },
+    Panel(KmsPanel),
+}
+
+/// a connected connector found before the top panel is picked.
+struct FoundPanel {
+    connector: u32,
+    name: String,
+    kind: u32,
+    mode: DrmModeInfo,
+    crtc: u32,
+    possible: u32,
+}
+
 /// the panel, driven through KMS from a GBM surface the context draws into.
 pub(super) struct Kms {
     pub(super) drm: libloading::Library,
     pub(super) gbm: libloading::Library,
     pub(super) fd: i32,
     pub(super) device: *mut c_void,
-    pub(super) surface: *mut c_void,
-    pub(super) crtc: u32,
-    pub(super) connector: u32,
-    pub(super) mode: DrmModeInfo,
-    /// the CRTC, connector and mode of a dual-screen handheld's bottom
-    /// panel, the same size as the top one, which shows the bottom half of a
-    /// surface twice the panel's height, the top panel its top half.
-    pub(super) second: Option<(u32, u32, DrmModeInfo)>,
-    pub(super) shown: Option<(*mut c_void, u32)>,
-    pub(super) pending: Option<(*mut c_void, u32)>,
-    pub(super) set: bool,
+    /// the top panel, and the surface the screens' layout is drawn into.
+    pub(super) primary: KmsPanel,
+    pub(super) second: Option<Second>,
     /// how many pictures stayed up for 1, 2, 3 and 4 or more panel
     /// refreshes, logged every few seconds: at an even frame rate they all
     /// stay up as long.
@@ -349,6 +371,7 @@ impl Kms {
             return Err("no KMS resources".into());
         }
         let res = &*resources;
+        let crtcs = std::slice::from_raw_parts(res.crtcs, res.count_crtcs.max(0) as usize).to_vec();
         let mut panels = Vec::new();
         for i in 0..res.count_connectors as usize {
             let connector = call!(drm, "drmModeGetConnector", fn(i32, u32) -> *mut DrmModeConnector, fd, *res.connectors.add(i));
@@ -356,42 +379,71 @@ impl Kms {
                 continue;
             }
             let c = &*connector;
-            if c.connection == 1 && c.count_modes > 0 {
-                let modes = std::slice::from_raw_parts(c.modes, c.count_modes as usize);
-                let preferred = *modes.iter().find(|mode| mode.kind & (1 << 3) != 0).unwrap_or(&modes[0]);
-                // its own rate, or the one of its size nearest 60 Hz (ROCKNIX
-                // gives the R36S 80 Hz first)
-                let off = |mode: &&DrmModeInfo| (mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64) - 60.0).abs();
-                let mode = *modes
-                    .iter()
-                    .filter(|mode| (mode.hdisplay, mode.vdisplay) == (preferred.hdisplay, preferred.vdisplay))
-                    .min_by(|a, b| off(a).total_cmp(&off(b)))
-                    .unwrap_or(&preferred);
-                // the CRTC it is on, and those it may be on, from its
-                // encoder, or its first when it has none yet
-                let (mut crtc, mut possible) = (0, 0);
-                let encoder_id = if c.encoder_id == 0 && c.count_encoders > 0 { *c.encoders } else { c.encoder_id };
-                let encoder = call!(drm, "drmModeGetEncoder", fn(i32, u32) -> *mut DrmModeEncoder, fd, encoder_id);
-                if !encoder.is_null() {
-                    crtc = (*encoder).crtc_id;
-                    possible = (*encoder).possible_crtcs;
-                    call!(drm, "drmModeFreeEncoder", fn(*mut DrmModeEncoder) -> (), encoder);
-                }
-                panels.push((c.connector_id, connector_name(c.connector_type, c.connector_type_id), mode, crtc, possible));
+            let name = connector_name(c.connector_type, c.connector_type_id);
+            if c.connection != 1 || c.count_modes <= 0 {
+                log::info!("{name} is {}, left out", if c.connection == 1 { "connected without a mode" } else { "not connected" });
+                call!(drm, "drmModeFreeConnector", fn(*mut DrmModeConnector) -> (), connector);
+                continue;
             }
+            let modes = std::slice::from_raw_parts(c.modes, c.count_modes as usize);
+            let preferred = *modes.iter().find(|mode| mode.kind & (1 << 3) != 0).unwrap_or(&modes[0]);
+            // its own rate, or the one of its size nearest 60 Hz (ROCKNIX
+            // gives the R36S 80 Hz first)
+            let off = |mode: &&DrmModeInfo| (mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64) - 60.0).abs();
+            let mode = *modes
+                .iter()
+                .filter(|mode| (mode.hdisplay, mode.vdisplay) == (preferred.hdisplay, preferred.vdisplay))
+                .min_by(|a, b| off(a).total_cmp(&off(b)))
+                .unwrap_or(&preferred);
+            // the CRTC it is on, and those it may be on, from every encoder
+            // it has: BananaOS leaves encoder_id zero until a mode is set
+            let (mut crtc, mut possible) = (0, 0);
+            let mut encoder_ids = Vec::new();
+            if c.encoder_id != 0 {
+                encoder_ids.push(c.encoder_id);
+            }
+            for e in 0..c.count_encoders.max(0) as usize {
+                let id = *c.encoders.add(e);
+                if !encoder_ids.contains(&id) {
+                    encoder_ids.push(id);
+                }
+            }
+            for id in encoder_ids {
+                let encoder = call!(drm, "drmModeGetEncoder", fn(i32, u32) -> *mut DrmModeEncoder, fd, id);
+                if encoder.is_null() {
+                    continue;
+                }
+                if crtc == 0 {
+                    crtc = (*encoder).crtc_id;
+                }
+                possible |= (*encoder).possible_crtcs;
+                call!(drm, "drmModeFreeEncoder", fn(*mut DrmModeEncoder) -> (), encoder);
+            }
+            let refresh = mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
+            log::info!("{name}: {}x{} at {refresh:.3} Hz, crtc {crtc}, possible crtcs {possible:#x}", mode.hdisplay, mode.vdisplay);
+            panels.push(FoundPanel { connector: c.connector_id, name, kind: c.connector_type, mode, crtc, possible });
             call!(drm, "drmModeFreeConnector", fn(*mut DrmModeConnector) -> (), connector);
         }
-        let crtcs = std::slice::from_raw_parts(res.crtcs, res.count_crtcs.max(0) as usize).to_vec();
         call!(drm, "drmModeFreeResources", fn(*mut DrmModeRes) -> (), resources);
         if panels.is_empty() {
             return Err("no connected display".into());
         }
         // the panel the top screen goes on: ZAKURO_KMS_TOP=DSI-1 names it,
-        // DSI-2 on the RG DS under ROCKNIX, else the first connected
-        let top = std::env::var("ZAKURO_KMS_TOP").unwrap_or_else(|_| "DSI-2".into());
-        let (connector, name, mode, crtc, possible) = panels.remove(panels.iter().position(|panel| panel.1 == top).unwrap_or(0));
+        // BANANA_TOP does under BananaOS, DSI-2 is the RG DS's top panel
+        let top_name = std::env::var("ZAKURO_KMS_TOP")
+            .or_else(|_| std::env::var("BANANA_TOP"))
+            .ok()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "DSI-2".into());
+        let top_index = panels
+            .iter()
+            .position(|panel| panel.name == top_name)
+            .or_else(|| panels.iter().position(|panel| panel.kind == 16))
+            .unwrap_or(0);
+        let top = panels.remove(top_index);
+        log::info!("the top screen goes on {}", top.name);
         // how the kernel says the panel is mounted
-        let properties = call!(drm, "drmModeObjectGetProperties", fn(i32, u32, u32) -> *mut DrmModeObjectProperties, fd, connector, 0xC0C0_C0C0);
+        let properties = call!(drm, "drmModeObjectGetProperties", fn(i32, u32, u32) -> *mut DrmModeObjectProperties, fd, top.connector, 0xC0C0_C0C0);
         if !properties.is_null() {
             let found = &*properties;
             for i in 0..found.count_props as usize {
@@ -408,33 +460,71 @@ impl Kms {
             }
             call!(drm, "drmModeFreeObjectProperties", fn(*mut DrmModeObjectProperties) -> (), properties);
         }
-        // another panel the same size is the bottom one, both shown as one
-        // picture stacked, unless ZAKURO_KMS_SINGLE=1 keeps to one
-        let bottom = panels
-            .into_iter()
-            .find(|panel| (panel.2.hdisplay, panel.2.vdisplay) == (mode.hdisplay, mode.vdisplay))
-            .filter(|_| std::env::var_os("ZAKURO_KMS_SINGLE").is_none());
+        // another connected panel of the top one's kind is the bottom one,
+        // unless ZAKURO_KMS_SINGLE=1 keeps to one
+        let bottom = if std::env::var_os("ZAKURO_KMS_SINGLE").is_some() || (top.kind != 16 && top.kind != 17) {
+            None
+        } else {
+            panels.into_iter().find(|panel| panel.kind == top.kind)
+        };
         // a CRTC each, the one it is on unless the other panel has it
         let mut used = Vec::new();
-        let mut pick = |crtc: u32, possible: u32| {
+        let mut pick = |panel: &FoundPanel| {
             let free = |crtc: &u32| !used.contains(crtc);
-            let picked = Some(crtc)
+            let picked = Some(panel.crtc)
                 .filter(|crtc| *crtc != 0 && free(crtc))
-                .or_else(|| crtcs.iter().enumerate().find(|(i, crtc)| possible & (1 << i) != 0 && free(crtc)).map(|(_, crtc)| *crtc))
+                .or_else(|| crtcs.iter().enumerate().find(|(i, crtc)| panel.possible & (1 << i) != 0 && free(crtc)).map(|(_, crtc)| *crtc))
                 .or_else(|| crtcs.iter().copied().find(free))
                 .unwrap_or(0);
             used.push(picked);
             picked
         };
-        let crtc = pick(crtc, possible);
-        // each panel in its own mode, the same under ROCKNIX
-        let second = bottom.map(|(connector, bottom_name, bottom_mode, crtc, possible)| {
-            let hz = |mode: &DrmModeInfo| mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
-            log::info!("two panels, {name} on top and {bottom_name} under it at {:.3} Hz", hz(&bottom_mode));
-            (pick(crtc, possible), connector, bottom_mode)
-        });
-        let second = second.filter(|&(bottom, ..)| bottom != 0 && bottom != crtc);
-        set_stacked(second.is_some());
+        let top_crtc = pick(&top);
+        if top_crtc == 0 {
+            return Err("no CRTC for the top panel".into());
+        }
+        // BananaOS can give each panel its own surface and window; elsewhere
+        // one tall surface is stacked, the top panel showing its top half and
+        // the bottom one its bottom half, as ROCKNIX expects
+        let banana = std::path::Path::new("/run/banana").exists() || std::env::var_os("BANANA_TOP").is_some();
+        let (second, height) = match bottom {
+            Some(bottom) => {
+                let bottom_crtc = pick(&bottom);
+                if bottom_crtc == 0 || bottom_crtc == top_crtc {
+                    log::warn!("{} has no CRTC of its own, leaving it dark", bottom.name);
+                    (None, top.mode.vdisplay as u32)
+                } else if banana {
+                    let surface = call!(
+                        gbm,
+                        "gbm_surface_create",
+                        fn(*mut c_void, u32, u32, u32, u32) -> *mut c_void,
+                        device,
+                        bottom.mode.hdisplay as u32,
+                        bottom.mode.vdisplay as u32,
+                        GBM_FORMAT_XRGB8888,
+                        1 | 4
+                    );
+                    if surface.is_null() {
+                        log::warn!("no GBM surface for {}, leaving it dark", bottom.name);
+                        (None, top.mode.vdisplay as u32)
+                    } else {
+                        log::info!("two panels, one surface each: {} on top, {} under it", top.name, bottom.name);
+                        let panel = KmsPanel { surface, crtc: bottom_crtc, connector: bottom.connector, mode: bottom.mode, shown: None, pending: None, set: false };
+                        (Some(Second::Panel(panel)), top.mode.vdisplay as u32)
+                    }
+                } else if (bottom.mode.hdisplay, bottom.mode.vdisplay) == (top.mode.hdisplay, top.mode.vdisplay) {
+                    // each panel in its own mode, the same under ROCKNIX
+                    let hz = bottom.mode.clock as f64 * 1000.0 / (bottom.mode.htotal as f64 * bottom.mode.vtotal as f64);
+                    log::info!("two panels, {} on top and {} under it at {hz:.3} Hz", top.name, bottom.name);
+                    (Some(Second::Stacked { crtc: bottom_crtc, connector: bottom.connector, mode: bottom.mode }), top.mode.vdisplay as u32 * 2)
+                } else {
+                    log::warn!("{} is {}x{}, not the top panel's size, leaving it dark", bottom.name, bottom.mode.hdisplay, bottom.mode.vdisplay);
+                    (None, top.mode.vdisplay as u32)
+                }
+            }
+            None => (None, top.mode.vdisplay as u32),
+        };
+        set_stacked(matches!(&second, Some(Second::Stacked { .. })));
         // sway lets go of the panels a moment after it stopped, as under
         // ROCKNIX, and a modeset before then fails. only busy is worth
         // waiting out: ArkOS's kernel keeps the call to root, where the
@@ -447,8 +537,8 @@ impl Kms {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        let refresh = mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
-        log::info!("panel {}x{} at {refresh:.3} Hz", mode.hdisplay, mode.vdisplay);
+        let refresh = top.mode.clock as f64 * 1000.0 / (top.mode.htotal as f64 * top.mode.vtotal as f64);
+        log::info!("panel {}x{} at {refresh:.3} Hz", top.mode.hdisplay, top.mode.vdisplay);
         if (50.0..70.0).contains(&refresh) {
             PANEL_PERIOD.store((1e9 / refresh) as u64, std::sync::atomic::Ordering::Relaxed);
         }
@@ -457,34 +547,68 @@ impl Kms {
             "gbm_surface_create",
             fn(*mut c_void, u32, u32, u32, u32) -> *mut c_void,
             device,
-            mode.hdisplay as u32,
-            mode.vdisplay as u32 * (1 + second.is_some() as u32),
+            top.mode.hdisplay as u32,
+            height,
             GBM_FORMAT_XRGB8888,
             1 | 4
         );
         if surface.is_null() {
             return Err("no GBM surface".into());
         }
-        Ok(Kms { drm, gbm, fd, device, surface, crtc, connector, mode, second, shown: None, pending: None, set: false, held: [0; 4], held_since: std::time::Instant::now(), last_flip: 0, asked: 0, slack: (0, 0) })
+        // BananaOS's run-port turns the bottom backlight off for one-panel
+        // ports; both are needed here, and the marker would darken it again
+        // after a wake-up
+        if second.is_some() && banana {
+            light_panels();
+        }
+        let primary = KmsPanel { surface, crtc: top_crtc, connector: top.connector, mode: top.mode, shown: None, pending: None, set: false };
+        Ok(Kms { drm, gbm, fd, device, primary, second, held: [0; 4], held_since: std::time::Instant::now(), last_flip: 0, asked: 0, slack: (0, 0) })
     }
 
-    /// the size of the picture, both panels' when there are two.
+    /// the size of the picture, both panels' when they are stacked.
     pub(super) fn size(&self) -> (i32, i32) {
-        (self.mode.hdisplay as i32, self.mode.vdisplay as i32 * (1 + self.second.is_some() as i32))
+        let (width, height) = (self.primary.mode.hdisplay as i32, self.primary.mode.vdisplay as i32);
+        (width, if matches!(&self.second, Some(Second::Stacked { .. })) { height * 2 } else { height })
     }
 
-    /// waits for the flip queued last to happen, then lets go of the
-    /// buffer it replaced.
+    /// the GBM surface the context draws the screens' layout into.
+    pub(super) fn primary_surface(&self) -> *mut c_void {
+        self.primary.surface
+    }
+
+    /// the GBM surface of the bottom panel when it has one of its own, for
+    /// the renderer's second window.
+    pub(super) fn second_surface(&self) -> Option<*mut c_void> {
+        match &self.second {
+            Some(Second::Panel(panel)) => Some(panel.surface),
+            _ => None,
+        }
+    }
+
+    /// waits for the flips queued last to happen, then lets go of the
+    /// buffers they replaced.
     pub(super) fn settle(&mut self) -> Result<(), String> {
-        let Some(pending) = self.pending.take() else { return Ok(()) };
+        let primary = self.primary.pending.take();
+        let second = match &mut self.second {
+            Some(Second::Panel(panel)) => panel.pending.take(),
+            _ => None,
+        };
+        if primary.is_none() && second.is_none() {
+            return Ok(());
+        }
         // SAFETY: as in open, on the descriptor and buffers this holds
         unsafe {
             let mut context = DrmEventContext { version: 2, vblank_handler: None, page_flip_handler: Some(flipped) };
             let mut poll = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
             // both panels' flips, when there are two
-            let wanted = if self.second.is_some() { 3 } else { 1 };
+            let stacked = matches!(&self.second, Some(Second::Stacked { .. }));
+            let wanted = if stacked {
+                if primary.is_some() { 3 } else { 0 }
+            } else {
+                (primary.is_some() as u32) | ((second.is_some() as u32) << 1)
+            };
             let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
-            while FLIPS_SEEN.load(std::sync::atomic::Ordering::Relaxed) & wanted != wanted {
+            while wanted != 0 && FLIPS_SEEN.load(std::sync::atomic::Ordering::Relaxed) & wanted != wanted {
                 let left = until.saturating_duration_since(std::time::Instant::now()).as_millis() as i32;
                 if left <= 0 || libc::poll(&mut poll, 1, left) <= 0 {
                     break;
@@ -510,16 +634,21 @@ impl Kms {
                     self.held_since = std::time::Instant::now();
                 }
             }
-            if let Some((bo, fb)) = self.shown.replace(pending) {
-                call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
-                call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
+            // only a panel whose flip was queued has an old buffer to let go
+            // of: without one, shown is what the display is reading and must
+            // be left alone
+            if let Some(pending) = primary {
+                self.primary.release(&self.drm, &self.gbm, self.fd, pending)?;
+            }
+            if let (Some(Second::Panel(panel)), Some(pending)) = (&mut self.second, second) {
+                panel.release(&self.drm, &self.gbm, self.fd, pending)?;
             }
         }
         Ok(())
     }
 
-    /// queues what the context just swapped to for the panel's next
-    /// vertical blank, waiting only for a flip still queued from before.
+    /// queues what the context just swapped to for the panels' next vertical
+    /// blank, waiting only for a flip still queued from before.
     /// a picture goes up no sooner than as many refreshes after the last as
     /// the game's frames between them, two at most, so none flashes by for
     /// one refresh and a game behind is never held up further.
@@ -535,95 +664,102 @@ impl Kms {
                 paced = true;
             }
         }
+        let stacked = match &self.second {
+            Some(Second::Stacked { crtc, connector, mode }) => Some((*crtc, *connector, *mode)),
+            _ => None,
+        };
         // SAFETY: as in open, the buffer object is the surface's front one
         unsafe {
-            let bo = call!(self.gbm, "gbm_surface_lock_front_buffer", fn(*mut c_void) -> *mut c_void, self.surface);
-            if bo.is_null() {
-                return Err("no front buffer".into());
-            }
-            let handle = call!(self.gbm, "gbm_bo_get_handle", fn(*mut c_void) -> u64, bo) as u32;
-            let stride = call!(self.gbm, "gbm_bo_get_stride", fn(*mut c_void) -> u32, bo);
-            let (width, height) = self.size();
-            let mut fb = 0u32;
-            let added = call!(
-                self.drm,
-                "drmModeAddFB",
-                fn(i32, u32, u32, u8, u8, u32, u32, *mut u32) -> i32,
-                self.fd,
-                width as u32,
-                height as u32,
-                24,
-                32,
-                stride,
-                handle,
-                &mut fb
-            );
-            if added != 0 {
-                call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
-                return Err("could not make a framebuffer".into());
-            }
             FLIPS_SEEN.store(0, std::sync::atomic::Ordering::Relaxed);
-            if !self.set {
-                let mut connector = self.connector;
-                let mut mode = self.mode;
-                let result = call!(
-                    self.drm,
-                    "drmModeSetCrtc",
-                    fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
-                    self.fd,
-                    self.crtc,
-                    fb,
-                    0,
-                    0,
-                    &mut connector,
-                    1,
-                    &mut mode
-                );
-                if result != 0 {
-                    return Err(format!("could not set the display mode, {result}"));
+            if let Some((second_crtc, mut second_connector, mut second_mode)) = stacked {
+                let bo = call!(self.gbm, "gbm_surface_lock_front_buffer", fn(*mut c_void) -> *mut c_void, self.primary.surface);
+                if bo.is_null() {
+                    return Err("no front buffer".into());
                 }
-                // the bottom panel shows the picture's bottom half
-                if let Some((crtc, mut connector, mut mode)) = self.second {
+                let handle = call!(self.gbm, "gbm_bo_get_handle", fn(*mut c_void) -> u64, bo) as u32;
+                let stride = call!(self.gbm, "gbm_bo_get_stride", fn(*mut c_void) -> u32, bo);
+                let (width, height) = self.size();
+                let mut fb = 0u32;
+                let added = call!(
+                    self.drm,
+                    "drmModeAddFB",
+                    fn(i32, u32, u32, u8, u8, u32, u32, *mut u32) -> i32,
+                    self.fd,
+                    width as u32,
+                    height as u32,
+                    24,
+                    32,
+                    stride,
+                    handle,
+                    &mut fb
+                );
+                if added != 0 {
+                    call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.primary.surface, bo);
+                    return Err("could not make a framebuffer".into());
+                }
+                if !self.primary.set {
+                    let mut connector = self.primary.connector;
+                    let mut mode = self.primary.mode;
                     let result = call!(
                         self.drm,
                         "drmModeSetCrtc",
                         fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
                         self.fd,
-                        crtc,
+                        self.primary.crtc,
                         fb,
                         0,
-                        self.mode.vdisplay as u32,
+                        0,
                         &mut connector,
                         1,
                         &mut mode
                     );
                     if result != 0 {
+                        call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
+                        call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.primary.surface, bo);
+                        return Err(format!("could not set the display mode, {result}"));
+                    }
+                    // the bottom panel shows the picture's bottom half
+                    let result = call!(
+                        self.drm,
+                        "drmModeSetCrtc",
+                        fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
+                        self.fd,
+                        second_crtc,
+                        fb,
+                        0,
+                        self.primary.mode.vdisplay as u32,
+                        &mut second_connector,
+                        1,
+                        &mut second_mode
+                    );
+                    // the top panel shows this picture now: keep it even when
+                    // the bottom panel's modeset fails, or the top CRTC would
+                    // scan a buffer let go of
+                    self.primary.set = true;
+                    self.primary.shown = Some((bo, fb));
+                    if result != 0 {
                         return Err(format!("could not set the bottom panel's display mode, {result}"));
                     }
-                }
-                self.set = true;
-                self.shown = Some((bo, fb));
-            } else if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, self.crtc, fb, 1, std::ptr::without_provenance_mut(1)) == 0 {
-                // a held picture says nothing of how early pictures come
-                self.asked = if paced { 0 } else { monotonic_micros() };
-                self.pending = Some((bo, fb));
-                // the bottom panel flips to the same picture; were it still
-                // busy, it is set there now, as the buffer it shows goes
-                if let Some((crtc, mut connector, mut mode)) = self.second {
-                    if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, crtc, fb, 1, std::ptr::without_provenance_mut(2)) != 0 {
+                } else if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, self.primary.crtc, fb, 1, std::ptr::without_provenance_mut(1)) == 0 {
+                    // a held picture says nothing of how early pictures come
+                    self.asked = if paced { 0 } else { monotonic_micros() };
+                    self.primary.pending = Some((bo, fb));
+                    // the bottom panel flips to the same picture; were it still
+                    // busy, it is set there now, as the buffer it shows goes
+                    if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, second_crtc, fb, 1, std::ptr::without_provenance_mut(2)) != 0 {
                         let flip = std::io::Error::last_os_error();
                         let set = call!(
                             self.drm,
                             "drmModeSetCrtc",
                             fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
                             self.fd,
-                            crtc,
+                            second_crtc,
                             fb,
                             0,
-                            self.mode.vdisplay as u32,
-                            &mut connector,
+                            self.primary.mode.vdisplay as u32,
+                            &mut second_connector,
                             1,
-                            &mut mode
+                            &mut second_mode
                         );
                         // a panel that never takes a flip leaves this the
                         // only way on, and dark, the log says why
@@ -634,13 +770,108 @@ impl Kms {
                         }
                         FLIPS_SEEN.fetch_or(2, std::sync::atomic::Ordering::Relaxed);
                     }
+                } else {
+                    call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
+                    call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.primary.surface, bo);
                 }
             } else {
-                call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
-                call!(self.gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
+                let drm = &self.drm;
+                let gbm = &self.gbm;
+                let fd = self.fd;
+                let mut queued = self.primary.hand_over(drm, gbm, fd, 1)?;
+                if let Some(Second::Panel(panel)) = self.second.as_mut() {
+                    queued |= panel.hand_over(drm, gbm, fd, 2)?;
+                }
+                // a held picture says nothing of how early pictures come
+                self.asked = if paced || !queued { 0 } else { monotonic_micros() };
             }
         }
         Ok(())
+    }
+}
+
+impl KmsPanel {
+    /// hands the surface's newest front buffer to this panel's display: sets
+    /// the mode the first time, page flips after. True when a flip was
+    /// queued, which the caller times the next picture against.
+    unsafe fn hand_over(&mut self, drm: &libloading::Library, gbm: &libloading::Library, fd: i32, tag: usize) -> Result<bool, String> {
+        let bo = call!(gbm, "gbm_surface_lock_front_buffer", fn(*mut c_void) -> *mut c_void, self.surface);
+        if bo.is_null() {
+            return Err("no front buffer".into());
+        }
+        let handle = call!(gbm, "gbm_bo_get_handle", fn(*mut c_void) -> u64, bo) as u32;
+        let stride = call!(gbm, "gbm_bo_get_stride", fn(*mut c_void) -> u32, bo);
+        let (width, height) = (self.mode.hdisplay as u32, self.mode.vdisplay as u32);
+        let mut fb = 0u32;
+        let added = call!(drm, "drmModeAddFB", fn(i32, u32, u32, u8, u8, u32, u32, *mut u32) -> i32, fd, width, height, 24, 32, stride, handle, &mut fb);
+        if added != 0 {
+            call!(gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
+            return Err("could not make a framebuffer".into());
+        }
+        if !self.set {
+            let mut connector = self.connector;
+            let mut mode = self.mode;
+            let result = call!(
+                drm,
+                "drmModeSetCrtc",
+                fn(i32, u32, u32, u32, u32, *mut u32, i32, *mut DrmModeInfo) -> i32,
+                fd,
+                self.crtc,
+                fb,
+                0,
+                0,
+                &mut connector,
+                1,
+                &mut mode
+            );
+            if result != 0 {
+                call!(drm, "drmModeRmFB", fn(i32, u32) -> i32, fd, fb);
+                call!(gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
+                return Err(format!("could not set the display mode, {result}"));
+            }
+            self.set = true;
+            self.shown = Some((bo, fb));
+            Ok(false)
+        } else if call!(drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, fd, self.crtc, fb, 1, std::ptr::without_provenance_mut(tag)) == 0 {
+            self.pending = Some((bo, fb));
+            Ok(true)
+        } else {
+            call!(drm, "drmModeRmFB", fn(i32, u32) -> i32, fd, fb);
+            call!(gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
+            Ok(false)
+        }
+    }
+
+    /// lets go of the buffer a flip replaced once it has happened, keeping
+    /// the one the flip put up.
+    unsafe fn release(&mut self, drm: &libloading::Library, gbm: &libloading::Library, fd: i32, pending: (*mut c_void, u32)) -> Result<(), String> {
+        if let Some((bo, fb)) = std::mem::replace(&mut self.shown, Some(pending)) {
+            call!(drm, "drmModeRmFB", fn(i32, u32) -> i32, fd, fb);
+            call!(gbm, "gbm_surface_release_buffer", fn(*mut c_void, *mut c_void) -> (), self.surface, bo);
+        }
+        Ok(())
+    }
+}
+
+/// BananaOS's run-port turns the bottom panel's backlight off for ports that
+/// draw on one panel. Pocket Native draws on both, so turn every backlight
+/// back on and clear the marker that would darken it again after a wake-up.
+fn light_panels() {
+    // clear the marker first: bananad reads it after a wake-up and would turn
+    // the bottom panel off again
+    match std::fs::remove_file("/run/banana/panel-off") {
+        Ok(()) => log::info!("cleared BananaOS's panel-off marker"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("could not clear BananaOS's panel-off marker: {error}"),
+    }
+    if let Ok(entries) = std::fs::read_dir("/sys/class/backlight") {
+        for entry in entries.flatten() {
+            let power = entry.path().join("bl_power");
+            match std::fs::write(&power, b"0\n") {
+                Ok(()) => log::info!("turned the backlight on at {}", power.display()),
+                Err(error) => log::warn!("could not turn the backlight on at {}: {error}", power.display()),
+            }
+        }
     }
 }
 
@@ -1506,7 +1737,13 @@ impl Egl {
                     visual as u32 == GBM_FORMAT_XRGB8888
                 })
                 .ok_or("no EGL config for the panel")?;
-            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, kms.surface as glutin_egl_sys::EGLNativeWindowType, 0)?;
+            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, kms.primary_surface() as glutin_egl_sys::EGLNativeWindowType, 0)?;
+            if let Some(surface) = kms.second_surface() {
+                // the primary panel shows the top screen, so the second shows
+                // the bottom one, which its own window then takes
+                set_second_shows_top(false);
+                set_second_window(surface);
+            }
             Ok((egl, gl, kms))
         }
     }

@@ -273,9 +273,16 @@ pub fn run(mut args: Vec<String>) {
             let mut pad = pad.lock().unwrap();
             let keys: HashSet<u16> = pad.keys.union(&pad.let_go).copied().collect();
             let fingers: Vec<(i32, f32, f32)> = pad.fingers.iter().chain(&pad.lifted).copied().collect();
+            // the bottom panel's touch screen, its fingers marked 100 and up
+            // by read_touch, where that panel has a window of its own: its
+            // places are the whole layout's, so scale them to 0..1
+            let second_touch = pad.second_touch.or_else(|| {
+                let (width, height) = zakuro_gpu::layout_size();
+                pad.fingers.iter().find(|(id, ..)| *id >= 100).map(|&(_, x, y)| (x / width.max(1) as f32, y / height.max(1) as f32))
+            });
             pad.let_go.clear();
             pad.lifted.clear();
-            (keys, pad.axes, fingers, pad.second_touch, pad.pad_used, pad.osh_pb, pad.motion)
+            (keys, pad.axes, fingers, second_touch, pad.pad_used, pad.osh_pb, pad.motion)
         };
         if input::QUIT.load(std::sync::atomic::Ordering::Relaxed) {
             log::info!("asked to quit");
