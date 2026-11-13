@@ -48,11 +48,12 @@ pub struct DirectoryEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostArchive {
     root: PathBuf,
+    missing_file: ResultCode,
 }
 
 impl HostArchive {
     pub fn at(root: impl Into<PathBuf>) -> HostArchive {
-        HostArchive { root: root.into() }
+        HostArchive { root: root.into(), missing_file: errors::FS_FILE_NOT_FOUND }
     }
 
     /// the running title's own save data.
@@ -72,7 +73,10 @@ impl HostArchive {
     }
 
     pub fn sdmc(base: &Path) -> HostArchive {
-        HostArchive::at(base.join("sdmc"))
+        // libctru maps this SD-card result to ENOENT. The archive-specific
+        // missing-file result used by retail save archives is not in its
+        // errno table, making a first homebrew save look unavailable.
+        HostArchive { root: base.join("sdmc"), missing_file: errors::FS_NOT_FOUND }
     }
 
     pub fn exists(&self) -> bool {
@@ -149,7 +153,7 @@ impl HostArchive {
             return Err(errors::FS_PATH_NOT_FOUND);
         }
         if !create {
-            return Err(errors::FS_FILE_NOT_FOUND);
+            return Err(self.missing_file);
         }
         std::fs::File::create(&host).map_err(io_error)?;
         Ok(host)
@@ -356,6 +360,21 @@ mod tests {
 
         archive.format(info).unwrap();
         assert_eq!(archive.open_file("/main", false), Err(errors::FS_FILE_NOT_FOUND));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn sdmc_missing_files_use_the_libctru_errno_compatible_result() {
+        let base = scratch("sdmc-missing-file");
+        let archive = HostArchive::sdmc(&base);
+        std::fs::create_dir_all(base.join("sdmc")).unwrap();
+        assert_eq!(archive.open_file("/emerald3ds.sav", false), Err(errors::FS_NOT_FOUND));
+        assert_eq!(archive.open_file("/missing/file", false), Err(errors::FS_PATH_NOT_FOUND));
+        let created = archive.open_file("/emerald3ds.sav", true).unwrap();
+        assert_eq!(archive.open_file("/emerald3ds.sav", false), Ok(created));
+        // The result expected by existing retail save-archive callers stays.
+        let retail = HostArchive::at(base.join("sdmc"));
+        assert_eq!(retail.open_file("/absent", false), Err(errors::FS_FILE_NOT_FOUND));
         let _ = std::fs::remove_dir_all(base);
     }
 
