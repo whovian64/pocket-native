@@ -55,6 +55,7 @@ enum Field {
     FrameSkip,
     Language,
     Region,
+    Name,
     Restart,
     Compatible,
     Defaults,
@@ -113,7 +114,7 @@ enum Page {
 impl Field {
     /// picked with A rather than changed with left and right.
     fn action(self) -> bool {
-        matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back | Field::EditControls)
+        matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back | Field::EditControls | Field::Name)
     }
 }
 
@@ -127,6 +128,8 @@ pub enum Action {
     Quit,
     /// the touch controls to move and size.
     EditControls,
+    /// the owner's name to type.
+    EditName,
 }
 
 /// the layouts the menu goes through, with the screens swapped or not.
@@ -188,7 +191,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Graphics - requires restart", [toggles(12..=18), vec![Field::Toggle(31)], toggles(19..=22), vec![Field::Toggle(28), Field::Toggle(33)]].concat()),
             ("CPU - requires restart", toggles(23..=24)),
             ("Loading - requires restart", toggles(25..=27)),
-            ("System - requires restart", vec![Field::Language, Field::Region, Field::Toggle(32)]),
+            ("System - requires restart", vec![Field::Language, Field::Region, Field::Name, Field::Toggle(32)]),
             ("", vec![Field::Restart, Field::Compatible, Field::Defaults, Field::Back]),
         ],
     }
@@ -287,6 +290,7 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
         }
         Field::Language => ("Language", LANGUAGES.get(game.language as usize).copied().unwrap_or("?").into()),
         Field::Region => ("Region", REGIONS.get(game.region as usize).copied().unwrap_or("?").into()),
+        Field::Name => ("Your name", settings.name.clone()),
         Field::Restart => ("Restart game", String::new()),
         Field::Compatible => ("Most compatible", String::new()),
         Field::Defaults => ("Reset to defaults", String::new()),
@@ -347,7 +351,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::Region => game.region = (game.region as isize + by).rem_euclid(REGIONS.len() as isize) as u8,
         Field::Compatible => game.advanced = Some(Advanced::compatible(Advanced::of(game, profile))),
         Field::Defaults => game.advanced = None,
-        Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back | Field::EditControls => {}
+        Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back | Field::EditControls | Field::Name => {}
     }
 }
 
@@ -386,6 +390,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::FrameSkip => "The most pictures left out in a row while the game is behind. Off is smoother and slower.",
         Field::Language => "The console language the game is told. Games without it pick one of their own.",
         Field::Region => "The console region the game is told. A game from another region may want its own.",
+        Field::Name => "The console owner's name every game is told, and their Mii's. A save keeps the name it was made with.",
         Field::Restart => "Starts the game again, for the settings that require a restart.",
         Field::Compatible => "Turns off every speed hack a game could trip over, then restart. If that helps, turn them back on one at a time.",
         Field::Defaults => "Back to what this game starts with.",
@@ -488,6 +493,7 @@ impl Menu {
                 Action::Redraw
             }
             Field::Reset | Field::Restart => Action::Reset,
+            Field::Name => Action::EditName,
             Field::Quit => Action::Quit,
             field => {
                 change(field, 1, settings, game, profile);

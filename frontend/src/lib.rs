@@ -146,6 +146,7 @@ pub fn run(mut args: Vec<String>) {
         data_dir: Some(data.clone()),
         language: game.language,
         region: game.region,
+        user_name: settings.name.clone(),
         new3ds: advanced.new3ds,
         // ZAKURO_RESOLUTION=2.5 over the menu's, for trying one
         resolution: std::env::var("ZAKURO_RESOLUTION").ok().and_then(|v| v.parse().ok()).unwrap_or(settings.resolution),
@@ -200,8 +201,9 @@ pub fn run(mut args: Vec<String>) {
     let mut controls = touch::Controls::load();
     // whether the menu went up, and with which of the touch controls' overlays
     let (mut menu_drawn, mut menu_controls) = (false, None);
-    // the software keyboard a title has open, and whether it went up
-    let (mut typing, mut typing_drawn): (Option<keyboard::Keyboard>, bool) = (None, false);
+    // the software keyboard a title or the menu's name has open, whether it
+    // went up, and whether it is the name's
+    let (mut typing, mut typing_drawn, mut naming): (Option<keyboard::Keyboard>, bool, bool) = (None, false, false);
     let (mut fps, mut last_fps, mut status, mut fps_since) = (0u32, 0u32, None, Instant::now());
     // since when shaders have been building, said on screen after a second
     let mut building_since: Option<Instant> = None;
@@ -349,8 +351,17 @@ pub fn run(mut args: Vec<String>) {
                 keyboard::Outcome::None => {}
                 keyboard::Outcome::Redraw => typing_drawn = false,
                 keyboard::Outcome::Answer(text, button) => {
-                    log::info!("keyboard: answered with button {button}, {} characters", text.chars().count());
-                    system.answer_keyboard(&text, button);
+                    if naming {
+                        if button == 1 {
+                            system.config.user_name = text.clone();
+                            settings.name = text;
+                            settings::save(&settings_path, &settings);
+                        }
+                        (naming, menu_drawn) = (false, false);
+                    } else {
+                        log::info!("keyboard: answered with button {button}, {} characters", text.chars().count());
+                        system.answer_keyboard(&text, button);
+                    }
                     (typing, overlay, status, next) = (None, None, None, Instant::now());
                 }
             }
@@ -402,6 +413,17 @@ pub fn run(mut args: Vec<String>) {
                     settings::save(&settings_path, &settings);
                     (overlay, status) = (None, None);
                     controls.start_editing();
+                    continue;
+                }
+                Action::EditName => {
+                    let request = zakuro_core::services::keyboard::Request {
+                        hint: "Your name".into(),
+                        text: settings.name.clone(),
+                        max_length: 10,
+                        buttons: vec!["Cancel".into(), "OK".into()],
+                        valid: zakuro_core::services::keyboard::Valid::NotEmptyNotBlank,
+                    };
+                    (typing, typing_drawn, naming) = (Some(keyboard::Keyboard::new(request, &keys, !fingers.is_empty())), false, true);
                     continue;
                 }
                 Action::Quit => break,

@@ -34,6 +34,8 @@ pub struct Config {
     /// 0 = Japan, 1 = USA, 2 = Europe.
     pub region: u8,
     pub language: u8,
+    /// the owner's name titles are told, and their Mii's.
+    pub user_name: String,
     pub slider_3d: f32,
     /// a library 3dsrecomp built for the title, or a directory holding one
     /// named after its title id.
@@ -67,6 +69,7 @@ impl Default for Config {
             new3ds: false,
             region: services::cfg::REGION_USA,
             language: services::cfg::LANGUAGE_ENGLISH,
+            user_name: "Zakuro".into(),
             slider_3d: 0.0,
             recompiled: None,
             linked: None,

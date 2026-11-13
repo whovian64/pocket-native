@@ -177,6 +177,8 @@ pub struct Settings {
     /// buttons and sticks drawn over the screens, for a touch screen with
     /// no gamepad.
     pub touch_controls: bool,
+    /// the owner's name games are told.
+    pub name: String,
 }
 
 impl Default for Settings {
@@ -205,6 +207,7 @@ impl Default for Settings {
             reverse_tilt_x: false,
             reverse_tilt_y: false,
             touch_controls: cfg!(target_os = "android"),
+            name: "Zakuro".into(),
         }
     }
 }
