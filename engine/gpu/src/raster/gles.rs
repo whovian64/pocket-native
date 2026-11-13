@@ -176,6 +176,11 @@ impl Surface {
     }
 }
 
+/// Whether GPU-drawn rows overlap the rows sampled by a texture.
+fn drawn_over(s: &Surface, row: u32, height: u32) -> bool {
+    s.dirty.is_some_and(|(start, end)| start < row.saturating_add(height) && row < end)
+}
+
 fn crop(image: Arc<Vec<u8>>, screen: ScreenRef) -> Arc<Vec<u8>> {
     let (row_pixels, rows) = screen.size;
     let (first, count) = screen.rows;
@@ -1975,7 +1980,13 @@ impl Gles {
                     })
                 }
             })
-            .max_by_key(|&i| (self.surfaces[i].dirty.is_some(), self.surfaces[i].height))
+            .max_by_key(|&i| {
+                let s = &self.surfaces[i];
+                let row = (texture.addr - s.addr) / tile_rows * 8;
+                // Prefer drawing over the sampled rows to a taller surface
+                // whose dirty rows lie elsewhere in the same memory.
+                (drawn_over(s, row, texture.height), s.dirty.is_some(), s.height)
+            })
             .map(|index| (index, (texture.addr - self.surfaces[index].addr) / tile_rows * 8))
     }
 
@@ -2095,7 +2106,7 @@ impl Gles {
         if *FROM_MEMORY.get_or_init(|| crate::switch("ZAKURO_NO_GPU_TEXTURES", "drawn textures read from memory")) {
             return false;
         }
-        self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some()) || self.texture_over_drawing(texture).is_some() || crate::fast_with(crate::speedup::TILES) && self.retiled_sources(texture).is_some()
+        self.texture_source(texture).is_some_and(|(index, row)| drawn_over(&self.surfaces[index], row, texture.height)) || self.texture_over_drawing(texture).is_some() || crate::fast_with(crate::speedup::TILES) && self.retiled_sources(texture).is_some()
     }
 
     fn copy_objects(&mut self, texture: &DrawnTexture) -> Result<(([glow::Program; 3], glow::VertexArray), (glow::Texture, glow::Framebuffer)), String> {
@@ -4953,6 +4964,58 @@ mod tests {
             assert_eq!(read_copy(&mut gles, &texture), expected, "256x{height} over two drawings");
         }
         assert!(gles.surfaces[small].dirty.is_none(), "the small drawing was written back");
+    }
+
+    #[test]
+    fn a_drawing_at_the_end_of_a_taller_one_s_memory_is_sampled_from_itself() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        // Emerald's layers: a 256x512 one of the title screen, then 256x256
+        // ones of later screens in its memory, the first drawn at its start,
+        // which goes into the taller surface, the other at its end
+        let format = ColorFormat::Rgba8;
+        let (base, width) = (0x1000u32, 256u32);
+        let half = width * 256 * 4;
+        let mut memory = Flat(vec![0; (base + 2 * half) as usize + 0x1000]);
+        for (i, byte) in memory.0[base as usize..(base + 2 * half) as usize].iter_mut().enumerate() {
+            *byte = (i * 7 + i / 11) as u8;
+        }
+        let tall = gles.surface_rows(&mut memory, base, (width, 512), Kind::Color(format), true, None).unwrap();
+        gles.surfaces[tall].drew((0, 256));
+        // what the later screen has at the end, which the taller one never saw
+        for (i, byte) in memory.0[(base + half) as usize..(base + 2 * half) as usize].iter_mut().enumerate() {
+            *byte = (i * 13 + 5) as u8;
+        }
+        let end = gles.surface_rows(&mut memory, base + half, (width, 256), Kind::Color(format), true, None).unwrap();
+        gles.surfaces[end].drew((0, 256));
+        let decoded = |memory: &Flat, addr: u32| {
+            let mut out = vec![0u8; (width * 256 * 4) as usize];
+            for y in 0..256 {
+                for x in 0..width {
+                    let at = (addr + pixel_offset(true, x, y, width, 4) as u32) as usize;
+                    let o = ((y * width + x) * 4) as usize;
+                    out[o..o + 4].copy_from_slice(&format.decode(&memory.0[at..at + 4]));
+                }
+            }
+            out
+        };
+        let texture = DrawnTexture { addr: base + half, width, height: 256, format };
+        assert!(gles.holds(&texture));
+        assert_eq!(gles.texture_source(&texture), Some((end, 0)), "the drawing over its rows, not the taller one");
+        gles.copy_texture(&mut memory, &texture).unwrap();
+        assert_eq!(read_copy(&mut gles, &texture), decoded(&memory, base + half));
+        // the taller one's start, which it drew, is still its own
+        let start = DrawnTexture { addr: base, width, height: 256, format };
+        assert_eq!(gles.texture_source(&start), Some((tall, 0)));
+        // with the end written back, nothing the GPU holds is newer than
+        // memory there: the taller one, which drew elsewhere, holds nothing
+        gles.write_back(&mut memory, vec![end]).unwrap();
+        assert!(!gles.holds(&texture), "read from memory");
     }
 
     #[test]
