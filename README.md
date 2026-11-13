@@ -50,8 +50,9 @@ a 3DS emulator built to run recompiled code, and
 by fearkov. On top of them it adds:
 
 - an OpenGL ES 3.1 renderer, tuned for Mali GPUs with no Vulkan driver
-- a frontend for handhelds with no desktop: KMS or the framebuffer for
-  the screens, evdev for the buttons, ALSA for sound
+- a handheld frontend: KMS or the framebuffer on systems without a
+  compositor, a Wayland window under labwc, evdev for the buttons, ALSA for
+  sound
 - an in-game menu for layouts, frame cap, power, controls and per-game
   settings
 - per-game profiles in `titles/`, and a probe mode for trying games
@@ -79,7 +80,7 @@ working or not.
 | R36S and its clones | RK3326, Mali-G31 | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones, ROCKNIX | The main target, developed and tested on an R36S with ArkOS |
 | Powkiddy RX6H | RK3326, Mali-G31 | dArkOS for clones | Played by testers. No FN button: L3 does its job. Its Mali driver crashes while building some games' shaders: from 0.5.0 the game notes the shader and gets past it on its next start |
 | Anbernic RG351P and RG351M | RK3326, Mali-G31 | ArkOS | From 0.5.5 the OSH PB board's buttons and sticks are mapped, not yet tried on one |
-| Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | H700, Mali-G31 | Knulli, muOS | Played by testers: Super Mario 3D Land, A Link Between Worlds, Smash, Project X Zone 1 and 2, Shantae and the Pirate's Curse, Dragon Ball Z: Extreme Butoden, Kingdom Hearts 3D, Pokémon Omega Ruby, Donkey Kong Country Returns 3D |
+| Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | H700, Mali-G31 | Knulli, muOS, nuubOS | The game list is from Knulli and muOS; the nuubOS Wayland display path has been tested with Pokémon Omega Ruby |
 | Anbernic RG353 and RG503 | RK3566, Mali-G52 | ArkOS, ROCKNIX | Buttons mapped, no tester report yet |
 | Miyoo Flip | RK3566, Mali-G52 | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
 | Anbernic RG52 Mini | RK3562 | dArkOS | Played by testers |
@@ -99,6 +100,7 @@ Rotation** turns the picture for a panel mounted sideways.
 | dArkOS, dArkOSRE, ArkOS and dArkOS for clones | Played by testers on R36S clones, the RX6H and the RG52 Mini |
 | Knulli | Played by testers on H700 handhelds. Ports run as root, with no sudo. From 0.5.5 **Power**'s Balanced and Performance should hold the H700's GPU at its top speed, where it stayed at 240 MHz, and the game's log says what it got |
 | muOS | Played by testers on H700 handhelds. The screens go through `/dev/fb0`, muOS having no `libgbm`, and both of muOS's pads are read: its kernel's `muOS-Keys` and the one muOS makes itself. From 0.5.0 **Power**'s Balanced and Performance raise the H700's GPU clock as well as the CPU's |
+| nuubOS | Uses a fullscreen SDL2 Wayland window under labwc instead of taking KMS modesetting from the compositor. With `ZAKURO_KMS=1`, this is selected automatically when `WAYLAND_DISPLAY` or `SDL_VIDEODRIVER=wayland` is set; `ZAKURO_WAYLAND=1` forces it and `ZAKURO_WAYLAND=0` keeps KMS. Tested with Pokémon Omega Ruby; performance is still under investigation |
 | spruceOS 4.2 | Played on the Miyoo Flip. From 0.5.5 the TrimUI Smart Pro's pad is found under it too |
 | ROCKNIX | Played on the RG DS, with Mali's own driver. The launcher hands sway's panels to the game and back. Pads numbering their buttons the usual way are read (the R36S's `r36s_Gamepad` among them), and from 0.5.0 the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. On the R36S, its Mali driver crashed before the first picture until the 0.4.9 test build, Panfrost worked: not confirmed since |
 | Android 11 or newer, 64-bit | Works on phones, the AYN Thor and the RG DS, with one screen or two. On one RK3566 handheld 0.4.7 drew on the CPU, its driver refusing a kind of buffer: 0.5.0 uses the GPU there. From 0.5.5 the device's motion sensors stand in for the console's |
