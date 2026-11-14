@@ -268,6 +268,7 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
 
         let include = format!("#include \"{header}\"\n\n");
         let mut written = 0;
+        let mut starts: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         for (&entry, function) in &functions {
             if source.is_empty() {
                 source.push_str("#include \"recomp.h\"\n#ifdef RECOMP_FASTMEM\n#undef RECOMP_VIEW\n#define RECOMP_VIEW(ctx) view\n#endif\n");
@@ -287,7 +288,8 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
                     written = 0;
                 }
                 let text = assembly.last_mut().expect("a file to write into");
-                a64::write(text, unit.program, entry, resumable, &resumable.labels, &names, &name(&prefix, entry, false), &prefix);
+                let taken = a64::write(text, unit.program, entry, resumable, &resumable.labels, &names, &name(&prefix, entry, false), &prefix);
+                starts.insert(entry, taken.into_iter().collect::<BTreeSet<u32>>());
                 written += function.instructions.len();
             }
             size += function.instructions.len();
@@ -303,8 +305,11 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
         let mut entries: BTreeMap<u32, String> = BTreeMap::new();
         for (&entry, function) in &functions {
             let owner = name(&prefix, entry, function.mode == Mode::Thumb);
+            // the host comes back into the assembly where it takes the block
+            let taken = starts.get(&entry);
             for &label in resumed.get(&entry).map_or(&function.labels, |resumable| &resumable.labels) {
-                let slot = entries.entry(key(label, function.mode)).or_insert_with(|| owner.clone());
+                let here = if taken.is_some_and(|taken| taken.contains(&label)) { a64::name(&prefix, entry) } else { owner.clone() };
+                let slot = entries.entry(key(label, function.mode)).or_insert_with(|| here);
                 if label == entry {
                     *slot = if translated.contains(&entry) { a64::name(&prefix, entry) } else { owner.clone() };
                 }

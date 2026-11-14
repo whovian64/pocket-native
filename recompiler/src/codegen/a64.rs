@@ -194,7 +194,7 @@ struct Writer<'a> {
     /// shared there it used: leaving, the C's dispatch as the context is,
     /// and the way out over the depth limit.
     cold: std::cell::RefCell<String>,
-    shared: std::cell::Cell<[bool; 4]>,
+    shared: std::cell::Cell<[bool; 5]>,
 }
 
 impl<'a> Writer<'a> {
@@ -205,12 +205,13 @@ impl<'a> Writer<'a> {
 
     /// a stub shared past the end: 0 leaves, 1 hands over to the C as
     /// the context is, 2 leaves over the depth limit with w16 one past it,
-    /// 3 leaves after call_inner's slow way back.
+    /// 3 leaves after call_inner's slow way back, 4 finds the block of the
+    /// guest address in w16, into x15, 0 when none is translated.
     fn stub(&self, which: usize) -> String {
         let mut shared = self.shared.get();
         shared[which] = true;
         self.shared.set(shared);
-        format!(".L{}{:08X}", ["l", "r", "u", "d"][which], self.entry)
+        format!(".L{}{:08X}", ["l", "r", "u", "d", "t"][which], self.entry)
     }
 
     fn local(&self) -> String {
@@ -346,6 +347,19 @@ fn return_to(out: &mut String, w: &Writer) {
 /// C's dispatch.
 fn jump_to(out: &mut String, w: &Writer) {
     w.spill(out);
+    // to a translated block of this function straight, its flags kept
+    let c = w.local();
+    emit!(out, "{TEST_MARK}tbnz w22, #0, {c}");
+    emit!(out, "\tand w16, w22, #0xfffffffc");
+    if w.relative {
+        emit!(out, "\tsub w16, w16, w27");
+    }
+    emit!(out, "\tmrs x23, nzcv");
+    emit!(out, "\tbl {}", w.stub(4));
+    emit!(out, "\tmsr nzcv, x23");
+    emit!(out, "\tcbz x15, {c}");
+    emit!(out, "\tbr x15");
+    emit!(out, "{c}:");
     emit!(out, "\tpn_flush");
     emit!(out, "\tand w16, w22, #1");
     emit!(out, "\tstrb w16, [x19, #{THUMB}]");
@@ -1635,11 +1649,8 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     if writeback && rn == 15 || register_offset && op & 0xF == 15 {
         return None;
     }
-    // ldr pc, [sp], 4 is a pop, any other load of pc the C's
+    // ldr pc, [sp], 4 is a pop, any other load of pc a jump
     let pop = rn == 13 && !pre && up && !register_offset && op & 0xFFF == 4;
-    if load && rd == 15 && !pop {
-        return None;
-    }
     let base = if rn == 15 {
         guest(out, w, "w15", a + 8);
         "w15".to_owned()
@@ -1678,7 +1689,11 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
             emit!(out, "\tmov w{rn}, w17");
         }
         if rd == 15 {
-            return_to(out, w);
+            if pop {
+                return_to(out, w);
+            } else {
+                jump_to(out, w);
+            }
             return Some(false);
         }
     } else {
@@ -1977,8 +1992,9 @@ pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeS
 }
 
 /// the function's assembly, entered at its entry as the C is, the C named
-/// c_name running it from anywhere else.
-pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str, prefix: &str) {
+/// c_name running it from anywhere else it doesn't take: the blocks it
+/// does take, by their start, which the host may come into it at.
+pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str, prefix: &str) -> Vec<u32> {
     let w = Writer::new(entry, labels, functions, c_name.to_owned(), prefix);
     let name = name(prefix, entry);
     let elsewhere = w.local();
@@ -1987,25 +2003,24 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
     emit!(out, "\t.type {name}, %function");
     emit!(out, "\t.p2align 4");
     emit!(out, "{name}:");
-    // anywhere but the entry is the C's. a module's base goes in w27 once
-    // the caller's is saved, the guest's registers free till then
+    // in at the entry, anywhere else translated through the blocks' tree,
+    // the rest the C's. a module's base, in w1 till then, goes in w27 once
+    // the caller's is saved, the guest's registers free till then, w16 the
+    // offset into it
     emit!(out, "\tldr w16, [x0, #{R15}]");
     emit!(out, "\tldrb w17, [x0, #{THUMB}]");
     if w.relative {
-        emit!(out, "\tadrp x15, {prefix}base");
-        emit!(out, "\tldr w15, [x15, :lo12:{prefix}base]");
-        constant(out, "w1", entry);
-        emit!(out, "\tadd w1, w1, w15");
-        emit!(out, "\tcmp w16, w1");
-    } else {
-        constant(out, "w15", entry);
-        emit!(out, "\tcmp w16, w15");
+        emit!(out, "\tadrp x1, {prefix}base");
+        emit!(out, "\tldr w1, [x1, :lo12:{prefix}base]");
+        emit!(out, "\tsub w16, w16, w1");
     }
+    constant(out, "w15", entry);
+    emit!(out, "\tcmp w16, w15");
     emit!(out, "\tccmp w17, #0, #0, eq");
     emit!(out, "\tb.ne {elsewhere}");
     emit!(out, "\tpn_enter");
     if w.relative {
-        emit!(out, "\tmov w27, w15");
+        emit!(out, "\tmov w27, w1");
     }
     emit!(out, "\tpn_reload");
     emit!(out, "\tb {}", w.block(entry));
@@ -2019,10 +2034,12 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
     // the way the code runs on falls through, what it seldom does in stubs
     // past the end
     let (mut body, mut stubs) = (String::new(), String::new());
+    let mut translated = Vec::new();
     for (start, run, text, vector) in blocks(program, &w, function) {
         emit!(body, "{}:", w.block(start));
         match text {
             Some(text) => {
+                translated.push(start);
                 let out_of_budget = w.local();
                 // a short vector is the C's
                 if vector {
@@ -2054,6 +2071,23 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
     let mut tail = stubs;
     tail.push_str(&w.cold.borrow());
     emit!(tail, "{elsewhere}:");
+    let c = w.local();
+    if translated.len() > 1 {
+        let back = w.local();
+        emit!(tail, "\tcbnz w17, {c}");
+        emit!(tail, "\tpn_enter");
+        if w.relative {
+            emit!(tail, "\tmov w27, w1");
+        }
+        emit!(tail, "\tbl {}", w.stub(4));
+        emit!(tail, "\tcbz x15, {back}");
+        emit!(tail, "\tpn_reload");
+        emit!(tail, "\tbr x15");
+        emit!(tail, "{back}:");
+        emit!(tail, "\tmov x0, x19");
+        emit!(tail, "\tpn_leave");
+    }
+    emit!(tail, "{c}:");
     emit!(tail, "\tb {c_name}");
     let shared = w.shared.get();
     if shared[0] {
@@ -2079,6 +2113,15 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
         depth_back(&mut tail);
         emit!(tail, "\tb pn_leave_sub");
     }
+    if shared[4] {
+        emit!(tail, "{}:", w.stub(4));
+        tree(&mut tail, &w, &translated);
+        for &start in &translated {
+            emit!(tail, ".Lh{entry:08X}_{start:08X}:");
+            emit!(tail, "\tadr x15, {}", w.block(start));
+            emit!(tail, "\tret");
+        }
+    }
     // tbz and tbnz reach 32 KiB: past that, round a b
     let near = instructions(&body) + instructions(&tail) < NEAR;
     for line in body.lines().chain(tail.lines()) {
@@ -2096,6 +2139,32 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
         }
     }
     emit!(out, "\t.size {name}, .-{name}\n");
+    translated
+}
+
+/// a search for the block at the guest address in w16 among starts, in
+/// order, w17 scratch, the block's address in x15 or 0 as it returns.
+fn tree(out: &mut String, w: &Writer, starts: &[u32]) {
+    let hit = |start: u32| format!(".Lh{:08X}_{start:08X}", w.entry);
+    if starts.len() <= 3 {
+        for &start in starts {
+            constant(out, "w17", start);
+            emit!(out, "\tcmp w16, w17");
+            emit!(out, "\tb.eq {}", hit(start));
+        }
+        emit!(out, "\tmov x15, #0");
+        emit!(out, "\tret");
+        return;
+    }
+    let middle = starts.len() / 2;
+    let higher = w.local();
+    constant(out, "w17", starts[middle]);
+    emit!(out, "\tcmp w16, w17");
+    emit!(out, "\tb.eq {}", hit(starts[middle]));
+    emit!(out, "\tb.hi {higher}");
+    tree(out, w, &starts[..middle]);
+    emit!(out, "{higher}:");
+    tree(out, w, &starts[middle + 1..]);
 }
 
 /// what write marks a tbz or tbnz with, for a branch it picks once it knows
@@ -2493,6 +2562,41 @@ mod tests {
             0xE58C_0040, // str r0, [r12, #64]
             0xE12F_FF1E,
         ]);
+    }
+
+    /// a switch through a table of addresses, into each of its cases.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn jump_tables_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        // the table where the code reads it, which the harness's memory
+        // doesn't hold, then the same in the text for the analysis
+        let case = |i: u32| BASE + 0x40 + 8 * i;
+        let end = BASE + 0x60;
+        let mut words = vec![
+            0xE200_0003, // and r0, r0, #3
+            0xE28F_2024, // add r2, pc, #0x24: the table
+            0xE28F_3030, // add r3, pc, #0x30: the first case
+            0xE582_3000, // str r3, [r2]
+            0xE283_3008, // add r3, r3, #8
+            0xE582_3004, // str r3, [r2, #4]
+            0xE283_3008,
+            0xE582_3008, // str r3, [r2, #8]
+            0xE283_3008,
+            0xE582_300C, // str r3, [r2, #12]
+            0xE79F_F100, // ldr pc, [pc, r0, lsl #2]
+            0xE1A0_0000, // nop
+            case(0), case(1), case(2), case(3),
+        ];
+        for i in 0..4 {
+            // add r1, r1, #i + 1; b end
+            words.push(0xE281_1001 + i);
+            words.push(0xEA00_0000 | ((end.wrapping_sub(case(i) + 4 + 8) >> 2) & 0x00FF_FFFF));
+        }
+        words.push(0xE12F_FF1E);
+        alike(5, &words);
     }
 
     /// more singles than host registers: the most used kept, the rest in
