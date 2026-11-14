@@ -116,18 +116,35 @@ int main(int argc, char **argv) {
         ctx.r[13] = 0x08100000u;
         ctx.r[14] = SENTINEL;
         ctx.r[15] = entry;
+        ctx.tls = (uint32_t)mix(s + 3);
         s = mix(s);
         ctx.n = s & 1;
         ctx.z = (s >> 1) & 1;
         ctx.c = (s >> 2) & 1;
         ctx.v = (s >> 3) & 1;
         ctx.budget = 1 + (int32_t)(mix(s) % 300);
+        /* VFP registers mostly ordinary numbers, now and then a zero, a
+           subnormal or anything at all; fpscr mostly flushing to zero with
+           default NaNs as games run, now and then not, now and then a
+           short vector */
+        for (int i = 0; i < 32; i++) {
+            s = mix(s);
+            uint32_t kind = (uint32_t)(s >> 60);
+            if (kind < 10) vfp[i] = ((uint32_t)s & 0x807FFFFFu) | ((0x70u + (uint32_t)(s >> 40) % 24) << 23);
+            else if (kind < 12) vfp[i] = (uint32_t)s & 0x80000000u;
+            else if (kind < 14) vfp[i] = (uint32_t)s & 0x807FFFFFu;
+            else vfp[i] = (uint32_t)s;
+        }
+        s = mix(s);
+        fpscr = (s & 7) < 5 ? 0x03000000u : (uint32_t)(s >> 8) & 0xF3000000u;
+        if ((s >> 4) % 8 == 0) fpscr |= 1u << 16;
+        __asm__ volatile("msr fpcr, %0" : : "r"((uint64_t)(fpscr & 0x03000000u)) : "memory");
         ctx.fastmem = view;
         ctx.vfp = vfp;
         ctx.fpscr = &fpscr;
         ctx.host = &host;
         int resumes;
-        for (resumes = 0; resumes < 20000; resumes++) {
+        for (resumes = 0; resumes < 4000; resumes++) {
             if (!ctx.thumb && ctx.r[15] == SENTINEL) break;
             Code code = lookup(&ctx, ctx.r[15] | ctx.thumb);
             if (!code) {
@@ -147,6 +164,8 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 16; i++) fold(ctx.r[i]);
         fold(ctx.n | ctx.z << 8 | ctx.c << 16 | (uint64_t)ctx.v << 24 | (uint64_t)ctx.q << 32 | (uint64_t)ctx.thumb << 40);
         fold(((uint64_t)(uint32_t)ctx.budget << 32) | ctx.depth);
+        for (int i = 0; i < 32; i++) fold(vfp[i]);
+        fold(fpscr);
         /* only pages written count, in order of address: a load the C
            compiler found dead and left out touches no page where the
            assembly's does, or touches it later */

@@ -4,9 +4,10 @@
 //! hands over to the C at its label, which dispatches there and charges the
 //! same budget, so a function runs the same however much of it translates.
 //!
-//! x19 holds the context, x20 the view of memory, w21 the budget, w0-w14 the
-//! guest's r0-r14 and NZCV its flags, written back to the context and read
-//! again around every call. w15-w17 and w22-w23 are scratch.
+//! x19 holds the context, x20 the view of memory, w21 the budget, x24 the
+//! VFP registers, x25 fpscr, w0-w14 the guest's r0-r14 and NZCV its flags,
+//! written back to the context and read again around every call. w15-w17,
+//! w22-w23 and v16-v19 are scratch.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -61,19 +62,23 @@ pub const PRELUDE: &str = "\t.text
 \tldr w21, [x19, #72]
 .endm
 .macro pn_enter
-\tstp x29, x30, [sp, #-64]!
+\tstp x29, x30, [sp, #-80]!
 \tmov x29, sp
 \tstp x19, x20, [sp, #16]
 \tstp x21, x22, [sp, #32]
-\tstr x23, [sp, #48]
+\tstp x23, x24, [sp, #48]
+\tstr x25, [sp, #64]
 \tmov x19, x0
 \tldr x20, [x19, #144]
+\tldr x24, [x19, #112]
+\tldr x25, [x19, #120]
 .endm
 .macro pn_leave
 \tldp x19, x20, [sp, #16]
 \tldp x21, x22, [sp, #32]
-\tldr x23, [sp, #48]
-\tldp x29, x30, [sp], #64
+\tldp x23, x24, [sp, #48]
+\tldr x25, [sp, #64]
+\tldp x29, x30, [sp], #80
 .endm
 ";
 
@@ -83,9 +88,13 @@ const Q: u32 = 68;
 const THUMB: u32 = 69;
 const GE: u32 = 70;
 const EXCLUSIVE: u32 = 71;
+const TLS: u32 = 92;
 const HOST: u32 = 128;
-/// the host's lookup, in its table of functions.
+/// the host's lookup and svc, in its table of functions.
 const LOOKUP: u32 = 56;
+const SVC: u32 = 64;
+/// fpscr's short vector length.
+const FPSCR_LEN: u32 = 7 << 16;
 const EXIT: u32 = 76;
 const DEPTH: u32 = 84;
 const EXIT_BUDGET: u32 = 2;
@@ -110,6 +119,9 @@ struct Writer<'a> {
     fallback: String,
     /// local labels made so far.
     made: std::cell::Cell<u32>,
+    /// whether the block being written has VFP arithmetic a short vector
+    /// would change, which runs only with fpscr's length 1.
+    vector: std::cell::Cell<bool>,
 }
 
 impl Writer<'_> {
@@ -358,8 +370,303 @@ fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
             let target = (a + 8).wrapping_add(sign_extend_24(op & 0x00FF_FFFF) << 2);
             if op & (1 << 24) != 0 { call(out, w, a + 4, target, false) } else { jump(out, w, target) }
         }
+        0b110 => vfp_load_store(out, a, op),
+        0b111 if op & (1 << 24) != 0 => svc(out, w, a, op),
+        0b111 if op & 0x10 != 0 && matches!((op >> 8) & 0xF, 10 | 11) => vfp_transfer(out, op),
+        0b111 if op & 0x10 != 0 => {
+            let rd = (op >> 12) & 0xF;
+            let data_cache = op & 0x0FFF_0F10 == 0x0E07_0F10 && !matches!(op & 0xF, 5 | 7 | 13);
+            if op & 0x0FFF_0FFF == 0x0E1D_0F70 && rd != 15 {
+                emit!(out, "\tldr w{rd}, [x19, #{TLS}]");
+                Some(true)
+            } else {
+                data_cache.then_some(true)
+            }
+        }
+        _ => vfp_data(out, w, op),
+    }
+}
+
+/// an svc the host runs in place, the code going on unless it says not to.
+fn svc(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
+    let on = w.local();
+    emit!(out, "\tpn_flush");
+    constant(out, "w16", a + 4);
+    emit!(out, "\tstr w16, [x19, #{R15}]");
+    emit!(out, "\tmov x0, x19");
+    constant(out, "w1", op & 0x00FF_FFFF);
+    emit!(out, "\tldr x16, [x19, #{HOST}]");
+    emit!(out, "\tldr x16, [x16, #{SVC}]");
+    emit!(out, "\tblr x16");
+    emit!(out, "\tldr w16, [x19, #{EXIT}]");
+    emit!(out, "\tcbz w16, {on}");
+    emit!(out, "\tpn_leave");
+    emit!(out, "\tret");
+    emit!(out, "{on}:");
+    emit!(out, "\tpn_reload");
+    Some(true)
+}
+
+fn sreg(vd: u32, extra: bool) -> u32 {
+    ((vd << 1) | extra as u32) & 31
+}
+
+fn dreg(vd: u32, extra: bool) -> u32 {
+    ((extra as u32) << 4) | vd
+}
+
+/// a VFP register of either size into or out of v, doubles taking the two
+/// singles at 2N.
+fn vfp_load(out: &mut String, double: bool, register: u32, v: u32) {
+    if double {
+        emit!(out, "\tldr d{v}, [x24, #{}]", 8 * (register & 15));
+    } else {
+        emit!(out, "\tldr s{v}, [x24, #{}]", 4 * register);
+    }
+}
+
+fn vfp_store(out: &mut String, double: bool, register: u32, v: u32) {
+    if double {
+        emit!(out, "\tstr d{v}, [x24, #{}]", 8 * (register & 15));
+    } else {
+        emit!(out, "\tstr s{v}, [x24, #{}]", 4 * register);
+    }
+}
+
+/// notes a destination past the first bank, which a short vector would run
+/// over: the block checks fpscr's length before it starts.
+fn scalar(w: &Writer, double: bool, d: u32) {
+    if d >= if double { 4 } else { 8 } {
+        w.vector.set(true);
+    }
+}
+
+/// the arithmetic, unary operations, comparisons and conversions, as gcc
+/// writes vfp.rs's C: products rounded before they are added, never fused.
+fn vfp_data(out: &mut String, w: &Writer, op: u32) -> Option<bool> {
+    let coprocessor = (op >> 8) & 0xF;
+    if coprocessor != 10 && coprocessor != 11 {
+        return None;
+    }
+    let double = coprocessor == 11;
+    let (vd, vn, vm) = ((op >> 12) & 0xF, (op >> 16) & 0xF, op & 0xF);
+    let (d_bit, n_bit, m_bit) = (op & (1 << 22) != 0, op & (1 << 7) != 0, op & (1 << 5) != 0);
+    let (rd, rn, rm) = if double { (dreg(vd, d_bit), dreg(vn, n_bit), dreg(vm, m_bit)) } else { (sreg(vd, d_bit), sreg(vn, n_bit), sreg(vm, m_bit)) };
+    let negate = op & (1 << 6) != 0;
+    let v = if double { 'd' } else { 's' };
+    let operation = match ((op >> 20) & 0b1011, negate) {
+        (0b1011, true) => return vfp_extension(out, w, op, double, rd, rm),
+        (0b0000..=0b0011, _) | (0b1000, false) => ((op >> 20) & 3) << 1 | negate as u32 | ((op >> 23) & 1) << 3,
+        _ => return None,
+    };
+    scalar(w, double, rd);
+    vfp_load(out, double, rn, 16);
+    vfp_load(out, double, rm, 17);
+    if operation <= 3 {
+        vfp_load(out, double, rd, 18);
+        emit!(out, "\tfmul {v}19, {v}16, {v}17");
+    }
+    match operation {
+        0 => emit!(out, "\tfadd {v}19, {v}19, {v}18"),
+        1 => emit!(out, "\tfsub {v}19, {v}18, {v}19"),
+        2 => emit!(out, "\tfsub {v}19, {v}19, {v}18"),
+        3 => {
+            emit!(out, "\tfneg {v}18, {v}18");
+            emit!(out, "\tfsub {v}19, {v}18, {v}19");
+        }
+        4 => emit!(out, "\tfmul {v}19, {v}16, {v}17"),
+        5 => emit!(out, "\tfnmul {v}19, {v}17, {v}16"),
+        6 => emit!(out, "\tfadd {v}19, {v}16, {v}17"),
+        7 => emit!(out, "\tfsub {v}19, {v}16, {v}17"),
+        _ => emit!(out, "\tfdiv {v}19, {v}16, {v}17"),
+    }
+    vfp_store(out, double, rd, 19);
+    Some(true)
+}
+
+fn vfp_extension(out: &mut String, w: &Writer, op: u32, double: bool, rd: u32, rm: u32) -> Option<bool> {
+    let top = op & (1 << 7) != 0;
+    let v = if double { 'd' } else { 's' };
+    match ((op >> 16) & 0xF, top) {
+        // vmov, vabs, vneg and vsqrt: moves and sign changes leave the bits
+        // as they are
+        (0b0000 | 0b0001, _) => {
+            scalar(w, double, rd);
+            let second = (op >> 16) & 1 != 0;
+            if second && top {
+                vfp_load(out, double, rm, 16);
+                emit!(out, "\tfsqrt {v}19, {v}16");
+                vfp_store(out, double, rd, 19);
+                return Some(true);
+            }
+            let change = |out: &mut String, register: &str| match (second, top) {
+                (false, true) => emit!(out, "\tand {register}, {register}, #0x7fffffff"),
+                (true, false) => emit!(out, "\teor {register}, {register}, #0x80000000"),
+                _ => {}
+            };
+            if double {
+                let (d, m) = (2 * (rd & 15), 2 * (rm & 15));
+                emit!(out, "\tldp w16, w17, [x24, #{}]", 4 * m);
+                change(out, "w17");
+                emit!(out, "\tstp w16, w17, [x24, #{}]", 4 * d);
+            } else {
+                emit!(out, "\tldr w16, [x24, #{}]", 4 * rm);
+                change(out, "w16");
+                emit!(out, "\tstr w16, [x24, #{}]", 4 * rd);
+            }
+        }
+        // vcmp against a register or zero, the result in fpscr's top bits
+        // the way fcmp sets NZCV, the guest's flags kept
+        (0b0100 | 0b0101, _) => {
+            vfp_load(out, double, rd, 16);
+            emit!(out, "\tmrs x23, nzcv");
+            if (op >> 16) & 1 == 0 {
+                vfp_load(out, double, rm, 17);
+                emit!(out, "\tfcmp {v}16, {v}17");
+            } else {
+                emit!(out, "\tfcmp {v}16, #0.0");
+            }
+            emit!(out, "\tmrs x16, nzcv");
+            emit!(out, "\tmsr nzcv, x23");
+            emit!(out, "\tldr w17, [x25]");
+            emit!(out, "\tand w17, w17, #0x0fffffff");
+            emit!(out, "\torr w17, w17, w16");
+            emit!(out, "\tstr w17, [x25]");
+        }
+        // vcvt between single and double
+        (0b0111, true) => {
+            let (vd, vm) = ((op >> 12) & 0xF, op & 0xF);
+            let (d_bit, m_bit) = (op & (1 << 22) != 0, op & (1 << 5) != 0);
+            if double {
+                vfp_load(out, true, rm, 16);
+                emit!(out, "\tfcvt s19, d16");
+                vfp_store(out, false, sreg(vd, d_bit), 19);
+            } else {
+                vfp_load(out, false, sreg(vm, m_bit), 16);
+                emit!(out, "\tfcvt d19, s16");
+                vfp_store(out, true, dreg(vd, d_bit), 19);
+            }
+        }
+        // vcvt from an integer, bit 7 set for signed
+        (0b1000, _) => {
+            emit!(out, "\tldr w16, [x24, #{}]", 4 * sreg(op & 0xF, op & (1 << 5) != 0));
+            emit!(out, "\t{} {v}19, w16", if top { "scvtf" } else { "ucvtf" });
+            vfp_store(out, double, rd, 19);
+        }
+        // vcvt to an integer rounding toward zero, saturating, NaN to 0
+        (0b1100 | 0b1101, true) => {
+            vfp_load(out, double, rm, 16);
+            emit!(out, "\t{} w16, {v}16", if (op >> 16) & 1 != 0 { "fcvtzs" } else { "fcvtzu" });
+            emit!(out, "\tstr w16, [x24, #{}]", 4 * sreg((op >> 12) & 0xF, op & (1 << 22) != 0));
+        }
+        _ => return None,
+    }
+    Some(true)
+}
+
+/// vmrs, and the moves between a core register and a single. vmsr, which
+/// changes how later VFP code runs, is the C's.
+fn vfp_transfer(out: &mut String, op: u32) -> Option<bool> {
+    let load = op & (1 << 20) != 0;
+    let rt = (op >> 12) & 0xF;
+    match (op >> 21) & 7 {
+        7 if (op >> 16) & 0xF == 1 && load => {
+            if rt == 15 {
+                emit!(out, "\tldr w16, [x25]");
+                emit!(out, "\tand w16, w16, #0xf0000000");
+                emit!(out, "\tmsr nzcv, x16");
+            } else {
+                emit!(out, "\tldr w{rt}, [x25]");
+            }
+            Some(true)
+        }
+        0 if rt != 15 => {
+            let sn = sreg((op >> 16) & 0xF, op & (1 << 7) != 0);
+            emit!(out, "\t{} w{rt}, [x24, #{}]", if load { "ldr" } else { "str" }, 4 * sn);
+            Some(true)
+        }
         _ => None,
     }
+}
+
+/// vldr, vstr, vldm and vstm, and the moves between two core registers and
+/// a double or two singles, w17 walking up from the first address.
+fn vfp_load_store(out: &mut String, a: u32, op: u32) -> Option<bool> {
+    let coprocessor = (op >> 8) & 0xF;
+    if coprocessor != 10 && coprocessor != 11 {
+        return None;
+    }
+    let double = coprocessor == 11;
+    let load = op & (1 << 20) != 0;
+    if (op >> 21) & 0x7F == 0b110_0010 {
+        let (rt, rt2) = ((op >> 12) & 0xF, (op >> 16) & 0xF);
+        if rt == 15 || rt2 == 15 {
+            return None;
+        }
+        let (vm, m_bit) = (op & 0xF, op & (1 << 5) != 0);
+        let (low, high) = if double {
+            let dm = dreg(vm, m_bit);
+            ((dm * 2) & 31, (dm * 2 + 1) & 31)
+        } else {
+            let sm = sreg(vm, m_bit);
+            (sm, (sm + 1) & 31)
+        };
+        let verb = if load { "ldr" } else { "str" };
+        emit!(out, "\t{verb} w{rt}, [x24, #{}]", 4 * low);
+        emit!(out, "\t{verb} w{rt2}, [x24, #{}]", 4 * high);
+        return Some(true);
+    }
+    let pre = op & (1 << 24) != 0;
+    let up = op & (1 << 23) != 0;
+    let writeback = op & (1 << 21) != 0;
+    let rn = (op >> 16) & 0xF;
+    if writeback && rn == 15 {
+        return None;
+    }
+    let offset = (op & 0xFF) * 4;
+    let (vd, d_bit) = ((op >> 12) & 0xF, op & (1 << 22) != 0);
+    let first = if double { dreg(vd, d_bit) } else { sreg(vd, d_bit) };
+    let count = if pre && !writeback {
+        1
+    } else if double {
+        (op & 0xFF) / 2
+    } else {
+        op & 0xFF
+    };
+    let base = if rn == 15 {
+        constant(out, "w15", a + 8);
+        "w15".to_owned()
+    } else {
+        format!("w{rn}")
+    };
+    match (up, pre && !writeback) {
+        (true, true) => emit!(out, "\tadd w17, {base}, #{offset}"),
+        (true, false) => emit!(out, "\tmov w17, {base}"),
+        (false, _) => emit!(out, "\tsub w17, {base}, #{offset}"),
+    }
+    for i in 0..count.max(1) {
+        let words: Vec<u32> = if double { vec![((first + i) * 2) & 31, ((first + i) * 2 + 1) & 31] } else { vec![(first + i) & 31] };
+        for (j, word) in words.into_iter().enumerate() {
+            let address = if j == 0 {
+                "w17"
+            } else {
+                emit!(out, "\tadd w22, w17, #4");
+                "w22"
+            };
+            if load {
+                emit!(out, "\tldr w16, [x20, {address}, uxtw]");
+                emit!(out, "\tstr w16, [x24, #{}]", 4 * word);
+            } else {
+                emit!(out, "\tldr w16, [x24, #{}]", 4 * word);
+                emit!(out, "\tstr w16, [x20, {address}, uxtw]");
+            }
+        }
+        emit!(out, "\tadd w17, w17, #{}", if double { 8 } else { 4 });
+    }
+    if writeback {
+        emit!(out, "\t{} w{rn}, w{rn}, #{offset}", if up { "add" } else { "sub" });
+    }
+    Some(true)
 }
 
 /// bx and blx through a register: bx lr returns, any other bx jumps, and
@@ -840,7 +1147,7 @@ fn block_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
 
 /// a function's blocks, each as its assembly or None for one the C runs,
 /// with how many instructions it holds.
-fn blocks(program: &Program, w: &Writer, function: &Function) -> Vec<(u32, usize, Option<String>)> {
+fn blocks(program: &Program, w: &Writer, function: &Function) -> Vec<(u32, usize, Option<String>, bool)> {
     let instructions = &function.instructions;
     let mut blocks = Vec::new();
     let mut i = instructions.iter().position(|a| w.labels.contains(a)).unwrap_or(instructions.len());
@@ -848,6 +1155,7 @@ fn blocks(program: &Program, w: &Writer, function: &Function) -> Vec<(u32, usize
         let start = instructions[i];
         let run = instructions[i + 1..].iter().take_while(|a| !w.labels.contains(a)).count() + 1;
         let mut text = Some(String::new());
+        w.vector.set(false);
         for (j, &address) in instructions[i..i + run].iter().enumerate() {
             let op = program.text.read32(address).unwrap_or(0);
             let Some((asm, continues)) = lower(w, address, op) else {
@@ -862,7 +1170,7 @@ fn blocks(program: &Program, w: &Writer, function: &Function) -> Vec<(u32, usize
                 dispatch(body, w);
             }
         }
-        blocks.push((start, run, text));
+        blocks.push((start, run, text, w.vector.get()));
         i += run;
     }
     blocks
@@ -874,12 +1182,12 @@ pub fn coverage(program: &Program, entry: u32, function: &Function, labels: &BTr
     if function.mode != Mode::Arm {
         return 0;
     }
-    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default() };
+    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default() };
     let blocks = blocks(program, &w, function);
-    if !blocks.iter().any(|(start, _, text)| *start == entry && text.is_some()) {
+    if !blocks.iter().any(|(start, _, text, _)| *start == entry && text.is_some()) {
         return 0;
     }
-    blocks.iter().filter(|(.., text)| text.is_some()).map(|(_, run, _)| run).sum()
+    blocks.iter().filter(|(_, _, text, _)| text.is_some()).map(|(_, run, ..)| run).sum()
 }
 
 /// what keeps the translator off each block it doesn't take: the kind of
@@ -888,12 +1196,12 @@ pub fn refusals(program: &Program, entry: u32, function: &Function, labels: &BTr
     if function.mode != Mode::Arm {
         return vec![("thumb", function.instructions.len())];
     }
-    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default() };
+    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default() };
     let instructions = &function.instructions;
     blocks(program, &w, function)
         .into_iter()
-        .filter(|(.., text)| text.is_none())
-        .map(|(start, run, _)| {
+        .filter(|(_, _, text, _)| text.is_none())
+        .map(|(start, run, ..)| {
             let at = instructions.iter().position(|&a| a == start).unwrap_or(0);
             let refused = instructions[at..at + run].iter().map(|&a| program.text.read32(a).unwrap_or(0)).find(|&op| lower(&w, start, op).is_none());
             (refused.map_or("other", kind), run)
@@ -934,7 +1242,7 @@ pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeS
 /// the function's assembly, entered at its entry as the C is, the C named
 /// c_name running it from anywhere else.
 pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str) {
-    let w = Writer { entry, labels, functions, fallback: c_name.to_owned(), made: Default::default() };
+    let w = Writer { entry, labels, functions, fallback: c_name.to_owned(), made: Default::default(), vector: Default::default() };
     let name = name(entry);
     let enter = w.local();
     emit!(out, "\t.globl {name}");
@@ -955,11 +1263,20 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
     emit!(out, "\tpn_reload");
     emit!(out, "\tb {}", w.block(entry));
     let mut stubs = String::new();
-    for (start, run, text) in blocks(program, &w, function) {
+    for (start, run, text, vector) in blocks(program, &w, function) {
         emit!(out, "{}:", w.block(start));
         match text {
             Some(text) => {
                 let (out_of_budget, on) = (w.local(), w.local());
+                // a short vector is the C's
+                if vector {
+                    let scalar = w.local();
+                    emit!(out, "\tldr w16, [x25]");
+                    emit!(out, "\tand w16, w16, #0x{FPSCR_LEN:x}");
+                    emit!(out, "\tcbz w16, {scalar}");
+                    fallback(out, &w, start);
+                    emit!(out, "{scalar}:");
+                }
                 if run < 4096 {
                     emit!(out, "\tsub w21, w21, #{run}");
                 } else {
@@ -1076,6 +1393,42 @@ mod tests {
         r.condition() << 28 | 0b100 << 25 | r.below(2) << 24 | r.below(2) << 23 | r.below(2) << 21 | load << 20 | rn << 16 | list
     }
 
+    /// VFP instructions of every kind the translator takes, and vmsr, which
+    /// it doesn't and which can turn short vectors on.
+    fn vfp(r: &mut Random) -> u32 {
+        let coprocessor = 10 + r.below(2);
+        let cond = r.condition() << 28;
+        let (d, n, m) = (r.below(2) << 22, r.below(2) << 7, r.below(2) << 5);
+        let (vd, vn, vm) = (r.below(16) << 12, r.below(16) << 16, r.below(16));
+        let core = r.below(11) << 12;
+        match r.below(12) {
+            0..=4 => {
+                let operation = r.below(9);
+                let (p, qr, negate) = if operation == 8 { (1, 0, 0) } else { (0, operation >> 1, operation & 1) };
+                cond | 0b1110 << 24 | p << 23 | d | qr << 20 | vn | vd | coprocessor << 8 | n | negate << 6 | m | vm
+            }
+            5 | 6 => {
+                let (kind, top) = [(0b0000, 2), (0b0001, 2), (0b0100, 2), (0b0101, 2), (0b0111, 1), (0b1000, 2), (0b1100, 1), (0b1101, 1)][r.below(8) as usize];
+                let top = if top == 1 { 1 << 7 } else { r.below(2) << 7 };
+                cond | 0b1110_1011 << 20 | d | kind << 16 | vd | coprocessor << 8 | top | 1 << 6 | m | vm
+            }
+            7 => cond | 0b1101 << 24 | r.below(2) << 23 | d | r.below(2) << 20 | (12 + r.below(2)) << 16 | vd | coprocessor << 8 | r.below(8),
+            8 => {
+                let (pre, up, writeback) = if r.below(2) == 0 { (0, 1, r.below(2)) } else { (1, 0, 1) };
+                let count = if coprocessor == 11 { 2 * (1 + r.below(3)) } else { 1 + r.below(6) };
+                cond | 0b110 << 25 | pre << 24 | up << 23 | d | writeback << 21 | r.below(2) << 20 | (12 + r.below(2)) << 16 | vd | coprocessor << 8 | count
+            }
+            9 => cond | 0x0E00_0A10 | r.below(2) << 20 | vn | core | n,
+            10 => match r.below(4) {
+                0 => cond | 0x0EF1_FA10,
+                1 => cond | 0x0EF1_0A10 | core,
+                2 => cond | 0x0C40_0A10 | (coprocessor - 10) << 8 | r.below(2) << 20 | r.below(11) << 16 | core | m | vm,
+                _ => cond | 0x0EE1_0A10 | 10 << 12,
+            },
+            _ => cond | 0x0E1D_0F70 | core,
+        }
+    }
+
     /// a function of random instructions at BASE calling one at CALLEE and
     /// a Thumb one at THUMB_CALLEE.
     fn program(seed: u64) -> Vec<u32> {
@@ -1088,8 +1441,8 @@ mod tests {
         // a third of the program from one kind, so that the rare ones get
         // dense somewhere: data processing, transfers, extra transfers,
         // ldm and stm, multiplies, calls, clz and mrs, branches
-        let focus = r.below(8) as usize;
-        let (from, span) = [(0, 40), (40, 13), (53, 6), (59, 6), (80, 4), (86, 4), (84, 2), (65, 6)][focus];
+        let focus = r.below(9) as usize;
+        let (from, span) = [(0, 30), (40, 13), (53, 6), (59, 6), (80, 4), (86, 4), (84, 2), (65, 6), (30, 10)][focus];
         while main.len() < count {
             let i = main.len();
             let a = BASE + 4 * i as u32;
@@ -1103,7 +1456,8 @@ mod tests {
             // runs, an svc, swp
             let roll = if r.below(10) < 3 { from + r.below(span) } else { r.below(100) };
             match roll {
-                0..=39 | 93..=99 => main.push(data_processing(&mut r)),
+                0..=29 | 93..=99 => main.push(data_processing(&mut r)),
+                30..=39 => main.push(vfp(&mut r)),
                 40..=52 => main.push(transfer(&mut r)),
                 53..=58 => main.push(extra(&mut r)),
                 59..=64 => main.push(multiple(&mut r)),
