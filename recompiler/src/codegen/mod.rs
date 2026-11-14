@@ -5,6 +5,7 @@
 //! its own, an svc, an unknown target, a full budget, returns all the way
 //! out to the host, which picks up again from r15.
 
+pub mod a64;
 mod arm;
 mod thumb;
 mod vfp;
@@ -160,7 +161,14 @@ pub struct Unit<'a> {
 /// contents. the overrides take the place of the functions they replace,
 /// which overrides.h lets them still call.
 pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)> {
+    generate_with(units, overrides, std::env::var_os("RECOMP_A64").is_some_and(|value| value == "1"))
+}
+
+/// generate, with the executable's ARM functions also written as AArch64
+/// assembly where a64 is set, see a64.rs.
+pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(String, String)> {
     let mut files = vec![("recomp.h".to_owned(), HEADER.to_owned())];
+    let mut assembly: Vec<String> = Vec::new();
     let mut sources: Vec<String> = Vec::new();
     let mut source = String::new();
     // the headers the file being written includes
@@ -207,6 +215,41 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
             original_headers.insert(header.clone());
         }
 
+        // each function's labels with those after what it interprets: written
+        // once to see what goes to the interpreter, the code can stop after
+        // any of those, and the host comes back in right after
+        let relative = unit.module.is_some();
+        let mut resumed: BTreeMap<u32, Function> = BTreeMap::new();
+        for (&entry, function) in &functions {
+            let interpreted = std::cell::RefCell::new(Vec::new());
+            let scope = Scope { labels: &function.labels, functions: &names, prefix: &prefix, relative, interpreted: &interpreted };
+            write_function(&mut String::new(), unit.program, &scope, entry, function);
+            let mut resumable = (*function).clone();
+            for address in interpreted.take() {
+                let at = function.instructions.iter().position(|&a| a == address);
+                if let Some(&next) = at.and_then(|i| function.instructions.get(i + 1)) {
+                    resumable.labels.insert(next);
+                }
+            }
+            resumed.insert(entry, resumable);
+        }
+
+        // the executable's functions worth writing as assembly, which calls
+        // and their entries go to from then on
+        let translated: BTreeSet<u32> = if a64 && !relative {
+            functions
+                .keys()
+                .copied()
+                .filter(|&entry| names.get(&entry) == Some(&name(&prefix, entry, false)))
+                .filter(|entry| a64::worth(unit.program, *entry, &resumed[entry], &resumed[entry].labels, &names))
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        for &entry in &translated {
+            names.insert(entry, a64::name(entry));
+        }
+
         let mut prototypes = String::new();
         if unit.module.is_some() {
             emit!(prototypes, "extern uint32_t {prefix}base;");
@@ -217,11 +260,13 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
         for (&entry, function) in &functions {
             emit!(prototypes, "void {}(Context *ctx);", name(&prefix, entry, function.mode == Mode::Thumb));
         }
+        for &entry in &translated {
+            emit!(prototypes, "void {}(Context *ctx);", a64::name(entry));
+        }
         files.push((header.clone(), prototypes));
 
         let include = format!("#include \"{header}\"\n\n");
-        // each function's labels with those after what it interprets
-        let mut resumed: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut written = 0;
         for (&entry, function) in &functions {
             if source.is_empty() {
                 source.push_str("#include \"recomp.h\"\n#ifdef RECOMP_FASTMEM\n#undef RECOMP_VIEW\n#define RECOMP_VIEW(ctx) view\n#endif\n");
@@ -229,23 +274,19 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
             if included.insert(index) {
                 source.push_str(&include);
             }
-            // written once to see what goes to the interpreter, the code
-            // can stop after any of those, and then again with a label
-            // after each, where the host comes back in
             let interpreted = std::cell::RefCell::new(Vec::new());
-            let relative = unit.module.is_some();
-            let scope = Scope { labels: &function.labels, functions: &names, prefix: &prefix, relative, interpreted: &interpreted };
-            write_function(&mut String::new(), unit.program, &scope, entry, function);
-            let mut resumable = (*function).clone();
-            for address in interpreted.take() {
-                let at = function.instructions.iter().position(|&a| a == address);
-                if let Some(&next) = at.and_then(|i| function.instructions.get(i + 1)) {
-                    resumable.labels.insert(next);
-                }
-            }
+            let resumable = &resumed[&entry];
             let scope = Scope { labels: &resumable.labels, functions: &names, prefix: &prefix, relative, interpreted: &interpreted };
-            write_function(&mut source, unit.program, &scope, entry, &resumable);
-            resumed.insert(entry, resumable.labels);
+            write_function(&mut source, unit.program, &scope, entry, resumable);
+            if translated.contains(&entry) {
+                if assembly.last().is_none_or(|_| written >= FILE_SIZE) {
+                    assembly.push(a64::PRELUDE.to_owned());
+                    written = 0;
+                }
+                let text = assembly.last_mut().expect("a file to write into");
+                a64::write(text, unit.program, entry, resumable, &resumable.labels, &names, &name(&prefix, entry, false));
+                written += function.instructions.len();
+            }
             size += function.instructions.len();
             if size >= FILE_SIZE {
                 sources.push(std::mem::take(&mut source));
@@ -259,10 +300,10 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
         let mut entries: BTreeMap<u32, String> = BTreeMap::new();
         for (&entry, function) in &functions {
             let owner = name(&prefix, entry, function.mode == Mode::Thumb);
-            for &label in resumed.get(&entry).unwrap_or(&function.labels) {
+            for &label in resumed.get(&entry).map_or(&function.labels, |resumable| &resumable.labels) {
                 let slot = entries.entry(key(label, function.mode)).or_insert_with(|| owner.clone());
                 if label == entry {
-                    slot.clone_from(&owner);
+                    *slot = if translated.contains(&entry) { a64::name(entry) } else { owner.clone() };
                 }
             }
         }
@@ -311,6 +352,7 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
         files.push(("overrides.h".to_owned(), header));
     }
     files.extend(sources.into_iter().enumerate().map(|(i, source)| (format!("code{i:03}.c"), source)));
+    files.extend(assembly.into_iter().enumerate().map(|(i, text)| (format!("a64_{i:03}.S"), text)));
     files
 }
 

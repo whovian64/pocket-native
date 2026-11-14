@@ -106,7 +106,7 @@ pub fn generate(
     for (name, contents) in &generated {
         write(&dir.join(name), contents.as_bytes())?;
     }
-    let mut sources: Vec<String> = generated.iter().map(|(name, _)| name.clone()).filter(|name| name.ends_with(".c")).collect();
+    let mut sources: Vec<String> = generated.iter().map(|(name, _)| name.clone()).filter(|name| name.ends_with(".c") || name.ends_with(".S")).collect();
     for file in &files {
         let name = format!("hand/{}", file.path.file_name().unwrap_or_default().to_string_lossy());
         write(&dir.join(&name), file.source.as_bytes())?;
