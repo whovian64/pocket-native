@@ -179,7 +179,7 @@ struct Writer<'a> {
     /// those it writes, and whether it works on doubles, which it then
     /// leaves in memory with everything else.
     cache: std::cell::RefCell<Option<BTreeMap<u32, u32>>>,
-    used: std::cell::RefCell<BTreeSet<u32>>,
+    used: std::cell::RefCell<BTreeMap<u32, usize>>,
     written: std::cell::RefCell<BTreeSet<u32>>,
     doubles: std::cell::Cell<bool>,
     /// after a call till the fill: the host registers hold whatever the
@@ -205,7 +205,7 @@ impl<'a> Writer<'a> {
 
     /// the host register a single is kept in in this block, if it is.
     fn cached(&self, single: u32, write: bool) -> Option<u32> {
-        self.used.borrow_mut().insert(single);
+        *self.used.borrow_mut().entry(single).or_default() += 1;
         if write {
             self.written.borrow_mut().insert(single);
         }
@@ -220,7 +220,9 @@ impl<'a> Writer<'a> {
         }
         if let Some(cache) = self.cache.borrow().as_ref() {
             for single in self.written.borrow().iter() {
-                emit!(out, "\tstr s{}, [x24, #{}]", cache[single], 4 * single);
+                if let Some(host) = cache.get(single) {
+                    emit!(out, "\tstr s{host}, [x24, #{}]", 4 * single);
+                }
             }
         }
     }
@@ -1844,11 +1846,14 @@ fn block(program: &Program, w: &Writer, instructions: &[u32], run: usize) -> Opt
     w.written.borrow_mut().clear();
     w.doubles.set(false);
     let plain = block_text(program, w, instructions, run)?;
-    let used = w.used.borrow().clone();
-    if used.is_empty() || w.doubles.get() || used.len() > CACHE.len() {
+    // the most used when they don't all fit, the rest left in memory, as
+    // are those used once, reading and writing them back costing more
+    let mut used: Vec<(u32, usize)> = w.used.borrow().iter().filter(|&(_, &uses)| uses > 1).map(|(&single, &uses)| (single, uses)).collect();
+    if used.is_empty() || w.doubles.get() {
         return Some(plain);
     }
-    *w.cache.borrow_mut() = Some(used.iter().copied().zip(CACHE).collect());
+    used.sort_by_key(|&(single, uses)| (std::cmp::Reverse(uses), single));
+    *w.cache.borrow_mut() = Some(used.iter().map(|&(single, _)| single).zip(CACHE).collect());
     let cached = block_text(program, w, instructions, run);
     let mut text = String::new();
     w.fill(&mut text);
@@ -2437,6 +2442,24 @@ mod tests {
             0xC3A0_0001, // movgt r0, #1
             0xEC8C_2A07, // vstmia r12, {s4-s10}
             0xE58C_0040, // str r0, [r12, #64]
+            0xE12F_FF1E,
+        ]);
+    }
+
+    /// more singles than host registers: the most used kept, the rest in
+    /// memory.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn some_singles_kept_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        alike(4, &[
+            0xEC9D_0A18, // vldmia r13, {s0-s23}
+            0xEE00_2A90, // vmov s1, r2
+            0xEE3B_0A2B, // vadd.f32 s0, s22, s23
+            0xEE70_BA20, // vadd.f32 s23, s0, s1
+            0xEC8C_0A18, // vstmia r12, {s0-s23}
             0xE12F_FF1E,
         ]);
     }
