@@ -102,6 +102,8 @@ Rotation** turns the picture for a panel mounted sideways.
 | spruceOS 4.2 | Played on the Miyoo Flip. From 0.5.5 the TrimUI Smart Pro's pad is found under it too |
 | ROCKNIX | Played on the RG DS, with Mali's own driver. The launcher hands sway's panels to the game and back. Pads numbering their buttons the usual way are read (the R36S's `r36s_Gamepad` among them), and from 0.5.0 the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. On the R36S, its Mali driver crashed before the first picture until the 0.4.9 test build, Panfrost worked: not confirmed since |
 | Android 11 or newer, 64-bit | Works on phones, the AYN Thor and the RG DS, with one screen or two. On one RK3566 handheld 0.4.7 drew on the CPU, its driver refusing a kind of buffer: 0.5.0 uses the GPU there. From 0.5.5 the device's motion sensors stand in for the console's |
+| BananaOS | Played by testers on the RG DS, the bottom panel staying dark. From 0.6.0 both panels should be lit, with the picture stacked as under ROCKNIX |
+| nuubOS | Not yet. Its desktop keeps the panel while a port runs: from 0.6.0 the screens should go to a Wayland window there instead, slowly so far |
 | AmberELEC | Not yet |
 
 ### The RG DS under ROCKNIX
