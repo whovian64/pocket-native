@@ -1,6 +1,6 @@
-//! Pocket Native: a recompiled Nintendo 3DS game on a handheld. On an
-//! R36S under ArkOS, the screens go to KMS; under nuubOS's labwc, they go
-//! through an SDL2 Wayland window. Buttons come from evdev and sound from ALSA.
+//! Pocket Native: a recompiled Nintendo 3DS game on a handheld without a
+//! window system, an R36S under ArkOS: the screens on the panel through KMS,
+//! the buttons from evdev, the sound through ALSA.
 //!
 //! ZAKURO_KMS=1 ZAKURO_RECOMPILED=title.so ZAKURO_DATA=dir pocket-native <rom>
 //!
