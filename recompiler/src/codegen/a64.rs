@@ -365,6 +365,7 @@ fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
         0b001 => data_processing(out, w, a, op),
         0b010 => single_transfer(out, a, op),
         0b011 if op & 0x10 == 0 => single_transfer(out, a, op),
+        0b011 if (op >> 23) & 3 == 0b01 => pack_extend_reverse(out, op),
         0b100 => block_transfer(out, w, a, op),
         0b101 => {
             let target = (a + 8).wrapping_add(sign_extend_24(op & 0x00FF_FFFF) << 2);
@@ -385,6 +386,59 @@ fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
         }
         _ => vfp_data(out, w, op),
     }
+}
+
+/// the media instructions gcc and games use most: the extends with an add
+/// or not, pkhbt and pkhtb, rev, rev16, rbit and revsh. saturating, sel and
+/// the packed extends are the C's.
+fn pack_extend_reverse(out: &mut String, op: u32) -> Option<bool> {
+    let op1 = (op >> 20) & 0x1F;
+    let op2 = (op >> 5) & 7;
+    let (rd, rn, rm) = ((op >> 12) & 0xF, (op >> 16) & 0xF, op & 0xF);
+    if rd == 15 || rm == 15 {
+        return None;
+    }
+    let shift = (op >> 7) & 0x1F;
+    match (op1, op2) {
+        (0b01000, 0 | 2 | 4 | 6) => {
+            if rn == 15 {
+                return None;
+            }
+            if op & (1 << 6) != 0 {
+                emit!(out, "\tasr w16, w{rm}, #{}", if shift == 0 { 31 } else { shift });
+                emit!(out, "\tmov w17, w{rn}");
+                emit!(out, "\tbfxil w17, w16, #0, #16");
+            } else {
+                emit!(out, "\tlsl w17, w{rm}, #{shift}");
+                emit!(out, "\tbfxil w17, w{rn}, #0, #16");
+            }
+            emit!(out, "\tmov w{rd}, w17");
+        }
+        (0b01010 | 0b01011 | 0b01110 | 0b01111, 0b011) => {
+            let rotate = ((op >> 10) & 3) * 8;
+            if rotate == 0 {
+                emit!(out, "\tmov w16, w{rm}");
+            } else {
+                emit!(out, "\tror w16, w{rm}, #{rotate}");
+            }
+            let extend = ["", "", "sxtb", "sxth", "", "", "uxtb", "uxth"][(op1 & 7) as usize];
+            emit!(out, "\t{extend} w16, w16");
+            if rn == 15 {
+                emit!(out, "\tmov w{rd}, w16");
+            } else {
+                emit!(out, "\tadd w{rd}, w{rn}, w16");
+            }
+        }
+        (0b01011, 0b001) => emit!(out, "\trev w{rd}, w{rm}"),
+        (0b01011, 0b101) => emit!(out, "\trev16 w{rd}, w{rm}"),
+        (0b01111, 0b001) => emit!(out, "\trbit w{rd}, w{rm}"),
+        (0b01111, 0b101) => {
+            emit!(out, "\trev16 w16, w{rm}");
+            emit!(out, "\tsxth w{rd}, w16");
+        }
+        _ => return None,
+    }
+    Some(true)
 }
 
 /// an svc the host runs in place, the code going on unless it says not to.
@@ -1340,6 +1394,7 @@ mod tests {
         fn condition(&mut self) -> u32 {
             if self.below(4) == 0 { self.below(14) } else { 14 }
         }
+
     }
 
     fn data_processing(r: &mut Random) -> u32 {
@@ -1393,6 +1448,25 @@ mod tests {
         r.condition() << 28 | 0b100 << 25 | r.below(2) << 24 | r.below(2) << 23 | r.below(2) << 21 | load << 20 | rn << 16 | list
     }
 
+    /// the media instructions the translator takes, and some it doesn't.
+    fn media(r: &mut Random) -> u32 {
+        let (rd, rm) = (r.below(11) << 12, r.below(11));
+        let rn = if r.below(3) == 0 { 15 } else { r.below(11) };
+        let cond = r.condition() << 28;
+        let form = |op1: u32, op2: u32, middle: u32| cond | 0b011 << 25 | op1 << 20 | rn << 16 | rd | middle << 7 | op2 << 5 | 1 << 4 | rm;
+        match r.below(8) {
+            0..=2 => {
+                let op1 = [0b01010, 0b01011, 0b01110, 0b01111][r.below(4) as usize];
+                form(op1, 0b011, r.below(4) << 3)
+            }
+            3 => form(0b01000, 2 * r.below(4), r.below(32)),
+            4 => form([0b01011, 0b01111][r.below(2) as usize], [0b001, 0b101][r.below(2) as usize], 0x1E),
+            5 => form(0b01000, 0b011, 0),
+            6 => form(0b01010, 2 * r.below(4), r.below(32)),
+            _ => form(0b00001, 0b000, 0x1E),
+        }
+    }
+
     /// VFP instructions of every kind the translator takes, and vmsr, which
     /// it doesn't and which can turn short vectors on.
     fn vfp(r: &mut Random) -> u32 {
@@ -1441,8 +1515,8 @@ mod tests {
         // a third of the program from one kind, so that the rare ones get
         // dense somewhere: data processing, transfers, extra transfers,
         // ldm and stm, multiplies, calls, clz and mrs, branches
-        let focus = r.below(9) as usize;
-        let (from, span) = [(0, 30), (40, 13), (53, 6), (59, 6), (80, 4), (86, 4), (84, 2), (65, 6), (30, 10)][focus];
+        let focus = r.below(10) as usize;
+        let (from, span) = [(0, 25), (40, 13), (53, 6), (59, 6), (80, 4), (86, 4), (84, 2), (65, 6), (30, 10), (25, 5)][focus];
         while main.len() < count {
             let i = main.len();
             let a = BASE + 4 * i as u32;
@@ -1456,7 +1530,8 @@ mod tests {
             // runs, an svc, swp
             let roll = if r.below(10) < 3 { from + r.below(span) } else { r.below(100) };
             match roll {
-                0..=29 | 93..=99 => main.push(data_processing(&mut r)),
+                0..=24 | 93..=99 => main.push(data_processing(&mut r)),
+                25..=29 => main.push(media(&mut r)),
                 30..=39 => main.push(vfp(&mut r)),
                 40..=52 => main.push(transfer(&mut r)),
                 53..=58 => main.push(extra(&mut r)),
