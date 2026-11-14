@@ -497,6 +497,16 @@ impl Kms {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
+        // a desktop that keeps the panel while a port runs, nuubOS's labwc,
+        // leaves its Wayland session to draw in: only a master may
+        // authenticate, so the call is turned away when we aren't one
+        let auth = symbol(&drm, "drmAuthMagic");
+        if !auth.is_null() && wayland(std::env::var_os("ZAKURO_WAYLAND").as_deref(), wayland_session()) == Wayland::WhenHeld {
+            let auth: extern "C" fn(i32, u32) -> i32 = std::mem::transmute(auth);
+            if auth(fd, 0) == -libc::EACCES {
+                return Err(HELD.into());
+            }
+        }
         let refresh = mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
         log::info!("panel {}x{} at {refresh:.3} Hz", mode.hdisplay, mode.vdisplay);
         if (50.0..70.0).contains(&refresh) {
@@ -1963,7 +1973,7 @@ impl Egl {
             log::info!("the screens go to a {}x{} window", size.0, size.1);
             return Ok((egl, gl, Some(Output::Window(size))));
         }
-        if wayland_requested() {
+        if wayland(std::env::var_os("ZAKURO_WAYLAND").as_deref(), wayland_session()) == Wayland::First {
             let (egl, gl, window) = Egl::new_wayland()?;
             log::info!("the screens go to a {}x{} Wayland window", window.size.0, window.size.1);
             return Ok((egl, gl, Some(Output::Wayland(Box::new(window)))));
@@ -1971,6 +1981,11 @@ impl Egl {
         if std::env::var_os("ZAKURO_KMS").is_some() {
             return match Egl::new_kms() {
                 Ok((egl, gl, kms)) => Ok((egl, gl, Some(Output::Kms(Box::new(kms))))),
+                Err(error) if error == HELD => {
+                    let (egl, gl, window) = Egl::new_wayland().map_err(|wayland| format!("{error}, and {wayland}"))?;
+                    log::info!("{error}, the screens go to a {}x{} Wayland window", window.size.0, window.size.1);
+                    Ok((egl, gl, Some(Output::Wayland(Box::new(window)))))
+                }
                 Err(error) if std::path::Path::new("/dev/fb0").exists() => {
                     let (egl, gl, window) = Egl::new_fbdev().map_err(|fbdev| format!("{error}, and {fbdev}"))?;
                     log::info!("{error}, the screens go through /dev/fb0, {}x{}", window[0], window[1]);
@@ -1984,20 +1999,30 @@ impl Egl {
     }
 }
 
-fn prefers_wayland(force: Option<&OsStr>, kms: bool, display: bool, sdl_driver: bool) -> bool {
+/// what KMS says when a desktop holds the panel.
+const HELD: &str = "a desktop holds the panel";
+
+#[derive(Debug, PartialEq)]
+enum Wayland {
+    First,
+    WhenHeld,
+    Never,
+}
+
+/// when the screens go to a Wayland window: ZAKURO_WAYLAND=1 rather than
+/// the panel, 0 never, unset when a desktop holds the panel and a Wayland
+/// session is there.
+fn wayland(force: Option<&OsStr>, session: bool) -> Wayland {
     match force {
-        Some(value) => value != OsStr::new("0"),
-        None => kms && (display || sdl_driver),
+        Some(value) if value == OsStr::new("0") => Wayland::Never,
+        Some(_) => Wayland::First,
+        None if session => Wayland::WhenHeld,
+        None => Wayland::Never,
     }
 }
 
-fn wayland_requested() -> bool {
-    prefers_wayland(
-        std::env::var_os("ZAKURO_WAYLAND").as_deref(),
-        std::env::var_os("ZAKURO_KMS").is_some(),
-        std::env::var_os("WAYLAND_DISPLAY").is_some(),
-        std::env::var_os("SDL_VIDEODRIVER").is_some_and(|driver| driver == "wayland"),
-    )
+fn wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("SDL_VIDEODRIVER").is_some_and(|driver| driver == "wayland")
 }
 
 #[cfg(test)]
@@ -2006,10 +2031,9 @@ mod tests {
 
     #[test]
     fn wayland_is_selected_only_for_wayland_sessions_or_explicitly() {
-        assert!(prefers_wayland(None, true, true, false));
-        assert!(prefers_wayland(None, true, false, true));
-        assert!(!prefers_wayland(None, false, true, true));
-        assert!(prefers_wayland(Some(OsStr::new("1")), false, false, false));
-        assert!(!prefers_wayland(Some(OsStr::new("0")), true, true, true));
+        assert_eq!(wayland(None, true), Wayland::WhenHeld);
+        assert_eq!(wayland(None, false), Wayland::Never);
+        assert_eq!(wayland(Some(OsStr::new("1")), false), Wayland::First);
+        assert_eq!(wayland(Some(OsStr::new("0")), true), Wayland::Never);
     }
 }
