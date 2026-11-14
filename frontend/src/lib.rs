@@ -129,6 +129,8 @@ pub fn run(mut args: Vec<String>) {
     advanced.export();
     let settings_path = settings::config_dir().join("settings.toml");
     let mut settings: Settings = settings::load(&settings_path);
+    // the layout this game was left in, over the one used last
+    (settings.layout, settings.swapped) = (game.layout.unwrap_or(settings.layout), game.swapped.unwrap_or(settings.swapped));
     // the menu's rotation over ZAKURO_PANEL_ROTATE, before the panel starts
     let rotate = match settings.rotation {
         Rotation::Auto => None,
@@ -421,6 +423,7 @@ pub fn run(mut args: Vec<String>) {
                 }
                 Action::Resume => {
                     settings::save(&settings_path, &settings);
+                    (game.layout, game.swapped) = (Some(settings.layout), Some(settings.swapped));
                     settings::save(&game_path, &game);
                     (overlay, status, next) = (None, None, Instant::now());
                 }
@@ -719,6 +722,7 @@ pub fn run(mut args: Vec<String>) {
         std::process::exit(code);
     }
     settings::save(&settings_path, &settings);
+    (game.layout, game.swapped) = (Some(settings.layout), Some(settings.swapped));
     settings::save(&game_path, &game);
     system.stop_gpu();
     if let Some(before) = BEFORE_EXIT.get() {

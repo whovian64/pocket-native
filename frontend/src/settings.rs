@@ -223,11 +223,14 @@ pub struct GameSettings {
     pub region: u8,
     pub options: BTreeMap<String, bool>,
     pub advanced: Option<Advanced>,
+    /// the screens' layout and swap the game was last left in.
+    pub layout: Option<Layout>,
+    pub swapped: Option<bool>,
 }
 
 impl Default for GameSettings {
     fn default() -> Self {
-        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None }
+        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None, layout: None, swapped: None }
     }
 }
 

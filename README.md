@@ -179,6 +179,9 @@ Every setting has a line of help at the bottom of the menu.
   controls on Android
 - **Game:** resume, advanced settings, reset, quit
 
+The layout and which screen is on top are kept per game, a game played
+for the first time starting with the last one used.
+
 **Advanced settings** are saved per game. They switch the engine's speed
 hacks and its graphics, CPU and loading options for a game that doesn't
 run or look right, and set the language and region the game is told,
