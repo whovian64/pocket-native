@@ -108,7 +108,9 @@ int main(int argc, char **argv) {
         uint64_t s = mix((uint64_t)t * 7919u + 1);
         for (int i = 0; i < 11; i++) {
             s = mix(s);
-            ctx.r[i] = i % 2 == 0 ? (uint32_t)s : (uint32_t)(s & 0x1FF);
+            /* half full width, the rest small, half of those the shift
+               amounts around 32 that change how shifts by a register go */
+            ctx.r[i] = i % 2 == 0 ? (uint32_t)s : (s >> 40) & 1 ? (uint32_t)(s & 0x1FF) : (uint32_t)(s % 41);
         }
         s = mix(s);
         ctx.r[11] = (uint32_t)(s & 0x3C);
@@ -122,7 +124,7 @@ int main(int argc, char **argv) {
         ctx.z = (s >> 1) & 1;
         ctx.c = (s >> 2) & 1;
         ctx.v = (s >> 3) & 1;
-        ctx.budget = 1 + (int32_t)(mix(s) % 300);
+        ctx.budget = 1 + (int32_t)(mix(s) % 3000);
         /* VFP registers mostly ordinary numbers, now and then a zero, a
            subnormal or anything at all; fpscr mostly flushing to zero with
            default NaNs as games run, now and then not, now and then a
@@ -144,7 +146,10 @@ int main(int argc, char **argv) {
         ctx.fpscr = &fpscr;
         ctx.host = &host;
         int resumes;
-        for (resumes = 0; resumes < 4000; resumes++) {
+        /* about as many instructions as a frame's worth, past which a loop
+           walking memory would map it all */
+        int64_t ran = 0;
+        for (resumes = 0; resumes < 4000 && ran < 400000; resumes++) {
             if (!ctx.thumb && ctx.r[15] == SENTINEL) break;
             Code code = lookup(&ctx, ctx.r[15] | ctx.thumb);
             if (!code) {
@@ -152,7 +157,9 @@ int main(int argc, char **argv) {
                 break;
             }
             ctx.exit = 0;
+            int32_t given = ctx.budget;
             code(&ctx);
+            ran += given - ctx.budget;
             /* the host counts cycles from what is left of the budget */
             fold(((uint64_t)ctx.exit << 32) | ctx.r[15]);
             fold((uint32_t)ctx.budget);
@@ -161,7 +168,10 @@ int main(int argc, char **argv) {
                 for (int i = 0; i < 15; i++) printf(" %08x", ctx.r[i]);
                 printf(" nzcv %u%u%u%u budget %d depth %u\n", ctx.n, ctx.z, ctx.c, ctx.v, ctx.budget, ctx.depth);
             }
-            if (ctx.exit == EXIT_BUDGET) ctx.budget = 1 + resumes % 97;
+            /* now and then a little, so that the budget runs out in odd
+               places, mostly as much as the host gives, which a long block
+               needs to start at all */
+            if (ctx.exit == EXIT_BUDGET) ctx.budget = resumes % 3 == 0 ? 1 + resumes % 97 : 1000 + resumes % 5000;
         }
         for (int i = 0; i < 16; i++) fold(ctx.r[i]);
         fold(ctx.n | ctx.z << 8 | ctx.c << 16 | (uint64_t)ctx.v << 24 | (uint64_t)ctx.q << 32 | (uint64_t)ctx.thumb << 40 | (uint64_t)ctx.ge << 48);

@@ -1048,7 +1048,7 @@ enum Carry {
 }
 
 /// the second operand into w16, and when carry the shifter's carry out.
-fn shifter_operand(out: &mut String, a: u32, op: u32, carry: bool) -> Option<Carry> {
+fn shifter_operand(out: &mut String, w: &Writer, a: u32, op: u32, carry: bool) -> Option<Carry> {
     if op & (1 << 25) != 0 {
         let rotate = ((op >> 8) & 0xF) * 2;
         let value = (op & 0xFF).rotate_right(rotate);
@@ -1056,7 +1056,7 @@ fn shifter_operand(out: &mut String, a: u32, op: u32, carry: bool) -> Option<Car
         return Some(if rotate == 0 { Carry::Kept } else { Carry::Constant(value >> 31) });
     }
     if op & (1 << 4) != 0 {
-        return None;
+        return register_shift(out, w, op, carry);
     }
     let rm = op & 0xF;
     let kind = (op >> 5) & 3;
@@ -1125,6 +1125,80 @@ fn shifter_operand(out: &mut String, a: u32, op: u32, carry: bool) -> Option<Car
     Some(Carry::Register)
 }
 
+/// a shift by the bottom byte of a register, as shift_lsl and the others in
+/// recomp.h: none keeps the value and the carry, 32 and past shift it all
+/// out, ror goes round. the cases picked by branches, which leave NZCV as
+/// it is, the carry kept read first.
+fn register_shift(out: &mut String, w: &Writer, op: u32, carry: bool) -> Option<Carry> {
+    let (rm, rs, kind) = (op & 0xF, (op >> 8) & 0xF, (op >> 5) & 3);
+    if rm == 15 || rs == 15 {
+        return None;
+    }
+    let m = format!("w{rm}");
+    let (small, big, done) = (w.local(), w.local(), w.local());
+    if carry {
+        emit!(out, "\tcset w17, hs");
+    }
+    emit!(out, "\tand w15, w{rs}, #0xff");
+    emit!(out, "\tmov w16, {m}");
+    emit!(out, "\tcbz w15, {done}");
+    if kind == 3 {
+        emit!(out, "\tand w15, w15, #31");
+        emit!(out, "\tcbnz w15, {small}");
+        if carry {
+            emit!(out, "\tlsr w17, {m}, #31");
+        }
+        emit!(out, "\tb {done}");
+        emit!(out, "{small}:");
+        emit!(out, "\tror w16, {m}, w15");
+        if carry {
+            emit!(out, "\tsub w22, w15, #1");
+            emit!(out, "\tlsr w17, {m}, w22");
+            emit!(out, "\tand w17, w17, #1");
+        }
+    } else {
+        emit!(out, "\tsub w22, w15, #32");
+        emit!(out, "\ttbz w22, #31, {big}");
+        let shift = ["lsl", "lsr", "asr"][kind as usize];
+        emit!(out, "\t{shift} w16, {m}, w15");
+        if carry {
+            if kind == 0 {
+                emit!(out, "\tmov w22, #32");
+                emit!(out, "\tsub w22, w22, w15");
+            } else {
+                emit!(out, "\tsub w22, w15, #1");
+            }
+            emit!(out, "\tlsr w17, {m}, w22");
+            emit!(out, "\tand w17, w17, #1");
+        }
+        emit!(out, "\tb {done}");
+        // 32 and past, w22 how far past
+        emit!(out, "{big}:");
+        match kind {
+            0 | 1 => {
+                emit!(out, "\tmov w16, wzr");
+                if carry {
+                    if kind == 0 {
+                        emit!(out, "\tand w17, {m}, #1");
+                    } else {
+                        emit!(out, "\tlsr w17, {m}, #31");
+                    }
+                    emit!(out, "\tcbz w22, {done}");
+                    emit!(out, "\tmov w17, wzr");
+                }
+            }
+            _ => {
+                emit!(out, "\tasr w16, {m}, #31");
+                if carry {
+                    emit!(out, "\tlsr w17, {m}, #31");
+                }
+            }
+        }
+    }
+    emit!(out, "{done}:");
+    Some(Carry::Register)
+}
+
 /// N and Z from the result in register, C from carry and V as it was, as
 /// the logical ops set them.
 fn logical_flags(out: &mut String, register: &str, carry: Carry) {
@@ -1158,7 +1232,11 @@ fn data_processing(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
         return None;
     }
     let logical = matches!(opcode, 0 | 1 | 8 | 9 | 12..=15);
-    let carry = shifter_operand(out, a, op, set_flags && logical)?;
+    // a shift by a register reads r15 further on, which the C has
+    if op & (1 << 25) == 0 && op & (1 << 4) != 0 && rn == 15 && !matches!(opcode, 13 | 15) {
+        return None;
+    }
+    let carry = shifter_operand(out, w, a, op, set_flags && logical)?;
     let first = if matches!(opcode, 13 | 15) {
         String::new()
     } else if rn == 15 {
@@ -1615,14 +1693,23 @@ mod tests {
         let rd = r.below(11);
         let operand = match r.below(32) {
             0..=15 => 1 << 25 | r.below(16) << 8 | r.below(256),
-            16..=30 => {
+            16..=27 => {
                 let rm = if r.below(16) == 0 { 15 } else { r.below(15) };
                 r.below(32) << 7 | r.below(4) << 5 | rm
             }
-            // shifts by a register, left to the C
+            // shifts by a register
             _ => r.below(15) << 8 | r.below(4) << 5 | 1 << 4 | r.below(15),
         };
         r.condition() << 28 | opcode << 21 | s << 20 | rn << 16 | rd << 12 | operand
+    }
+
+    /// data processing shifting by a register whose value is small, an odd
+    /// one the harness starts near 32, setting the flags most of the time.
+    fn register_shifted(r: &mut Random) -> u32 {
+        let opcode = [0, 1, 8, 9, 12, 13, 14, 15, 2, 4][r.below(10) as usize];
+        let s = if (8..=11).contains(&opcode) || r.below(4) != 0 { 1 } else { 0 };
+        let rs = 1 + 2 * r.below(5);
+        r.condition() << 28 | opcode << 21 | s << 20 | r.below(11) << 16 | r.below(11) << 12 | rs << 8 | r.below(4) << 5 | 1 << 4 | r.below(11)
     }
 
     fn transfer(r: &mut Random) -> u32 {
@@ -1737,8 +1824,8 @@ mod tests {
         // a third of the program from one kind, so that the rare ones get
         // dense somewhere: data processing, transfers, extra transfers,
         // ldm and stm, multiplies, calls, clz and mrs, branches
-        let focus = r.below(10) as usize;
-        let (from, span) = [(0, 25), (40, 13), (53, 6), (59, 6), (80, 4), (86, 4), (84, 2), (65, 6), (30, 10), (25, 5)][focus];
+        let focus = r.below(11) as usize;
+        let (from, span) = [(0, 25), (40, 13), (53, 6), (59, 6), (80, 4), (86, 4), (84, 2), (65, 6), (30, 10), (25, 5), (100, 1)][focus];
         while main.len() < count {
             let i = main.len();
             let a = BASE + 4 * i as u32;
@@ -1753,6 +1840,7 @@ mod tests {
             let roll = if r.below(10) < 3 { from + r.below(span) } else { r.below(100) };
             match roll {
                 0..=24 | 93..=99 => main.push(data_processing(&mut r)),
+                100 => main.push(register_shifted(&mut r)),
                 25..=29 => main.push(media(&mut r)),
                 30..=39 => main.push(vfp(&mut r)),
                 40..=52 => main.push(transfer(&mut r)),
@@ -1836,6 +1924,53 @@ mod tests {
         let ran = Command::new("qemu-aarch64-static").arg(&binary).arg(trials.to_string()).output().unwrap();
         assert!(ran.status.success(), "{}: {}", dir.display(), String::from_utf8_lossy(&ran.stderr));
         String::from_utf8(ran.stdout).unwrap()
+    }
+
+    /// mov rd, #value, value one an ARM immediate can hold.
+    fn move_immediate(rd: u32, value: u32) -> u32 {
+        let rotate = (0..16).find(|&rotate| value.rotate_left(2 * rotate) < 256).expect("an immediate");
+        0xE3A0_0000 | rd << 12 | rotate << 8 | value.rotate_left(2 * rotate)
+    }
+
+    fn alike(seed: u64, words: &[u32]) {
+        let program = Program {
+            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
+            seeds: vec![(BASE, Source::Entry)],
+            slots: None,
+        };
+        let analysis = discover::analyze(&program);
+        let units = [Unit { module: None, program: &program, analysis: &analysis }];
+        let root = std::env::temp_dir().join(format!("a64-fixed-{}-{seed}", std::process::id()));
+        let hybrid = generate_with(&units, &[], true);
+        assert!(hybrid.iter().any(|(name, text)| name.ends_with(".S") && text.contains("a_00100000:")), "the program isn't translated");
+        let expected = run(&root.join("c"), &generate_with(&units, &[], false), 60);
+        let got = run(&root.join("a64"), &hybrid, 60);
+        assert_eq!(expected, got, "files in {}", root.display());
+        if std::env::var_os("A64_KEEP").is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// every shift by a register through the amounts where they change how
+    /// they go, the value, flags and carry stored for each.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn shifts_by_a_register_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        let mut words = Vec::new();
+        for kind in 0..4 {
+            for amount in [0, 1, 7, 31, 32, 33, 63, 64, 255, 256, 288] {
+                words.push(move_immediate(1, amount));
+                // movs r2, r0, kind r1; mrs r4, cpsr; add r5, r3, r0, kind r1
+                words.extend([0xE1B0_2110 | kind << 5, 0xE10F_4000, 0xE083_5110 | kind << 5]);
+                // str r2, [r12], 4; str r4, [r12], 4; str r5, [r12], 4
+                words.extend([0xE48C_2004, 0xE48C_4004, 0xE48C_5004]);
+            }
+        }
+        words.push(0xE12F_FF1E);
+        alike(0, &words);
     }
 
     /// random programs, each built as C alone and as C with assembly, run
