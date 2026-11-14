@@ -987,6 +987,10 @@ pub(super) unsafe fn draw_parts(
     parts: Vec<Part>,
 ) -> Result<(), String> {
             let framebuffer_height = height;
+            let bottom = parts.iter().find_map(|part| match part {
+                Part::Surface { top: false, area, .. } | Part::Pixels { index: 1, area, .. } => Some(*area),
+                _ => None,
+            });
             for part in parts {
                 let (texture, screen, upright, area, smooth, clip) = match part {
                     Part::Cursor { x, y } => {
@@ -1027,6 +1031,12 @@ pub(super) unsafe fn draw_parts(
                         }
                         gl.use_program(Some(program));
                         (texture, screen, 0, area, smooth, clip)
+                    }
+                    Part::Overlay(overlay) if overlay.bottom && bottom.is_some() => {
+                        let (left, top, scale) = crate::fitted(bottom.unwrap_or_default());
+                        let over = Fit { scale: fit.scale * scale, left: fit.left + left * fit.scale, top: fit.top + top * fit.scale };
+                        draw_overlay(gl, panel, &overlay, height, over, (640, 480))?;
+                        continue;
                     }
                     Part::Overlay(overlay) if overlay.whole => {
                         draw_overlay(gl, panel, &overlay, height, fit, layout)?;
@@ -1192,7 +1202,8 @@ pub(super) fn show(gl: GlRef, parts: Vec<Part>, frames: u32) -> Result<(), Strin
                         Part::Surface { top: is_top, .. } => *is_top != top,
                         Part::Pixels { index, .. } => (*index == 0) != top,
                         Part::Cursor { .. } => top,
-                        Part::Overlay(_) => true,
+                        // one over the bottom screen goes where it is
+                        Part::Overlay(overlay) => !overlay.bottom || top,
                     })
                 }
                 None => (parts, Vec::new()),

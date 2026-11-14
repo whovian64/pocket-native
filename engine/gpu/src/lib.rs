@@ -16,7 +16,7 @@ pub mod texture;
 
 use format::ColorFormat;
 use registers::*;
-pub use overlay::{Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
+pub use overlay::{fitted, Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
 pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
 #[cfg(feature = "gles")]
 pub use raster::gles::{compiling, compiling_stand_ins, preparing, skip_preparing, waited_draws, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};

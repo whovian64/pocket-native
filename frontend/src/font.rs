@@ -161,6 +161,6 @@ impl<'a> Canvas<'a> {
             OverlayTexture { id: ATLAS, offset: None, size: self.font.size, pixels: self.font.pixels.to_vec(), linear: false },
             OverlayTexture { id: DISC, offset: None, size: [DISC_SIZE; 2], pixels: self.font.disc.to_vec(), linear: true },
         ];
-        Overlay { textures, meshes: vec![self.boxes, self.discs, self.text], free: Vec::new(), whole: false }
+        Overlay { textures, meshes: vec![self.boxes, self.discs, self.text], free: Vec::new(), whole: false, bottom: false }
     }
 }

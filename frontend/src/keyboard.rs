@@ -1,7 +1,8 @@
-//! the software keyboard a title opens for a name or other text: the game
-//! waits under it, the d-pad moves over the keys, A types, B deletes, X
-//! changes the keys, Y types a space, Start presses the game's confirming
-//! button and Select its first, and a finger types on the key under it.
+//! the software keyboard a title opens for a name or other text, over the
+//! bottom screen as the console's own: the game waits under it, the d-pad
+//! moves over the keys, A types, B deletes, X changes the keys, Y types a
+//! space, Start presses the game's confirming button and Select its first,
+//! and a finger types on the key under it.
 
 use std::collections::HashSet;
 
@@ -28,11 +29,12 @@ const PAGES: [[&str; 4]; 3] = [
 ];
 const PAGE_NAMES: [&str; 3] = ["ABC", "àéñ", "abc"];
 /// where the keys start, their size and the room between them.
-const LEFT_EDGE: f32 = 52.0;
-const TOP_EDGE: f32 = 150.0;
-const WIDE: f32 = 50.0;
-const TALL: f32 = 42.0;
+const TOP_EDGE: f32 = 118.0;
+const WIDE: f32 = 58.0;
+const TALL: f32 = 54.0;
 const GAP: f32 = 4.0;
+/// the last row in key widths, as wide as ten keys.
+const ACROSS: f32 = 10.0;
 
 /// the keys of the last row, after the letters.
 #[derive(Clone, Copy, PartialEq)]
@@ -67,23 +69,53 @@ impl Keyboard {
     /// pressed.
     pub fn new(request: Request, keys: &HashSet<u16>, touching: bool) -> Keyboard {
         let text = request.text.clone();
-        Keyboard { request, text, page: 0, row: 1, column: 0, last: keys.clone(), held: 0, touching, note: None }
+        let row = if request.numpad.is_some() { 0 } else { 1 };
+        Keyboard { request, text, page: 0, row, column: 0, last: keys.clone(), held: 0, touching, note: None }
+    }
+
+    /// the rows of keys showing, a number pad's or the page's letters.
+    fn rows(&self) -> Vec<Vec<char>> {
+        match self.request.numpad {
+            Some([left, right]) => {
+                let mut rows: Vec<Vec<char>> = ["123", "456", "789"].iter().map(|row| row.chars().collect()).collect();
+                rows.push(left.into_iter().chain(['0']).chain(right).collect());
+                rows
+            }
+            None => PAGES[self.page].iter().map(|row| row.chars().collect()).collect(),
+        }
     }
 
     /// the last row's keys, their first column and how many they span.
     fn items(&self) -> Vec<(Item, f32, f32)> {
         let buttons = self.request.buttons.len().max(1);
-        let mut items = vec![(Item::Page, 0.0, 1.5), (Item::Space, 1.5, 3.0), (Item::Delete, 4.5, 1.5)];
-        let each = 4.0 / buttons as f32;
-        items.extend((0..buttons).map(|button| (Item::Button(button), 6.0 + button as f32 * each, each)));
+        let (mut items, from) = match self.request.numpad {
+            Some(_) => (vec![(Item::Delete, 0.0, 4.0)], 4.0),
+            None => (vec![(Item::Page, 0.0, 1.5), (Item::Space, 1.5, 3.0), (Item::Delete, 4.5, 1.5)], 6.0),
+        };
+        let each = (ACROSS - from) / buttons as f32;
+        items.extend((0..buttons).map(|button| (Item::Button(button), from + button as f32 * each, each)));
         items
     }
 
-    /// a key's area on the panel, its column span in key widths.
-    fn area(row: usize, first: f32, span: f32) -> [f32; 4] {
-        let left = LEFT_EDGE + first * (WIDE + GAP);
+    /// a key's area on the bottom screen, in a row of count key widths
+    /// centred, from its first column on, spanning span.
+    fn area(row: usize, first: f32, span: f32, count: f32) -> [f32; 4] {
+        let left = (640.0 - (count * (WIDE + GAP) - GAP)) / 2.0 + first * (WIDE + GAP);
         let top = TOP_EDGE + row as f32 * (TALL + GAP);
         [left, top, left + span * (WIDE + GAP) - GAP, top + TALL]
+    }
+
+    /// every key's area, row by row, the last row's after the letters.
+    fn areas(&self) -> Vec<Vec<[f32; 4]>> {
+        let mut areas: Vec<Vec<[f32; 4]>> = self
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(row, keys)| (0..keys.len()).map(|column| Self::area(row, column as f32, 1.0, keys.len() as f32)).collect())
+            .collect();
+        let last = areas.len();
+        areas.push(self.items().iter().map(|&(_, first, span)| Self::area(last, first, span, ACROSS)).collect());
+        areas
     }
 
     fn type_char(&mut self, c: char) -> Outcome {
@@ -116,41 +148,34 @@ impl Keyboard {
     /// game takes, the others answer as they are.
     fn button(&mut self, button: usize) -> Outcome {
         let last = self.request.buttons.len().saturating_sub(1);
-        if button == last && !self.request.accepts(&self.text) {
-            let length = self.request.max_length;
-            self.note = Some(match self.request.valid {
-                zakuro_core::services::keyboard::Valid::FixedLength => format!("It needs {length} characters"),
-                _ if self.text.trim().is_empty() => "It needs some text".to_owned(),
-                _ => "The game doesn't take this".to_owned(),
-            });
-            return Outcome::Redraw;
+        if button == last {
+            if let Some(refusal) = self.request.refusal(&self.text) {
+                self.note = Some(refusal);
+                return Outcome::Redraw;
+            }
         }
         Outcome::Answer(self.text.clone(), button)
     }
 
-    /// the key under a point on the panel.
+    /// the key under a point on the bottom screen.
     fn hit(&self, x: f32, y: f32) -> Option<(usize, usize)> {
-        let inside = |[left, top, right, bottom]: [f32; 4]| (left..right).contains(&x) && (top..bottom).contains(&y);
-        for row in 0..4 {
-            if let Some(column) = (0..10).find(|&column| inside(Self::area(row, column as f32, 1.0))) {
-                return Some((row, column));
-            }
-        }
-        self.items().iter().position(|&(_, first, span)| inside(Self::area(4, first, span))).map(|index| (4, index))
+        let inside = |&[left, top, right, bottom]: &[f32; 4]| (left..right).contains(&x) && (top..bottom).contains(&y);
+        self.areas().iter().enumerate().find_map(|(row, keys)| keys.iter().position(inside).map(|column| (row, column)))
     }
 
     fn activate(&mut self) -> Outcome {
-        if self.row < 4 {
-            let c = PAGES[self.page][self.row].chars().nth(self.column).unwrap_or(' ');
-            self.type_char(c)
-        } else {
-            let item = self.items()[self.column.min(self.items().len() - 1)].0;
-            self.press(item)
+        let rows = self.rows();
+        match rows.get(self.row) {
+            Some(keys) => self.type_char(keys[self.column.min(keys.len() - 1)]),
+            None => {
+                let items = self.items();
+                self.press(items[self.column.min(items.len() - 1)].0)
+            }
         }
     }
 
     /// the keys held this frame, d-pad presses repeating while held, and a
-    /// finger on the panel, in its pixels.
+    /// finger on the bottom screen, in its pixels.
     pub fn input(&mut self, keys: &HashSet<u16>, finger: Option<(f32, f32)>) -> Outcome {
         let direction = [UP, DOWN, LEFT, RIGHT].into_iter().find(|key| keys.contains(key));
         self.held = if direction.is_some_and(|key| self.last.contains(&key)) { self.held + 1 } else { 0 };
@@ -166,39 +191,39 @@ impl Keyboard {
                 return self.activate();
             }
         }
-        let items = self.items();
-        let centre = |index: usize| items[index].1 + items[index].2 / 2.0;
+        let areas = self.areas();
+        let centre = |row: usize, column: usize| {
+            let [left, _, right, _] = areas[row][column.min(areas[row].len() - 1)];
+            (left + right) / 2.0
+        };
         match direction.filter(|_| repeat) {
             Some(LEFT) | Some(RIGHT) => {
-                let count = if self.row < 4 { 10 } else { items.len() };
+                let count = areas[self.row].len();
                 let by = if direction == Some(LEFT) { count - 1 } else { 1 };
                 self.column = (self.column + by) % count;
                 return Outcome::Redraw;
             }
             Some(UP) | Some(DOWN) => {
-                let to = if direction == Some(UP) { (self.row + 4) % 5 } else { (self.row + 1) % 5 };
-                // into the last row the key under the column, out of it the
-                // column under the key
-                self.column = match (self.row == 4, to == 4) {
-                    (false, true) => items.iter().position(|&(_, first, span)| (first..first + span).contains(&(self.column as f32 + 0.5))).unwrap_or(0),
-                    (true, false) => (centre(self.column.min(items.len() - 1)) as usize).min(9),
-                    _ => self.column,
-                };
+                // to the key in the next row up or down nearest across
+                let to = if direction == Some(UP) { (self.row + areas.len() - 1) % areas.len() } else { (self.row + 1) % areas.len() };
+                let across = centre(self.row, self.column);
+                self.column = (0..areas[to].len()).min_by(|&one, &other| (centre(to, one) - across).abs().total_cmp(&(centre(to, other) - across).abs())).unwrap_or(0);
                 self.row = to;
                 return Outcome::Redraw;
             }
             _ => {}
         }
+        let letters = self.request.numpad.is_none();
         if a {
             return self.activate();
         }
         if b {
             return self.press(Item::Delete);
         }
-        if x {
+        if x && letters {
             return self.press(Item::Page);
         }
-        if y {
+        if y && letters {
             return self.press(Item::Space);
         }
         if start {
@@ -210,57 +235,55 @@ impl Keyboard {
         Outcome::None
     }
 
+    /// over the whole bottom screen, as the console's own keyboard.
     pub fn draw(&self, canvas: &mut Canvas) {
-        let (x0, y0, x1, y1) = (40.0, 40.0, 600.0, 440.0);
-        canvas.fill([0.0, 0.0, 640.0, 480.0], rgba([0, 0, 0], 150));
+        let (x0, y0, x1, y1) = (0.0, 0.0, 640.0, 480.0);
         canvas.fill([x0, y0, x1, y1], rgba(PANEL, 255));
-        canvas.outline([x0, y0, x1, y1], 2.0, rgba(EDGE, 255));
+        canvas.fill([x0, y0, x1, y0 + 2.0], rgba(EDGE, 255));
         let hint = if self.request.hint.is_empty() { "Type here" } else { &self.request.hint };
         canvas.text(BIG, hint, x0 + 14.0, y0 + 10.0, rgba(DIM, 255), false);
-        // the text so far, its end showing when it is longer than the box
-        let field = [x0 + 12.0, y0 + 40.0, x1 - 12.0, y0 + 76.0];
+        // the text so far, hidden for a password, its end showing when it
+        // is longer than the box
+        let field = [x0 + 12.0, y0 + 44.0, x1 - 12.0, y0 + 88.0];
         canvas.fill(field, rgba(KEY, 255));
         let room = field[2] - field[0] - 90.0;
-        let mut shown: String = self.text.clone();
+        let mut shown: String = if self.request.password { "*".repeat(self.text.chars().count()) } else { self.text.clone() };
         while !shown.is_empty() && canvas.measure(BIG, &shown) > room {
             shown.remove(0);
         }
-        canvas.text(BIG, &format!("{shown}_"), field[0] + 10.0, field[1] + 8.0, rgba(TEXT, 255), false);
+        canvas.text(BIG, &format!("{shown}_"), field[0] + 10.0, field[1] + 11.0, rgba(TEXT, 255), false);
         let count = format!("{}/{}", self.text.encode_utf16().count(), self.request.max_length);
-        canvas.text(SMALL, &count, field[2] - 10.0, field[1] + 11.0, rgba(DIM, 255), true);
+        canvas.text(SMALL, &count, field[2] - 10.0, field[1] + 14.0, rgba(DIM, 255), true);
         if let Some(note) = &self.note {
-            canvas.text(SMALL, note, x0 + 14.0, y0 + 86.0, rgba(WARNING, 255), false);
+            canvas.text(SMALL, note, x0 + 14.0, y0 + 94.0, rgba(WARNING, 255), false);
         }
-        for (row, keys) in PAGES[self.page].iter().enumerate() {
-            for (column, c) in keys.chars().enumerate() {
-                let area = Self::area(row, column as f32, 1.0);
+        let (rows, items, areas) = (self.rows(), self.items(), self.areas());
+        let confirm = self.request.buttons.len().saturating_sub(1);
+        for (row, keys) in areas.iter().enumerate() {
+            for (column, &area) in keys.iter().enumerate() {
                 let selected = (self.row, self.column) == (row, column);
                 canvas.fill(area, rgba(if selected { HIGHLIGHT } else { KEY }, 255));
-                let label = c.to_string();
-                canvas.text(BIG, &label, (area[0] + area[2] - canvas.measure(BIG, &label)) / 2.0, area[1] + 10.0, rgba(TEXT, 255), false);
+                let (label, color) = match rows.get(row) {
+                    Some(keys) => (keys[column].to_string(), TEXT),
+                    None => match items[column].0 {
+                        Item::Page => (PAGE_NAMES[self.page].to_owned(), TEXT),
+                        Item::Space => ("Space".to_owned(), TEXT),
+                        Item::Delete => ("Delete".to_owned(), TEXT),
+                        Item::Button(button) => {
+                            let ready = button != confirm || self.request.accepts(&self.text);
+                            (self.request.buttons.get(button).cloned().unwrap_or_default(), if ready { TEXT } else { DIM })
+                        }
+                    },
+                };
+                let face = if canvas.measure(BIG, &label) <= area[2] - area[0] - 8.0 { BIG } else { SMALL };
+                canvas.text(face, &label, (area[0] + area[2] - canvas.measure(face, &label)) / 2.0, area[1] + if face == BIG { 16.0 } else { 19.0 }, rgba(color, 255), false);
             }
         }
-        let confirm = self.request.buttons.len().saturating_sub(1);
-        for (index, &(item, first, span)) in self.items().iter().enumerate() {
-            let area = Self::area(4, first, span);
-            let selected = (self.row, self.column) == (4, index);
-            canvas.fill(area, rgba(if selected { HIGHLIGHT } else { KEY }, 255));
-            let (label, color) = match item {
-                Item::Page => (PAGE_NAMES[self.page].to_owned(), TEXT),
-                Item::Space => ("Space".to_owned(), TEXT),
-                Item::Delete => ("Delete".to_owned(), TEXT),
-                Item::Button(button) => {
-                    let ready = button != confirm || self.request.accepts(&self.text);
-                    (self.request.buttons.get(button).cloned().unwrap_or_default(), if ready { TEXT } else { DIM })
-                }
-            };
-            let face = if canvas.measure(BIG, &label) <= area[2] - area[0] - 8.0 { BIG } else { SMALL };
-            canvas.text(face, &label, (area[0] + area[2] - canvas.measure(face, &label)) / 2.0, area[1] + if face == BIG { 10.0 } else { 13.0 }, rgba(color, 255), false);
-        }
-        canvas.fill([x0 + 10.0, y1 - 27.0, x1 - 10.0, y1 - 26.0], rgba([32, 48, 72], 255));
-        canvas.text(SMALL, "A  type    B  delete    X  keys    Y  space", x0 + 14.0, y1 - 21.0, rgba(DIM, 255), false);
+        canvas.fill([x0 + 10.0, y1 - 36.0, x1 - 10.0, y1 - 35.0], rgba([32, 48, 72], 255));
+        let help = if self.request.numpad.is_some() { "A  type    B  delete" } else { "A  type    B  delete    X  keys    Y  space" };
+        canvas.text(SMALL, help, x0 + 14.0, y1 - 28.0, rgba(DIM, 255), false);
         let start = self.request.buttons.last().map_or("OK", String::as_str);
-        canvas.text(SMALL, &format!("Start  {start}"), x1 - 14.0, y1 - 21.0, rgba(DIM, 255), true);
+        canvas.text(SMALL, &format!("Start  {start}"), x1 - 14.0, y1 - 28.0, rgba(DIM, 255), true);
     }
 }
 
@@ -271,7 +294,7 @@ mod tests {
     use zakuro_core::services::keyboard::Valid;
 
     fn request(max_length: usize, buttons: &[&str], valid: Valid) -> Request {
-        Request { hint: "Name".into(), text: String::new(), max_length, buttons: buttons.iter().map(|&label| label.into()).collect(), valid }
+        Request { hint: "Name".into(), max_length, buttons: buttons.iter().map(|&label| label.into()).collect(), valid, ..Request::default() }
     }
 
     fn press(keyboard: &mut Keyboard, key: u16) -> Outcome {
@@ -310,6 +333,7 @@ mod tests {
     fn the_confirming_button_waits_for_text_the_game_takes() {
         let mut keyboard = Keyboard::new(request(10, &["Cancel", "OK"], Valid::NotEmptyNotBlank), &HashSet::new(), false);
         assert!(matches!(press(&mut keyboard, START), Outcome::Redraw));
+        assert_eq!(keyboard.note.as_deref(), Some("It needs some text"));
         press(&mut keyboard, A);
         assert!(matches!(press(&mut keyboard, START), Outcome::Answer(text, 1) if text == "q"));
         assert!(matches!(press(&mut keyboard, SELECT), Outcome::Answer(_, 0)));
@@ -324,13 +348,12 @@ mod tests {
         for _ in 0..3 {
             press(&mut keyboard, DOWN);
         }
-        // column 3 is under the space bar
+        // the space bar is under the fourth key
         assert_eq!((keyboard.row, keyboard.column), (4, 1));
         press(&mut keyboard, A);
         assert_eq!(keyboard.text, " ");
         press(&mut keyboard, UP);
-        assert_eq!((keyboard.row, keyboard.column), (3, 3));
-        press(&mut keyboard, LEFT);
+        assert_eq!(keyboard.row, 3);
         press(&mut keyboard, A);
         assert_eq!(keyboard.text, " c");
     }
@@ -338,12 +361,30 @@ mod tests {
     #[test]
     fn a_finger_types_the_key_under_it() {
         let mut keyboard = Keyboard::new(request(10, &["OK"], Valid::Anything), &HashSet::new(), false);
-        let [left, top, right, bottom] = Keyboard::area(2, 1.0, 1.0);
+        let [left, top, right, bottom] = Keyboard::area(2, 1.0, 1.0, 10.0);
         keyboard.input(&HashSet::new(), Some(((left + right) / 2.0, (top + bottom) / 2.0)));
         keyboard.input(&HashSet::new(), Some(((left + right) / 2.0, (top + bottom) / 2.0)));
         assert_eq!(keyboard.text, "s");
-        let [left, top, ..] = Keyboard::area(4, 6.0, 4.0);
+        let [left, top, ..] = Keyboard::area(4, 6.0, 4.0, 10.0);
         keyboard.input(&HashSet::new(), None);
         assert!(matches!(keyboard.input(&HashSet::new(), Some((left + 5.0, top + 5.0))), Outcome::Answer(text, 0) if text == "s"));
+    }
+
+    /// a number pad types digits and the keys beside its 0, and nothing
+    /// else, the console keeping to them too.
+    #[test]
+    fn a_number_pad_types_only_its_keys() {
+        let request = Request { numpad: Some([Some('-'), None]), ..request(4, &["Cancel", "OK"], Valid::Anything) };
+        let mut keyboard = Keyboard::new(request, &HashSet::new(), false);
+        press(&mut keyboard, A);
+        press(&mut keyboard, X);
+        press(&mut keyboard, Y);
+        for _ in 0..3 {
+            press(&mut keyboard, DOWN);
+        }
+        press(&mut keyboard, A);
+        assert_eq!(keyboard.text, "1-");
+        assert_eq!(keyboard.areas().len(), 5);
+        assert!(keyboard.areas().iter().flatten().all(|&[left, top, right, bottom]| left >= 0.0 && right <= 640.0 && top >= 0.0 && bottom <= 480.0));
     }
 }

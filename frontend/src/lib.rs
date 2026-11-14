@@ -343,10 +343,16 @@ pub fn run(mut args: Vec<String>) {
         let tapped = tapped || [L3, R2].iter().all(|key| keys.contains(key)) && ![L3, R2].iter().all(|key| held.contains(key));
 
         if let Some(open) = typing.as_mut() {
-            // a finger in the keyboard's pixels, which sit as the menu's do
-            let (width, height) = zakuro_gpu::layout_size();
-            let down = if zakuro_gpu::stacked() || height > width { 0.0 } else { (height as f32 - 480.0) / 2.0 };
-            let finger = fingers.first().map(|&(_, x, y)| (x - (width as f32 - 640.0) / 2.0, y - down));
+            // a finger in the keyboard's pixels, over the bottom screen
+            let areas = layout::typing(&settings);
+            let finger = match (second_touch, areas[1]) {
+                (Some((across, down)), _) if zakuro_gpu::second_window() && !settings.swapped => Some((across * 640.0, down * 480.0)),
+                (_, Some(area)) => {
+                    let (left, top, scale) = zakuro_gpu::fitted(area);
+                    fingers.first().map(|&(_, x, y)| ((x - left) / scale, (y - top) / scale))
+                }
+                _ => None,
+            };
             match open.input(&keys, finger) {
                 keyboard::Outcome::None => {}
                 keyboard::Outcome::Redraw => typing_drawn = false,
@@ -370,8 +376,10 @@ pub fn run(mut args: Vec<String>) {
                 if !typing_drawn {
                     let mut canvas = Canvas::new(&font, PANEL);
                     open.draw(&mut canvas);
-                    overlay = Some(Arc::new(canvas.finish()));
-                    system.present_panel(layout::shown(&settings), None, overlays(&overlay, &controls_overlay), settings.smooth, false);
+                    let mut drawn = canvas.finish();
+                    drawn.bottom = true;
+                    overlay = Some(Arc::new(drawn));
+                    system.present_panel(areas, None, overlays(&overlay, &controls_overlay), settings.smooth, false);
                     typing_drawn = true;
                 }
                 std::thread::sleep(frame);
@@ -422,6 +430,7 @@ pub fn run(mut args: Vec<String>) {
                         max_length: 10,
                         buttons: vec!["Cancel".into(), "OK".into()],
                         valid: zakuro_core::services::keyboard::Valid::NotEmptyNotBlank,
+                        ..Default::default()
                     };
                     (typing, typing_drawn, naming) = (Some(keyboard::Keyboard::new(request, &keys, !fingers.is_empty())), false, true);
                     continue;
