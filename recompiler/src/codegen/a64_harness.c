@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
             if (ctx.exit == EXIT_BUDGET) ctx.budget = 1 + resumes % 97;
         }
         for (int i = 0; i < 16; i++) fold(ctx.r[i]);
-        fold(ctx.n | ctx.z << 8 | ctx.c << 16 | (uint64_t)ctx.v << 24 | (uint64_t)ctx.q << 32 | (uint64_t)ctx.thumb << 40);
+        fold(ctx.n | ctx.z << 8 | ctx.c << 16 | (uint64_t)ctx.v << 24 | (uint64_t)ctx.q << 32 | (uint64_t)ctx.thumb << 40 | (uint64_t)ctx.ge << 48);
         fold(((uint64_t)(uint32_t)ctx.budget << 32) | ctx.depth);
         for (int i = 0; i < 32; i++) fold(vfp[i]);
         fold(fpscr);

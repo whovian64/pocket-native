@@ -5,9 +5,16 @@
 //! same budget, so a function runs the same however much of it translates.
 //!
 //! x19 holds the context, x20 the view of memory, w21 the budget, x24 the
-//! VFP registers, x25 fpscr, w0-w14 the guest's r0-r14 and NZCV its flags,
-//! written back to the context and read again around every call. w15-w17,
-//! w22-w23 and v16-v19 are scratch.
+//! VFP registers, x25 fpscr, w0-w14 the guest's r0-r14 and NZCV its flags.
+//! w15-w17, w22-w23 and v16-v19 are scratch.
+//!
+//! a function has two ways in: a_ from the C and the host, which takes the
+//! guest's state from the context and leaves it there, and b_ from another
+//! translated function, which keeps it in registers. a b_ call returning
+//! the plain way hands back x26 set and the address it returns to in w22,
+//! registers live; any other way out writes everything back to the context
+//! and hands back x26 clear. the frame says which way the function came in,
+//! and keeps the C caller's x26.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -62,23 +69,34 @@ pub const PRELUDE: &str = "\t.text
 \tldr w21, [x19, #72]
 .endm
 .macro pn_enter
-\tstp x29, x30, [sp, #-80]!
+\tstp x29, x30, [sp, #-96]!
 \tmov x29, sp
 \tstp x19, x20, [sp, #16]
 \tstp x21, x22, [sp, #32]
 \tstp x23, x24, [sp, #48]
-\tstr x25, [sp, #64]
+\tstp x25, x26, [sp, #64]
+\tstr xzr, [sp, #80]
 \tmov x19, x0
 \tldr x20, [x19, #144]
 \tldr x24, [x19, #112]
 \tldr x25, [x19, #120]
 .endm
+.macro pn_enter_inner
+\tstp x29, x30, [sp, #-96]!
+\tmov x29, sp
+\tstp x19, x20, [sp, #16]
+\tstp x21, x22, [sp, #32]
+\tstp x23, x24, [sp, #48]
+\tstp x25, xzr, [sp, #64]
+\tmov x16, #1
+\tstr x16, [sp, #80]
+.endm
 .macro pn_leave
 \tldp x19, x20, [sp, #16]
 \tldp x21, x22, [sp, #32]
 \tldp x23, x24, [sp, #48]
-\tldr x25, [sp, #64]
-\tldp x29, x30, [sp], #80
+\tldp x25, x26, [sp, #64]
+\tldp x29, x30, [sp], #96
 .endm
 ";
 
@@ -163,8 +181,17 @@ fn dispatch(out: &mut String, w: &Writer) {
     emit!(out, "\tb {}", w.fallback);
 }
 
-/// a return to the address in w22, which may switch to Thumb.
-fn return_to(out: &mut String) {
+/// a return to the address in w22, which may switch to Thumb: to a
+/// translated caller with the registers live, to anything else through the
+/// context.
+fn return_to(out: &mut String, w: &Writer) {
+    let outer = w.local();
+    emit!(out, "\tldr x16, [sp, #80]");
+    emit!(out, "\tcbz x16, {outer}");
+    emit!(out, "\tldp x29, x30, [sp], #96");
+    emit!(out, "\tmov x26, #1");
+    emit!(out, "\tret");
+    emit!(out, "{outer}:");
     emit!(out, "\tpn_flush");
     emit!(out, "\tand w16, w22, #1");
     emit!(out, "\tstrb w16, [x19, #{THUMB}]");
@@ -246,9 +273,56 @@ fn call_out(out: &mut String, w: &Writer, callee: Callee) {
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
 }
 
+/// the way into a translated function for another, or none.
+fn inner(name: &str) -> Option<String> {
+    name.strip_prefix("a_").map(|rest| format!("b_{rest}"))
+}
+
+/// a call into a translated function the registers live, counting depth
+/// as CALL does without touching NZCV, then dec as it comes back. over the
+/// limit everything goes back to the context with r15 at target.
+fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
+    let go = w.local();
+    emit!(out, "\tldr w16, [x19, #{DEPTH}]");
+    emit!(out, "\tadd w16, w16, #1");
+    emit!(out, "\tstr w16, [x19, #{DEPTH}]");
+    emit!(out, "\tsub w17, w16, #{}", DEPTH_LIMIT + 1);
+    emit!(out, "\ttbnz w17, #31, {go}");
+    emit!(out, "\tsub w16, w16, #1");
+    emit!(out, "\tstr w16, [x19, #{DEPTH}]");
+    emit!(out, "\tpn_flush");
+    constant(out, "w16", target);
+    emit!(out, "\tstr w16, [x19, #{R15}]");
+    emit!(out, "\tmov w16, #{EXIT_UNWIND}");
+    emit!(out, "\tstr w16, [x19, #{EXIT}]");
+    emit!(out, "\tpn_leave");
+    emit!(out, "\tret");
+    emit!(out, "{go}:");
+    emit!(out, "\tbl {name}");
+    emit!(out, "\tldr w16, [x19, #{DEPTH}]");
+    emit!(out, "\tsub w16, w16, #1");
+    emit!(out, "\tstr w16, [x19, #{DEPTH}]");
+}
+
 /// a guest call with link the return address, as call in mod.rs writes it,
 /// to Thumb code where thumb.
 fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Option<bool> {
+    if let Some(name) = w.functions.get(&target).and_then(|name| inner(name)).filter(|_| !thumb) {
+        constant(out, "w14", link);
+        call_inner(out, w, target, &name);
+        let (live, done) = (w.local(), w.local());
+        emit!(out, "\tcbnz x26, {live}");
+        returned(out, w, link);
+        emit!(out, "\tb {done}");
+        // back the plain way: on unless it isn't to the next instruction
+        emit!(out, "{live}:");
+        constant(out, "w17", link);
+        emit!(out, "\tsub w16, w22, w17");
+        emit!(out, "\tcbz w16, {done}");
+        jump_to(out, w);
+        emit!(out, "{done}:");
+        return Some(true);
+    }
     constant(out, "w14", link);
     emit!(out, "\tpn_flush");
     constant(out, "w16", target);
@@ -292,6 +366,15 @@ fn returned(out: &mut String, w: &Writer, link: u32) {
 fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
     if w.labels.contains(&target) {
         emit!(out, "\tb {}", w.block(target));
+    } else if let Some(name) = w.functions.get(&target).and_then(|name| inner(name)) {
+        // a tail call: its return is this function's
+        let back = w.local();
+        call_inner(out, w, target, &name);
+        emit!(out, "\tcbnz x26, {back}");
+        emit!(out, "\tpn_leave");
+        emit!(out, "\tret");
+        emit!(out, "{back}:");
+        return_to(out, w);
     } else if let Some(name) = w.functions.get(&target) {
         emit!(out, "\tpn_flush");
         constant(out, "w16", target);
@@ -363,9 +446,10 @@ fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
         // nop and the other hints
         0b001 if (op >> 23) & 3 == 0b10 && op & (1 << 20) == 0 => (op & (1 << 21) != 0 && (op >> 16) & 0xF == 0).then_some(true),
         0b001 => data_processing(out, w, a, op),
-        0b010 => single_transfer(out, a, op),
-        0b011 if op & 0x10 == 0 => single_transfer(out, a, op),
+        0b010 => single_transfer(out, w, a, op),
+        0b011 if op & 0x10 == 0 => single_transfer(out, w, a, op),
         0b011 if (op >> 23) & 3 == 0b01 => pack_extend_reverse(out, op),
+        0b011 if (op >> 23) & 3 == 0b00 => parallel(out, op),
         0b100 => block_transfer(out, w, a, op),
         0b101 => {
             let target = (a + 8).wrapping_add(sign_extend_24(op & 0x00FF_FFFF) << 2);
@@ -456,6 +540,21 @@ fn pack_extend_reverse(out: &mut String, op: u32) -> Option<bool> {
                 emit!(out, "\tmov w{rd}, w17");
             }
         }
+        // sel, each byte from n where its ge bit is set and from m where not
+        (0b01000, 0b101) => {
+            if rn == 15 {
+                return None;
+            }
+            emit!(out, "\tldrb w16, [x19, #{GE}]");
+            for i in 0..4 {
+                emit!(out, "\tubfx w15, w16, #{i}, #1");
+                emit!(out, "\tneg w15, w15");
+                emit!(out, "\tbfi w17, w15, #{}, #8", 8 * i);
+            }
+            emit!(out, "\tand w15, w{rn}, w17");
+            emit!(out, "\tbic w16, w{rm}, w17");
+            emit!(out, "\torr w{rd}, w15, w16");
+        }
         (0b01011, 0b001) => emit!(out, "\trev w{rd}, w{rm}"),
         (0b01011, 0b101) => emit!(out, "\trev16 w{rd}, w{rm}"),
         (0b01111, 0b001) => emit!(out, "\trbit w{rd}, w{rm}"),
@@ -464,6 +563,73 @@ fn pack_extend_reverse(out: &mut String, op: u32) -> Option<bool> {
             emit!(out, "\tsxth w{rd}, w16");
         }
         _ => return None,
+    }
+    Some(true)
+}
+
+/// the parallel adds and subtracts, sadd16 to uhsub8, lane by lane as
+/// media_lane does: each lane widened and added or subtracted at 32 bits,
+/// halved or saturated, ge from the sum for the plain forms alone.
+/// saturating narrows through v16, which leaves NZCV alone.
+fn parallel(out: &mut String, op: u32) -> Option<bool> {
+    let op1 = (op >> 20) & 0x1F;
+    let op2 = (op >> 5) & 7;
+    let (rd, rn, rm) = ((op >> 12) & 0xF, (op >> 16) & 0xF, op & 0xF);
+    if [rd, rn, rm].contains(&15) || op1 & 3 == 0 || matches!(op2, 5 | 6) {
+        return None;
+    }
+    let signed = op1 & 4 == 0;
+    let (saturating, halving) = (op1 & 3 == 2, op1 & 3 == 3);
+    let plain = !saturating && !halving;
+    // each lane: where in n, where in m, its width and whether it subtracts
+    let lanes: Vec<(u32, u32, u32, bool)> = if op2 <= 3 {
+        let cross = op2 == 1 || op2 == 2;
+        vec![(0, if cross { 16 } else { 0 }, 16, op2 == 1 || op2 == 3), (16, if cross { 0 } else { 16 }, 16, op2 == 2 || op2 == 3)]
+    } else {
+        (0..4).map(|i| (8 * i, 8 * i, 8, op2 == 7)).collect()
+    };
+    let extract = if signed { "sbfx" } else { "ubfx" };
+    if plain {
+        emit!(out, "\tmov w23, #0");
+    }
+    for (index, &(at_n, at_m, width, subtract)) in lanes.iter().enumerate() {
+        emit!(out, "\t{extract} w16, w{rn}, #{at_n}, #{width}");
+        emit!(out, "\t{extract} w17, w{rm}, #{at_m}, #{width}");
+        emit!(out, "\t{} w16, w16, w17", if subtract { "sub" } else { "add" });
+        if plain {
+            if signed || subtract {
+                emit!(out, "\tlsr w15, w16, #31");
+                emit!(out, "\teor w15, w15, #1");
+            } else {
+                emit!(out, "\tlsr w15, w16, #{width}");
+            }
+            let bits = if width == 16 { 2 } else { 1 };
+            for bit in 0..bits {
+                emit!(out, "\torr w23, w23, w15, lsl #{}", index as u32 * bits + bit);
+            }
+        } else if halving {
+            emit!(out, "\tasr w16, w16, #1");
+        } else {
+            emit!(out, "\tfmov s16, w16");
+            match (signed, width) {
+                (true, 16) => emit!(out, "\tsqxtn h16, s16"),
+                (true, _) => {
+                    emit!(out, "\tsqxtn h16, s16");
+                    emit!(out, "\tsqxtn b16, h16");
+                }
+                (false, 16) => emit!(out, "\tsqxtun h16, s16"),
+                (false, _) => {
+                    emit!(out, "\tsqxtun h16, s16");
+                    emit!(out, "\tuqxtn b16, h16");
+                }
+            }
+            emit!(out, "\tfmov w16, s16");
+        }
+        emit!(out, "\tbfi w22, w16, #{at_n}, #{width}");
+    }
+    emit!(out, "\tmov w{rd}, w22");
+    if plain {
+        emit!(out, "\tstrb w23, [x19, #{GE}]");
     }
     Some(true)
 }
@@ -775,7 +941,7 @@ fn branch_exchange(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
         return Some(true);
     }
     if rm == 14 {
-        return_to(out);
+        return_to(out, w);
     } else {
         jump_to(out, w);
     }
@@ -1009,21 +1175,17 @@ fn data_processing(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
         return Some(true);
     }
     // mov pc, lr returns, any other write to pc jumps
+    emit!(out, "\tand w22, w22, #0xfffffffc");
     if opcode == 13 && op & 0x0200_0FFF == 14 {
-        emit!(out, "\tpn_flush");
-        emit!(out, "\tand w16, w22, #0xfffffffc");
-        emit!(out, "\tstr w16, [x19, #{R15}]");
-        emit!(out, "\tpn_leave");
-        emit!(out, "\tret");
+        return_to(out, w);
     } else {
-        emit!(out, "\tand w22, w22, #0xfffffffc");
         dispatch(out, w);
     }
     Some(false)
 }
 
 /// ldr, str, ldrb and strb.
-fn single_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
+fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     let rn = (op >> 16) & 0xF;
     let rd = (op >> 12) & 0xF;
     let pre = op & (1 << 24) != 0;
@@ -1077,7 +1239,7 @@ fn single_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
         }
         if rd == 15 {
             emit!(out, "\tmov w22, w16");
-            return_to(out);
+            return_to(out, w);
             return Some(false);
         }
         emit!(out, "\tmov w{rd}, w16");
@@ -1196,7 +1358,7 @@ fn block_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
             if register == 15 {
                 emit!(out, "\tldr w22, [x20, w17, uxtw]");
                 if rn == 13 {
-                    return_to(out);
+                    return_to(out, w);
                 } else {
                     jump_to(out, w);
                 }
@@ -1350,6 +1512,13 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
     emit!(out, "\tpn_enter");
     emit!(out, "\tpn_reload");
     emit!(out, "\tb {}", w.block(entry));
+    let inner = format!("b_{entry:08X}");
+    emit!(out, "\t.globl {inner}");
+    emit!(out, "\t.hidden {inner}");
+    emit!(out, "\t.type {inner}, %function");
+    emit!(out, "{inner}:");
+    emit!(out, "\tpn_enter_inner");
+    emit!(out, "\tb {}", w.block(entry));
     let mut stubs = String::new();
     for (start, run, text, vector) in blocks(program, &w, function) {
         emit!(out, "{}:", w.block(start));
@@ -1488,16 +1657,28 @@ mod tests {
         let rn = if r.below(3) == 0 { 15 } else { r.below(11) };
         let cond = r.condition() << 28;
         let form = |op1: u32, op2: u32, middle: u32| cond | 0b011 << 25 | op1 << 20 | rn << 16 | rd | middle << 7 | op2 << 5 | 1 << 4 | rm;
-        match r.below(8) {
+        match r.below(12) {
             0..=2 => {
                 let op1 = [0b01010, 0b01011, 0b01110, 0b01111][r.below(4) as usize];
                 form(op1, 0b011, r.below(4) << 3)
             }
+            8..=10 => {
+                let op1 = [1, 2, 3, 5, 6, 7][r.below(6) as usize];
+                form(op1, [0, 1, 2, 3, 4, 7][r.below(6) as usize], 0x1E)
+            }
+            11 => form(0b01000, 0b101, 0x1E),
             3 => form(0b01000, 2 * r.below(4), r.below(32)),
             4 => form([0b01011, 0b01111][r.below(2) as usize], [0b001, 0b101][r.below(2) as usize], 0x1E),
             5 => form([0b01000, 0b01100][r.below(2) as usize], 0b011, r.below(4) << 3),
             6 => form(0b01010, 2 * r.below(4), r.below(32)),
-            _ => form(0b00001, 0b000, 0x1E),
+            _ => {
+                if r.below(4) == 0 {
+                    form(0b01000, 0b101, 0x1E)
+                } else {
+                    let op1 = [1, 2, 3, 5, 6, 7][r.below(6) as usize];
+                    form(op1, [0, 1, 2, 3, 4, 7][r.below(6) as usize], 0x1E)
+                }
+            }
         }
     }
 
@@ -1609,6 +1790,10 @@ mod tests {
         words.resize(((CALLEE - BASE) / 4) as usize, 0xE1A0_0000);
         for _ in 0..1 + r.below(6) {
             words.push(data_processing(&mut r) & !(0xF << 12) | r.below(4) << 12);
+        }
+        // now and then back to the instruction after the next, not the next
+        if r.below(4) == 0 {
+            words.push(0xE28E_E004);
         }
         words.push(0xE12F_FF1E);
         words.resize(((THUMB_CALLEE - BASE) / 4) as usize, 0xE1A0_0000);
