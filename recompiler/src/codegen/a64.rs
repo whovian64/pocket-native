@@ -1679,13 +1679,21 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     }
     // ldr pc, [sp], 4 is a pop, any other load of pc a jump
     let pop = rn == 13 && !pre && up && !register_offset && op & 0xFFF == 4;
-    let base = if rn == 15 {
+    let sign = if up { "add" } else { "sub" };
+    // a literal's address is known
+    let literal = rn == 15 && !register_offset && pre;
+    let base = if literal {
+        let offset = op & 0xFFF;
+        guest(out, w, "w17", if up { (a + 8).wrapping_add(offset) } else { (a + 8).wrapping_sub(offset) });
+        "w17".to_owned()
+    } else if rn == 15 {
         guest(out, w, "w15", a + 8);
         "w15".to_owned()
     } else {
         format!("w{rn}")
     };
-    let sign = if up { "add" } else { "sub" };
+    // no offset and no writeback, the base itself
+    let plain = !register_offset && op & 0xFFF == 0 && !writeback;
     if register_offset {
         let m = format!("w{}", op & 0xF);
         match ((op >> 5) & 3, (op >> 7) & 0x1F) {
@@ -1704,10 +1712,10 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
                 emit!(out, "\t{sign} w17, {base}, w16");
             }
         }
-    } else {
+    } else if !literal && !plain {
         emit!(out, "\t{sign} w17, {base}, #{}", op & 0xFFF);
     }
-    let address = if pre { "w17" } else { base.as_str() };
+    let address = if pre && !plain { "w17" } else { base.as_str() };
     let suffix = if byte { "b" } else { "" };
     if load {
         // straight into rd, which a writeback of the same register gives way to
@@ -1829,22 +1837,42 @@ fn block_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
     }
     let span = list.count_ones() * 4;
     let base = format!("w{rn}");
-    match (up, pre) {
-        (true, false) => emit!(out, "\tmov w17, {base}"),
-        (true, true) => emit!(out, "\tadd w17, {base}, #4"),
-        (false, false) => emit!(out, "\tsub w17, {base}, #{}", span - 4),
-        (false, true) => emit!(out, "\tsub w17, {base}, #{span}"),
-    }
-    emit!(out, "\t{} w23, {base}, #{span}", if up { "add" } else { "sub" });
+    let sign = if up { "add" } else { "sub" };
     // the words in pairs from the lowest one's host address: the same but
     // for a list running past the top of the guest's memory, which no code
-    // does
-    emit!(out, "\tadd x17, x20, w17, uxtw");
+    // does. a base not in the list takes its new value first, which a push
+    // starts from
+    let early = writeback && list & (1 << rn) == 0;
+    if writeback && !early && !load {
+        emit!(out, "\t{sign} w23, {base}, #{span}");
+    }
+    let lowest = match (up, pre) {
+        (true, false) => 0,
+        (true, true) => 4,
+        (false, false) => -(span as i32 - 4),
+        (false, true) => -(span as i32),
+    };
+    if early && !up && pre {
+        emit!(out, "\tsub {base}, {base}, #{span}");
+        emit!(out, "\tadd x17, x20, {base}, uxtw");
+    } else {
+        match lowest {
+            0 => emit!(out, "\tadd x17, x20, {base}, uxtw"),
+            1.. => {
+                emit!(out, "\tadd w17, {base}, #{lowest}");
+                emit!(out, "\tadd x17, x20, w17, uxtw");
+            }
+            _ => {
+                emit!(out, "\tsub w17, {base}, #{}", -lowest);
+                emit!(out, "\tadd x17, x20, w17, uxtw");
+            }
+        }
+        if early {
+            emit!(out, "\t{sign} {base}, {base}, #{span}");
+        }
+    }
     let registers: Vec<u32> = (0..16).filter(|i| list & (1 << i) != 0).collect();
     if load {
-        if writeback && list & (1 << rn) == 0 {
-            emit!(out, "\tmov w{rn}, w23");
-        }
         let loaded: Vec<u32> = registers.iter().copied().filter(|&register| register != 15).collect();
         for (i, pair) in loaded.chunks(2).enumerate() {
             match pair {
@@ -1884,7 +1912,7 @@ fn block_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
                 _ => unreachable!(),
             }
         }
-        if writeback {
+        if writeback && !early {
             emit!(out, "\tmov w{rn}, w23");
         }
     }
@@ -2628,6 +2656,26 @@ mod tests {
             0xEE30_0A20, // vadd.f32 s0, s0, s1
             0xED8C_0A00, // vstr s0, [r12]
             0xEC8C_0A02, // 1: vstmia r12, {s0-s1}
+            0xE12F_FF1E,
+        ]);
+    }
+
+    /// loads from pc, after it and before.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn literals_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        alike(7, &[
+            0xE59F_0004, // ldr r0, [pc, #4]
+            0xE51F_1008, // ldr r1, [pc, #-8]
+            0xE5DF_2003, // ldrb r2, [pc, #3]
+            0xED9F_0A02, // vldr s0, [pc, #8]
+            0xED5F_0A01, // vldr s1, [pc, #-4]
+            0xE88C_0007, // stm r12, {r0-r2}
+            0xED8C_0A04, // vstr s0, [r12, #16]
+            0xEDCC_0A05, // vstr s1, [r12, #20]
             0xE12F_FF1E,
         ]);
     }
