@@ -46,14 +46,12 @@ const PRELUDE: &str = "\t.text
 \tstp w12, w13, [x19, #48]
 \tstr w14, [x19, #56]
 \tmrs x16, nzcv
-\tubfx w17, w16, #31, #1
-\tubfx w15, w16, #30, #1
-\torr w17, w17, w15, lsl #8
-\tubfx w15, w16, #29, #1
-\torr w17, w17, w15, lsl #16
-\tubfx w15, w16, #28, #1
-\torr w17, w17, w15, lsl #24
-\tstr w17, [x19, #64]
+\trbit w16, w16
+\tmovz w17, #0x4081
+\tmovk w17, #0x20, lsl #16
+\tmul w16, w16, w17
+\tand w16, w16, #0x01010101
+\tstr w16, [x19, #64]
 \tstr w21, [x19, #72]
 .endm
 .macro pn_reload_inline

@@ -141,6 +141,9 @@ int main(int argc, char **argv) {
         ctx.c = (s >> 2) & 1;
         ctx.v = (s >> 3) & 1;
         ctx.budget = 1 + (int32_t)(mix(s) % 3000);
+        /* now and then the first resume right at the depth limit, after
+           which the host starts each at 0 */
+        uint32_t depth = mix(s + 5) % 4 == 0 ? 2047 + (uint32_t)(mix(s + 6) & 1) : 0;
         /* VFP registers mostly ordinary numbers, now and then a zero, a
            subnormal or anything at all; fpscr mostly flushing to zero with
            default NaNs as games run, now and then not, now and then a
@@ -173,12 +176,13 @@ int main(int argc, char **argv) {
                 break;
             }
             ctx.exit = 0;
+            ctx.depth = resumes == 0 ? depth : 0;
             int32_t given = ctx.budget;
             code(&ctx);
             ran += given - ctx.budget;
             /* the host counts cycles from what is left of the budget */
             fold(((uint64_t)ctx.exit << 32) | ctx.r[15]);
-            fold((uint32_t)ctx.budget);
+            fold((uint32_t)ctx.budget | (uint64_t)ctx.depth << 32);
             if (t == traced) {
                 printf("%d exit %u r15 %08x", resumes, ctx.exit, ctx.r[15]);
                 for (int i = 0; i < 15; i++) printf(" %08x", ctx.r[i]);
