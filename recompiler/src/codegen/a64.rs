@@ -429,6 +429,33 @@ fn pack_extend_reverse(out: &mut String, op: u32) -> Option<bool> {
                 emit!(out, "\tadd w{rd}, w{rn}, w16");
             }
         }
+        // sxtb16 and uxtb16, adding halves apart
+        (0b01000 | 0b01100, 0b011) => {
+            let rotate = ((op >> 10) & 3) * 8;
+            if rotate == 0 {
+                emit!(out, "\tmov w16, w{rm}");
+            } else {
+                emit!(out, "\tror w16, w{rm}, #{rotate}");
+            }
+            if op1 == 0b01100 {
+                emit!(out, "\tand w16, w16, #0x00ff00ff");
+            } else {
+                emit!(out, "\tsxtb w17, w16");
+                emit!(out, "\tand w17, w17, #0xffff");
+                emit!(out, "\tlsr w15, w16, #16");
+                emit!(out, "\tsxtb w15, w15");
+                emit!(out, "\torr w16, w17, w15, lsl #16");
+            }
+            if rn == 15 {
+                emit!(out, "\tmov w{rd}, w16");
+            } else {
+                emit!(out, "\tadd w17, w{rn}, w16");
+                emit!(out, "\tlsr w15, w{rn}, #16");
+                emit!(out, "\tadd w15, w15, w16, lsr #16");
+                emit!(out, "\tbfi w17, w15, #16, #16");
+                emit!(out, "\tmov w{rd}, w17");
+            }
+        }
         (0b01011, 0b001) => emit!(out, "\trev w{rd}, w{rm}"),
         (0b01011, 0b101) => emit!(out, "\trev16 w{rd}, w{rm}"),
         (0b01111, 0b001) => emit!(out, "\trbit w{rd}, w{rm}"),
@@ -1276,7 +1303,14 @@ fn kind(op: u32) -> &'static str {
         0b000 if op & 0x10 != 0 => "shifts by a register",
         0b001 if (op >> 23) & 3 == 0b10 && op & (1 << 20) == 0 => "msr",
         0b000 | 0b001 => "data processing writing pc",
-        0b010 | 0b011 if op & (1 << 25) != 0 && op & 0x10 != 0 => "media",
+        0b010 | 0b011 if op & (1 << 25) != 0 && op & 0x10 != 0 => match ((op >> 23) & 3, (op >> 20) & 7, (op >> 5) & 7) {
+            (0b00, ..) => "media: parallel adds and subtracts",
+            (0b01, 0b000, 0b011) | (0b01, 0b100, 0b011) => "media: packed extends",
+            (0b01, 0b000, 0b101) => "media: sel",
+            (0b01, ..) => "media: saturating",
+            (0b10, ..) => "media: dual multiplies",
+            _ => "media: usad8 and the rest",
+        },
         0b010 | 0b011 => "loads of pc and literal writebacks",
         0b100 => "ldm and stm",
         0b101 => "calls to unknown targets",
@@ -1461,7 +1495,7 @@ mod tests {
             }
             3 => form(0b01000, 2 * r.below(4), r.below(32)),
             4 => form([0b01011, 0b01111][r.below(2) as usize], [0b001, 0b101][r.below(2) as usize], 0x1E),
-            5 => form(0b01000, 0b011, 0),
+            5 => form([0b01000, 0b01100][r.below(2) as usize], 0b011, r.below(4) << 3),
             6 => form(0b01010, 2 * r.below(4), r.below(32)),
             _ => form(0b00001, 0b000, 0x1E),
         }
