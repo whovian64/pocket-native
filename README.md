@@ -175,8 +175,9 @@ Every setting has a line of help at the bottom of the menu.
 - **Controls:** touch cursor speed, the touch cursor shown or hidden
   (on two screens Auto shows it only while the stick moves it), Nintendo
   or Xbox A/B, left stick as
-  circle pad or D-pad, the D-pad's job, tilt directions, and the touch
-  controls on Android
+  circle pad or D-pad, the D-pad's job, tilt directions, the touch
+  controls on Android, and **Button mapping**: which of the handheld's
+  buttons press the 3DS's, for each game
 - **Game:** resume, advanced settings, reset, quit
 
 The layout and which screen is on top are kept per game, a game played

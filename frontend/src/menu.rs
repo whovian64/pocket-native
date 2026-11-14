@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 
 use crate::font::{rgba, Canvas};
-use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
+use crate::input::{A, B, DOWN, LEFT, MAPPED, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
+use crate::settings::{Advanced, Aspect, Buttons, Cursor, Dpad, GameSettings, Key, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -60,6 +60,10 @@ enum Field {
     Compatible,
     Defaults,
     Back,
+    /// the game's button mapping page, a 3DS button on it, and clearing it.
+    Mapping,
+    Map(usize),
+    Unmap,
 }
 
 const ON_OFF: [&str; 2] = ["Off", "On"];
@@ -109,12 +113,13 @@ enum Page {
     #[default]
     Main,
     Advanced,
+    Buttons,
 }
 
 impl Field {
     /// picked with A rather than changed with left and right.
     fn action(self) -> bool {
-        matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back | Field::EditControls | Field::Name)
+        matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back | Field::EditControls | Field::Name | Field::Mapping | Field::Unmap)
     }
 }
 
@@ -182,7 +187,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::ShowBuilding, Field::ShowSaving, Field::Rotation])),
             ("Performance", only(vec![Field::FrameCap, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", only(vec![Field::TouchSpeed, Field::Cursor, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
+            ("Controls", only(vec![Field::TouchSpeed, Field::Cursor, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls, Field::Mapping])),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
@@ -194,6 +199,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("System - requires restart", vec![Field::Language, Field::Region, Field::Name, Field::Toggle(32)]),
             ("", vec![Field::Restart, Field::Compatible, Field::Defaults, Field::Back]),
         ],
+        Page::Buttons => vec![("The handheld's button for each 3DS one", (0..MAPPED.len()).map(Field::Map).collect()), ("", vec![Field::Unmap, Field::Back])],
     }
 }
 
@@ -295,6 +301,12 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
         Field::Compatible => ("Most compatible", String::new()),
         Field::Defaults => ("Reset to defaults", String::new()),
         Field::Back => ("Back", String::new()),
+        Field::Mapping => ("Button mapping", if game.buttons.is_empty() { "→".into() } else { "Changed →".into() }),
+        Field::Map(index) => {
+            let name = MAPPED[index].0;
+            return (format!("3DS {name}"), game.buttons.get(name).map_or("Default".into(), |&key| key_name(key).into()));
+        }
+        Field::Unmap => ("Every button as it was", String::new()),
     };
     (name.to_owned(), value)
 }
@@ -351,7 +363,16 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::Region => game.region = (game.region as isize + by).rem_euclid(REGIONS.len() as isize) as u8,
         Field::Compatible => game.advanced = Some(Advanced::compatible(Advanced::of(game, profile))),
         Field::Defaults => game.advanced = None,
-        Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back | Field::EditControls | Field::Name => {}
+        Field::Map(index) => {
+            let name = MAPPED[index].0;
+            let choices = [None, Some(Key::A), Some(Key::B), Some(Key::X), Some(Key::Y), Some(Key::L), Some(Key::R), Some(Key::Select), Some(Key::Start), Some(Key::Off)];
+            match step(&choices, game.buttons.get(name).copied(), by) {
+                Some(key) => game.buttons.insert(name.to_owned(), key),
+                None => game.buttons.remove(name),
+            };
+        }
+        Field::Unmap => game.buttons.clear(),
+        Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back | Field::EditControls | Field::Name | Field::Mapping => {}
     }
 }
 
@@ -395,6 +416,24 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::Compatible => "Turns off every speed hack a game could trip over, then restart. If that helps, turn them back on one at a time.",
         Field::Defaults => "Back to what this game starts with.",
         Field::Back => "Back to the menu.",
+        Field::Mapping => "Which of the handheld's buttons press the 3DS's, for this game.",
+        Field::Map(_) => "The handheld button that presses this 3DS button in this game. Default follows the A/B layout.",
+        Field::Unmap => "Every button back as the controls set them.",
+    }
+}
+
+/// a handheld button as the mapping page names it.
+fn key_name(key: Key) -> &'static str {
+    match key {
+        Key::A => "A",
+        Key::B => "B",
+        Key::X => "X",
+        Key::Y => "Y",
+        Key::L => "L",
+        Key::R => "R",
+        Key::Select => "Select",
+        Key::Start => "Start",
+        Key::Off => "Off",
     }
 }
 
@@ -432,9 +471,10 @@ impl Menu {
 
     /// back from the advanced settings to the entry that opened them.
     fn back(&mut self, profile: &Profile) -> Action {
+        let from = if self.page == Page::Buttons { Field::Mapping } else { Field::Advanced };
         let fields: Vec<Field> = sections(Page::Main, profile).into_iter().flat_map(|(_, fields)| fields).collect();
         (self.page, self.confirm) = (Page::Main, None);
-        self.cursor = fields.iter().position(|&field| field == Field::Advanced).unwrap_or(0);
+        self.cursor = fields.iter().position(|&field| field == from).unwrap_or(0);
         Action::Redraw
     }
 
@@ -465,7 +505,7 @@ impl Menu {
             if self.confirm.take().is_some() {
                 return Action::Redraw;
             }
-            if self.page == Page::Advanced {
+            if self.page != Page::Main {
                 return self.back(profile);
             }
             self.open = false;
@@ -481,6 +521,10 @@ impl Menu {
             }
             Field::Advanced => {
                 (self.page, self.cursor) = (Page::Advanced, 0);
+                Action::Redraw
+            }
+            Field::Mapping => {
+                (self.page, self.cursor) = (Page::Buttons, 0);
                 Action::Redraw
             }
             Field::Back => self.back(profile),
@@ -508,7 +552,11 @@ impl Menu {
         canvas.fill([x0, y0, x1, y1], rgba(PANEL, 255));
         canvas.fill([x0 + 2.0, y0 + 2.0, x1 - 2.0, y0 + 30.0], rgba(HEADER, 255));
         canvas.outline([x0, y0, x1, y1], 2.0, rgba(EDGE, 255));
-        let (heading, state) = if self.page == Page::Advanced { ("Advanced", "This game") } else { ("Pocket Native", "Paused") };
+        let (heading, state) = match self.page {
+            Page::Main => ("Pocket Native", "Paused"),
+            Page::Advanced => ("Advanced", "This game"),
+            Page::Buttons => ("Buttons", "This game"),
+        };
         canvas.text(BIG, heading, x0 + 14.0, y0 + 7.0, rgba(TEXT, 255), false);
         let mut left = x0 + 14.0 + canvas.measure(BIG, heading) + 16.0;
         if self.page == Page::Main {
@@ -737,7 +785,7 @@ mod tests {
         let font = Font::load();
         let canvas = Canvas::new(&font, (640, 480));
         let profile = Profile::default();
-        let long: Vec<String> = [Page::Main, Page::Advanced]
+        let long: Vec<String> = [Page::Main, Page::Advanced, Page::Buttons]
             .into_iter()
             .flat_map(|page| sections(page, &profile).into_iter().flat_map(|(_, fields)| fields))
             .filter_map(|field| {
@@ -784,5 +832,23 @@ mod tests {
                 assert!(lines.len() <= 2, "{}: {lines:?}", path.display());
             }
         }
+    }
+
+    /// a 3DS button steps through the handheld's, back to default, and back
+    /// on the page lands on the row that opened it.
+    #[test]
+    fn the_button_page_maps_and_goes_back() {
+        let (mut settings, mut game, profile) = (Settings::default(), GameSettings::default(), Profile::default());
+        change(Field::Map(0), 1, &mut settings, &mut game, &profile);
+        assert_eq!(game.buttons.get("A"), Some(&Key::A));
+        change(Field::Map(0), -1, &mut settings, &mut game, &profile);
+        change(Field::Map(0), -1, &mut settings, &mut game, &profile);
+        assert_eq!(game.buttons.get("A"), Some(&Key::Off));
+        change(Field::Unmap, 1, &mut settings, &mut game, &profile);
+        assert!(game.buttons.is_empty());
+        let mut menu = Menu { page: Page::Buttons, ..Menu::default() };
+        menu.back(&profile);
+        let fields: Vec<Field> = sections(Page::Main, &profile).into_iter().flat_map(|(_, fields)| fields).collect();
+        assert_eq!(fields[menu.cursor], Field::Mapping);
     }
 }

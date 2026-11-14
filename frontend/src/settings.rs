@@ -226,11 +226,28 @@ pub struct GameSettings {
     /// the screens' layout and swap the game was last left in.
     pub layout: Option<Layout>,
     pub swapped: Option<bool>,
+    /// the game's own buttons: a 3DS button, by name, to the handheld's that
+    /// presses it, the others as the controls set them.
+    pub buttons: BTreeMap<String, Key>,
+}
+
+/// a handheld button in a game's mapping, or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Key {
+    A,
+    B,
+    X,
+    Y,
+    L,
+    R,
+    Select,
+    Start,
+    Off,
 }
 
 impl Default for GameSettings {
     fn default() -> Self {
-        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None, layout: None, swapped: None }
+        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None, layout: None, swapped: None, buttons: BTreeMap::new() }
     }
 }
 

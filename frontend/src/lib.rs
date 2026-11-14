@@ -526,7 +526,7 @@ pub fn run(mut args: Vec<String>) {
         let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
         let unshown = shown_only && as_played && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
         system.skip_frames(skip, unshown, most_skipped);
-        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
+        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings, &game.buttons) };
         let (c_stick_x, c_stick_y) = if c_stick && !hotkey { (input::stick(axes[3]), -input::stick(axes[4])) } else { (0.0, 0.0) };
         if c_stick && !hotkey {
             buttons.set(PadState::ZL, keys.contains(&L2));
