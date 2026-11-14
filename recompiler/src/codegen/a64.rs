@@ -1024,34 +1024,70 @@ fn vfp_load_store(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
     } else {
         format!("w{rn}")
     };
-    match (up, pre && !writeback) {
-        (true, true) => emit!(out, "\tadd w17, {base}, #{offset}"),
-        (true, false) => emit!(out, "\tmov w17, {base}"),
-        (false, _) => emit!(out, "\tsub w17, {base}, #{offset}"),
-    }
+    // each address from the base, which the transfers leave as it is: a
+    // double's two words as one, a cached single straight to its register
+    let from = match (up, pre && !writeback) {
+        (true, true) => offset as i32,
+        (true, false) => 0,
+        (false, _) => -(offset as i32),
+    };
     for i in 0..count.max(1) {
-        let words: Vec<u32> = if double { vec![((first + i) * 2) & 31, ((first + i) * 2 + 1) & 31] } else { vec![(first + i) & 31] };
-        for (j, word) in words.into_iter().enumerate() {
-            let address = if j == 0 {
-                "w17"
-            } else {
-                emit!(out, "\tadd w22, w17, #4");
-                "w22"
-            };
+        let at = from + (i * if double { 8 } else { 4 }) as i32;
+        let address = match at {
+            0 => base.clone(),
+            1.. => {
+                emit!(out, "\tadd w17, {base}, #{at}");
+                "w17".to_owned()
+            }
+            _ => {
+                emit!(out, "\tsub w17, {base}, #{}", -at);
+                "w17".to_owned()
+            }
+        };
+        // as one unless the block keeps either single in a register
+        let pair = pair_singles(first + i).map(|single| w.cached(single, load));
+        if double && pair == [None, None] {
+            let slot = 8 * ((first + i) & 15);
             if load {
-                emit!(out, "\tldr w16, [x20, {address}, uxtw]");
-                word_store(out, w, word, "w16");
+                emit!(out, "\tldr x16, [x20, {address}, uxtw]");
+                emit!(out, "\tstr x16, [x24, #{slot}]");
             } else {
-                word_load(out, w, word, "w16");
-                emit!(out, "\tstr w16, [x20, {address}, uxtw]");
+                emit!(out, "\tldr x16, [x24, #{slot}]");
+                emit!(out, "\tstr x16, [x20, {address}, uxtw]");
+            }
+            continue;
+        }
+        let words = if double { vec![(pair[0], pair_singles(first + i)[0]), (pair[1], pair_singles(first + i)[1])] } else { vec![(w.cached((first + i) & 31, load), (first + i) & 31)] };
+        for (j, (host, single)) in words.into_iter().enumerate() {
+            let address = if j == 0 {
+                address.clone()
+            } else {
+                emit!(out, "\tadd w22, {address}, #4");
+                "w22".to_owned()
+            };
+            match (load, host) {
+                (true, Some(host)) => emit!(out, "\tldr s{host}, [x20, {address}, uxtw]"),
+                (false, Some(host)) => emit!(out, "\tstr s{host}, [x20, {address}, uxtw]"),
+                (true, None) => {
+                    emit!(out, "\tldr w16, [x20, {address}, uxtw]");
+                    emit!(out, "\tstr w16, [x24, #{}]", 4 * single);
+                }
+                (false, None) => {
+                    emit!(out, "\tldr w16, [x24, #{}]", 4 * single);
+                    emit!(out, "\tstr w16, [x20, {address}, uxtw]");
+                }
             }
         }
-        emit!(out, "\tadd w17, w17, #{}", if double { 8 } else { 4 });
     }
     if writeback {
         emit!(out, "\t{} w{rn}, w{rn}, #{offset}", if up { "add" } else { "sub" });
     }
     Some(true)
+}
+
+/// the singles a double is made of.
+fn pair_singles(double: u32) -> [u32; 2] {
+    [(double * 2) & 31, (double * 2 + 1) & 31]
 }
 
 /// bx and blx through a register: bx lr returns, any other bx jumps, and
@@ -2276,6 +2312,28 @@ mod tests {
         }
         words.push(0xE12F_FF1E);
         alike(0, &words);
+    }
+
+    /// VFP loads and stores of every shape, doubles and singles, up and
+    /// down, with and without writeback.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn vfp_transfers_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        alike(2, &[
+            0xED2D_8B06, // vpush {d8-d10}
+            0xED9C_0B02, // vldr d0, [r12, #8]
+            0xED1C_1B04, // vldr d1, [r12, #-16]
+            0xECAC_0B04, // vstmia r12!, {d0-d1}
+            0xEC9D_0A04, // vldmia r13, {s0-s3}
+            0xED4C_0A01, // vstr s1, [r12, #-4]
+            0xEE30_2B01, // vadd.f64 d2, d0, d1, so the block keeps nothing in registers
+            0xED8C_2B03, // vstr d2, [r12, #12]
+            0xECBD_8B06, // vpop {d8-d10}
+            0xE12F_FF1E,
+        ]);
     }
 
     /// singles a block keeps in host registers, then a call and a tail call
