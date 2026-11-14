@@ -99,28 +99,28 @@ pub const PRELUDE: &str = "\t.text
 \tldp x29, x30, [sp], #96
 .endm
 .macro pn_flush
-\tbl .Lpn_flush
+\tbl pn_flush_sub
 .endm
 .macro pn_reload
-\tbl .Lpn_reload
+\tbl pn_reload_sub
 .endm
 // shared by the file's functions, each of which has saved x30 by then:
 // writing back and reading again, the way out of the budget with the
 // block's address in w22 and its count in w23, and leaving
 \t.p2align 4
-.Lpn_flush:
+pn_flush_sub:
 \tpn_flush_inline
 \tret
-.Lpn_reload:
+pn_reload_sub:
 \tpn_reload_inline
 \tret
-.Lpn_budget:
+pn_budget_sub:
 \tadd w21, w21, w23
 \tpn_flush
 \tstr w22, [x19, #60]
 \tmov w16, #2
 \tstr w16, [x19, #76]
-.Lpn_leave_ret:
+pn_leave_sub:
 \tpn_leave
 \tret
 ";
@@ -224,7 +224,7 @@ fn return_to(out: &mut String, w: &Writer) {
     emit!(out, "\tand w16, w22, #0xfffffffc");
     emit!(out, "\tcsel w16, w17, w16, ne");
     emit!(out, "\tstr w16, [x19, #{R15}]");
-    emit!(out, "\tb .Lpn_leave_ret");
+    emit!(out, "\tb pn_leave_sub");
 }
 
 /// a jump to the address in w22, which may switch to Thumb, through the
@@ -263,7 +263,7 @@ fn call_out(out: &mut String, w: &Writer, callee: Callee) {
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
     emit!(out, "\tmov w16, #{EXIT_UNWIND}");
     emit!(out, "\tstr w16, [x19, #{EXIT}]");
-    emit!(out, "\tb .Lpn_leave_ret");
+    emit!(out, "\tb pn_leave_sub");
     emit!(out, "{go}:");
     match callee {
         Callee::Named(name) => {
@@ -317,7 +317,7 @@ fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
     emit!(out, "\tstr w16, [x19, #{R15}]");
     emit!(out, "\tmov w16, #{EXIT_UNWIND}");
     emit!(out, "\tstr w16, [x19, #{EXIT}]");
-    emit!(out, "\tb .Lpn_leave_ret");
+    emit!(out, "\tb pn_leave_sub");
     emit!(out, "{go}:");
     emit!(out, "\tbl {name}");
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
@@ -366,7 +366,7 @@ fn returned(out: &mut String, w: &Writer, link: u32) {
     // instruction goes through the C's dispatch, the context as it is
     emit!(out, "\tldr w16, [x19, #{EXIT}]");
     emit!(out, "\tcbz w16, {on}");
-    emit!(out, "\tb .Lpn_leave_ret");
+    emit!(out, "\tb pn_leave_sub");
     emit!(out, "{on}:");
     emit!(out, "\tldr w16, [x19, #{R15}]");
     constant(out, "w17", link);
@@ -391,7 +391,7 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
         let back = w.local();
         call_inner(out, w, target, &name);
         emit!(out, "\tcbnz x26, {back}");
-        emit!(out, "\tb .Lpn_leave_ret");
+        emit!(out, "\tb pn_leave_sub");
         emit!(out, "{back}:");
         return_to(out, w);
     } else if let Some(name) = w.functions.get(&target) {
@@ -399,7 +399,7 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
         constant(out, "w16", target);
         emit!(out, "\tstr w16, [x19, #{R15}]");
         call_out(out, w, Callee::Named(name));
-        emit!(out, "\tb .Lpn_leave_ret");
+        emit!(out, "\tb pn_leave_sub");
     } else {
         constant(out, "w22", target);
         dispatch(out, w);
@@ -665,7 +665,7 @@ fn svc(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     emit!(out, "\tblr x16");
     emit!(out, "\tldr w16, [x19, #{EXIT}]");
     emit!(out, "\tcbz w16, {on}");
-    emit!(out, "\tb .Lpn_leave_ret");
+    emit!(out, "\tb pn_leave_sub");
     emit!(out, "{on}:");
     emit!(out, "\tpn_reload");
     Some(true)
@@ -1642,7 +1642,7 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
                 emit!(stubs, "{out_of_budget}:");
                 constant(&mut stubs, "w22", start);
                 constant(&mut stubs, "w23", run as u32);
-                emit!(stubs, "\tb .Lpn_budget");
+                emit!(stubs, "\tb pn_budget_sub");
             }
             None => fallback(out, &w, start),
         }
