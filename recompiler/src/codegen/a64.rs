@@ -182,12 +182,15 @@ struct Writer<'a> {
     used: std::cell::RefCell<BTreeSet<u32>>,
     written: std::cell::RefCell<BTreeSet<u32>>,
     doubles: std::cell::Cell<bool>,
+    /// after a call till the fill: the host registers hold whatever the
+    /// callee left, and memory the singles, so nothing spills.
+    stale: std::cell::Cell<bool>,
 }
 
 impl<'a> Writer<'a> {
     fn new(entry: u32, labels: &'a BTreeSet<u32>, functions: &'a BTreeMap<u32, String>, fallback: String, prefix: &'a str) -> Self {
         let relative = !prefix.is_empty();
-        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() }
+        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default(), stale: Default::default() }
     }
 
     fn local(&self) -> String {
@@ -212,6 +215,9 @@ impl<'a> Writer<'a> {
     /// the singles the block wrote, back to memory, before anything leaves
     /// the block or calls out of it.
     fn spill(&self, out: &mut String) {
+        if self.stale.get() {
+            return;
+        }
         if let Some(cache) = self.cache.borrow().as_ref() {
             for single in self.written.borrow().iter() {
                 emit!(out, "\tstr s{}, [x24, #{}]", cache[single], 4 * single);
@@ -227,6 +233,7 @@ impl<'a> Writer<'a> {
                 emit!(out, "\tldr s{host}, [x24, #{}]", 4 * single);
             }
         }
+        self.stale.set(false);
     }
 }
 
@@ -378,6 +385,7 @@ fn call_out(out: &mut String, w: &Writer, callee: Callee) {
             emit!(out, "{done}:");
         }
     }
+    w.stale.set(true);
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tsub w16, w16, #1");
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
@@ -409,6 +417,7 @@ fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
     emit!(out, "\tb pn_leave_sub");
     emit!(out, "{go}:");
     emit!(out, "\tbl {name}");
+    w.stale.set(true);
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tsub w16, w16, #1");
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
@@ -486,12 +495,15 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
         emit!(out, "\tb pn_leave_sub");
         emit!(out, "{back}:");
         return_to(out, w);
+        // not taken, the registers are as they were
+        w.stale.set(false);
     } else if let Some(name) = w.functions.get(&target) {
         emit!(out, "\tpn_flush");
         guest(out, w, "w16", target);
         emit!(out, "\tstr w16, [x19, #{R15}]");
         call_out(out, w, Callee::Named(name));
         emit!(out, "\tb pn_leave_sub");
+        w.stale.set(false);
     } else {
         guest(out, w, "w22", target);
         dispatch(out, w);
@@ -2144,7 +2156,9 @@ mod tests {
                     let to = r.below(i as u32 + 1) as usize;
                     main.push(branch(&mut r, to, false));
                 }
-                73..=76 => main.push(r.condition() << 28 | 0x0B00_0000 | offset_to(CALLEE)),
+                73..=75 => main.push(r.condition() << 28 | 0x0B00_0000 | offset_to(CALLEE)),
+                // a tail call
+                76 => main.push(r.condition() << 28 | 0x0A00_0000 | offset_to(CALLEE)),
                 77 | 78 => main.push(r.condition() << 28 | 0x012F_FF1E),
                 79 => main.push(0xE1A0_F00E),
                 80 | 81 => main.push(r.condition() << 28 | r.below(2) << 21 | r.below(2) << 20 | r.below(11) << 16 | r.below(11) << 12 | r.below(11) << 8 | 0x90 | r.below(11)),
@@ -2173,8 +2187,9 @@ mod tests {
         main.push(0xE12F_FF1E);
         let mut words = main;
         words.resize(((CALLEE - BASE) / 4) as usize, 0xE1A0_0000);
+        // its VFP clobbering what a caller keeps in host registers
         for _ in 0..1 + r.below(6) {
-            words.push(data_processing(&mut r) & !(0xF << 12) | r.below(4) << 12);
+            words.push(if r.below(3) == 0 { vfp(&mut r) } else { data_processing(&mut r) & !(0xF << 12) | r.below(4) << 12 });
         }
         // now and then back to the instruction after the next, not the next
         if r.below(4) == 0 {
@@ -2261,6 +2276,24 @@ mod tests {
         }
         words.push(0xE12F_FF1E);
         alike(0, &words);
+    }
+
+    /// singles a block keeps in host registers, then a call and a tail call
+    /// to a function using the same host registers for its own: what the
+    /// callee leaves in memory stays.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn singles_kept_across_calls_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        let b = |at: u32, link: bool| 0xEA00_0000 | (link as u32) << 24 | ((CALLEE.wrapping_sub(BASE + 4 * at + 8) >> 2) & 0x00FF_FFFF);
+        // vadd.f32 s0, s1, s2; bl CALLEE; vadd.f32 s0, s0, s1; b CALLEE
+        let mut words = vec![0xEE30_0A81, b(1, true), 0xEE30_0A20, b(3, false)];
+        words.resize(((CALLEE - BASE) / 4) as usize, 0xE1A0_0000);
+        // vadd.f32 s7, s5, s6; bx lr: s5 where the caller keeps s0
+        words.extend([0xEE72_3A83, 0xE12F_FF1E]);
+        alike(1, &words);
     }
 
     /// random programs, each built as C alone and as C with assembly, run
