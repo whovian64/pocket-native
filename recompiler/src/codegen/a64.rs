@@ -809,6 +809,22 @@ fn vfp_store(out: &mut String, w: &Writer, double: bool, register: u32, v: u32) 
     }
 }
 
+/// a VFP register to read: the host register a cached single is in, else
+/// loaded into v.
+fn vfp_operand(out: &mut String, w: &Writer, double: bool, register: u32, v: u32) -> String {
+    if let Some(host) = w.cached(register, false).filter(|_| !double) {
+        return format!("s{host}");
+    }
+    vfp_load(out, w, double, register, v);
+    format!("{}{v}", if double { 'd' } else { 's' })
+}
+
+/// where a result goes: the host register of a cached single, else v19,
+/// which vfp_store writes back after.
+fn vfp_result(w: &Writer, double: bool, register: u32) -> Option<String> {
+    w.cached(register, true).filter(|_| !double).map(|host| format!("s{host}"))
+}
+
 /// notes a destination past the first bank, which a short vector would run
 /// over: the block checks fpscr's length before it starts.
 fn scalar(w: &Writer, double: bool, d: u32) {
@@ -836,27 +852,31 @@ fn vfp_data(out: &mut String, w: &Writer, op: u32) -> Option<bool> {
         _ => return None,
     };
     scalar(w, double, rd);
-    vfp_load(out, w, double, rn, 16);
-    vfp_load(out, w, double, rm, 17);
+    let a = vfp_operand(out, w, double, rn, 16);
+    let b = vfp_operand(out, w, double, rm, 17);
+    let acc = if operation <= 3 { vfp_operand(out, w, double, rd, 18) } else { String::new() };
+    let target = vfp_result(w, double, rd);
+    let d = target.clone().unwrap_or(format!("{v}19"));
     if operation <= 3 {
-        vfp_load(out, w, double, rd, 18);
-        emit!(out, "\tfmul {v}19, {v}16, {v}17");
+        emit!(out, "\tfmul {v}19, {a}, {b}");
     }
     match operation {
-        0 => emit!(out, "\tfadd {v}19, {v}19, {v}18"),
-        1 => emit!(out, "\tfsub {v}19, {v}18, {v}19"),
-        2 => emit!(out, "\tfsub {v}19, {v}19, {v}18"),
+        0 => emit!(out, "\tfadd {d}, {v}19, {acc}"),
+        1 => emit!(out, "\tfsub {d}, {acc}, {v}19"),
+        2 => emit!(out, "\tfsub {d}, {v}19, {acc}"),
         3 => {
-            emit!(out, "\tfneg {v}18, {v}18");
-            emit!(out, "\tfsub {v}19, {v}18, {v}19");
+            emit!(out, "\tfneg {v}18, {acc}");
+            emit!(out, "\tfsub {d}, {v}18, {v}19");
         }
-        4 => emit!(out, "\tfmul {v}19, {v}16, {v}17"),
-        5 => emit!(out, "\tfnmul {v}19, {v}17, {v}16"),
-        6 => emit!(out, "\tfadd {v}19, {v}16, {v}17"),
-        7 => emit!(out, "\tfsub {v}19, {v}16, {v}17"),
-        _ => emit!(out, "\tfdiv {v}19, {v}16, {v}17"),
+        4 => emit!(out, "\tfmul {d}, {a}, {b}"),
+        5 => emit!(out, "\tfnmul {d}, {b}, {a}"),
+        6 => emit!(out, "\tfadd {d}, {a}, {b}"),
+        7 => emit!(out, "\tfsub {d}, {a}, {b}"),
+        _ => emit!(out, "\tfdiv {d}, {a}, {b}"),
     }
-    vfp_store(out, w, double, rd, 19);
+    if target.is_none() {
+        vfp_store(out, w, double, rd, 19);
+    }
     Some(true)
 }
 
@@ -870,9 +890,32 @@ fn vfp_extension(out: &mut String, w: &Writer, op: u32, double: bool, rd: u32, r
             scalar(w, double, rd);
             let second = (op >> 16) & 1 != 0;
             if second && top {
-                vfp_load(out, w, double, rm, 16);
-                emit!(out, "\tfsqrt {v}19, {v}16");
-                vfp_store(out, w, double, rd, 19);
+                let m = vfp_operand(out, w, double, rm, 16);
+                match vfp_result(w, double, rd) {
+                    Some(d) => emit!(out, "\tfsqrt {d}, {m}"),
+                    None => {
+                        emit!(out, "\tfsqrt {v}19, {m}");
+                        vfp_store(out, w, double, rd, 19);
+                    }
+                }
+                return Some(true);
+            }
+            // a single kept in a register on either side moves as a float,
+            // the sign changes as bit operations all the same
+            if !double && (w.cache.borrow().as_ref().is_some_and(|cache| cache.contains_key(&rm) || cache.contains_key(&rd))) {
+                let m = vfp_operand(out, w, false, rm, 16);
+                let operation = match (second, top) {
+                    (false, true) => "fabs",
+                    (true, false) => "fneg",
+                    _ => "fmov",
+                };
+                match vfp_result(w, false, rd) {
+                    Some(d) => emit!(out, "\t{operation} {d}, {m}"),
+                    None => {
+                        emit!(out, "\t{operation} s19, {m}");
+                        vfp_store(out, w, false, rd, 19);
+                    }
+                }
                 return Some(true);
             }
             let change = |out: &mut String, register: &str| match (second, top) {
@@ -895,13 +938,13 @@ fn vfp_extension(out: &mut String, w: &Writer, op: u32, double: bool, rd: u32, r
         // vcmp against a register or zero, the result in fpscr's top bits
         // the way fcmp sets NZCV, the guest's flags kept
         (0b0100 | 0b0101, _) => {
-            vfp_load(out, w, double, rd, 16);
+            let d = vfp_operand(out, w, double, rd, 16);
             emit!(out, "\tmrs x23, nzcv");
             if (op >> 16) & 1 == 0 {
-                vfp_load(out, w, double, rm, 17);
-                emit!(out, "\tfcmp {v}16, {v}17");
+                let m = vfp_operand(out, w, double, rm, 17);
+                emit!(out, "\tfcmp {d}, {m}");
             } else {
-                emit!(out, "\tfcmp {v}16, #0.0");
+                emit!(out, "\tfcmp {d}, #0.0");
             }
             emit!(out, "\tmrs x16, nzcv");
             emit!(out, "\tmsr nzcv, x23");
@@ -1045,7 +1088,7 @@ fn vfp_load_store(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
             }
         };
         // as one unless the block keeps either single in a register
-        let pair = pair_singles(first + i).map(|single| w.cached(single, load));
+        let pair = if double { pair_singles(first + i).map(|single| w.cached(single, load)) } else { [None, None] };
         if double && pair == [None, None] {
             let slot = 8 * ((first + i) & 15);
             if load {
@@ -2116,8 +2159,10 @@ mod tests {
 
     /// VFP instructions of every kind the translator takes, and vmsr, which
     /// it doesn't and which can turn short vectors on.
-    fn vfp(r: &mut Random) -> u32 {
-        let coprocessor = 10 + r.below(2);
+    /// doubles in quarters: how often it works on doubles, none in some
+    /// programs so that their blocks keep singles in registers.
+    fn vfp(r: &mut Random, doubles: u32) -> u32 {
+        let coprocessor = 10 + (r.below(4) < doubles) as u32;
         let cond = r.condition() << 28;
         let (d, n, m) = (r.below(2) << 22, r.below(2) << 7, r.below(2) << 5);
         let (vd, vn, vm) = (r.below(16) << 12, r.below(16) << 16, r.below(16));
@@ -2155,6 +2200,7 @@ mod tests {
     fn program(seed: u64) -> Vec<u32> {
         let mut r = Random(seed * 0x9E37_79B9 + 1);
         let count = 8 + r.below(40) as usize;
+        let doubles = r.below(3);
         let mut main: Vec<u32> = Vec::with_capacity(count + 4);
         // r10 at the callee, plus one for Thumb
         let at_callee = [0xE3A0_A601, 0xE28A_AB02];
@@ -2180,7 +2226,7 @@ mod tests {
                 0..=24 | 93..=99 => main.push(data_processing(&mut r)),
                 100 => main.push(register_shifted(&mut r)),
                 25..=29 => main.push(media(&mut r)),
-                30..=39 => main.push(vfp(&mut r)),
+                30..=39 => main.push(vfp(&mut r, doubles)),
                 40..=52 => main.push(transfer(&mut r)),
                 53..=58 => main.push(extra(&mut r)),
                 59..=64 => main.push(multiple(&mut r)),
@@ -2225,7 +2271,7 @@ mod tests {
         words.resize(((CALLEE - BASE) / 4) as usize, 0xE1A0_0000);
         // its VFP clobbering what a caller keeps in host registers
         for _ in 0..1 + r.below(6) {
-            words.push(if r.below(3) == 0 { vfp(&mut r) } else { data_processing(&mut r) & !(0xF << 12) | r.below(4) << 12 });
+            words.push(if r.below(3) == 0 { vfp(&mut r, doubles) } else { data_processing(&mut r) & !(0xF << 12) | r.below(4) << 12 });
         }
         // now and then back to the instruction after the next, not the next
         if r.below(4) == 0 {
@@ -2332,6 +2378,36 @@ mod tests {
             0xEE30_2B01, // vadd.f64 d2, d0, d1, so the block keeps nothing in registers
             0xED8C_2B03, // vstr d2, [r12, #12]
             0xECBD_8B06, // vpop {d8-d10}
+            0xE12F_FF1E,
+        ]);
+    }
+
+    /// a block on singles alone, all kept in host registers: moves, sign
+    /// changes, square roots, the multiply-accumulates and a comparison.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn cached_singles_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        alike(3, &[
+            // from the registers, whose values change from trial to trial
+            0xEE00_0A10, // vmov s0, r0
+            0xEE00_2A90, // vmov s1, r2
+            0xEE01_4A10, // vmov s2, r4
+            0xEE01_6A90, // vmov s3, r6
+            0xEEB0_2AC0, // vabs.f32 s4, s0
+            0xEEF1_2A60, // vneg.f32 s5, s1
+            0xEEB0_3A41, // vmov.f32 s6, s2
+            0xEEF1_3AE1, // vsqrt.f32 s7, s3
+            0xEE00_4A20, // vmla.f32 s8, s0, s1
+            0xEE51_4A21, // vnmls.f32 s9, s2, s3
+            0xEE10_5A41, // vnmla.f32 s10, s0, s2
+            0xEEB4_2A62, // vcmp.f32 s4, s5
+            0xEEF1_FA10, // vmrs APSR_nzcv, fpscr
+            0xC3A0_0001, // movgt r0, #1
+            0xEC8C_2A07, // vstmia r12, {s4-s10}
+            0xE58C_0040, // str r0, [r12, #64]
             0xE12F_FF1E,
         ]);
     }
