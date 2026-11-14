@@ -192,6 +192,15 @@ struct Writer<'a> {
     used: std::cell::RefCell<BTreeMap<u32, usize>>,
     written: std::cell::RefCell<BTreeSet<u32>>,
     doubles: std::cell::Cell<bool>,
+    /// what the first writing found the block does to a single first, those
+    /// it writes before anything reads them left out of the fill at its
+    /// start; then the singles written so far, the others of those not yet
+    /// spilled, their registers holding nothing; and whether the instruction
+    /// being written is conditional.
+    seen: std::cell::RefCell<BTreeSet<u32>>,
+    first_written: std::cell::RefCell<BTreeSet<u32>>,
+    so_far: std::cell::RefCell<BTreeSet<u32>>,
+    conditional: std::cell::Cell<bool>,
     /// after a call till the fill: the host registers hold whatever the
     /// callee left, and memory the singles, so nothing spills.
     stale: std::cell::Cell<bool>,
@@ -205,7 +214,7 @@ struct Writer<'a> {
 impl<'a> Writer<'a> {
     fn new(entry: u32, labels: &'a BTreeSet<u32>, functions: &'a BTreeMap<u32, String>, fallback: String, prefix: &'a str) -> Self {
         let relative = !prefix.is_empty();
-        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default(), stale: Default::default(), cold: Default::default(), shared: Default::default() }
+        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default(), seen: Default::default(), first_written: Default::default(), so_far: Default::default(), conditional: Default::default(), stale: Default::default(), cold: Default::default(), shared: Default::default() }
     }
 
     /// a stub shared past the end: 0 leaves, 1 hands over to the C as
@@ -232,8 +241,14 @@ impl<'a> Writer<'a> {
     /// the host register a single is kept in in this block, if it is.
     fn cached(&self, single: u32, write: bool) -> Option<u32> {
         *self.used.borrow_mut().entry(single).or_default() += 1;
+        if self.seen.borrow_mut().insert(single) && write && !self.conditional.get() {
+            self.first_written.borrow_mut().insert(single);
+        }
         if write {
             self.written.borrow_mut().insert(single);
+            if self.cache.borrow().is_some() {
+                self.so_far.borrow_mut().insert(single);
+            }
         }
         self.cache.borrow().as_ref().and_then(|cache| cache.get(&single).copied())
     }
@@ -245,19 +260,24 @@ impl<'a> Writer<'a> {
             return;
         }
         if let Some(cache) = self.cache.borrow().as_ref() {
+            let (first, so_far) = (self.first_written.borrow(), self.so_far.borrow());
             for single in self.written.borrow().iter() {
-                if let Some(host) = cache.get(single) {
+                if let Some(host) = cache.get(single).filter(|_| !first.contains(single) || so_far.contains(single)) {
                     emit!(out, "\tstr s{host}, [x24, #{}]", 4 * single);
                 }
             }
         }
     }
 
-    /// the cached singles read from memory again, at the block's start and
-    /// after a call.
+    /// the cached singles read from memory again after a call, and at the
+    /// block's start but for those it writes first.
     fn fill(&self, out: &mut String) {
+        self.fill_but(out, &BTreeSet::new());
+    }
+
+    fn fill_but(&self, out: &mut String, left: &BTreeSet<u32>) {
         if let Some(cache) = self.cache.borrow().as_ref() {
-            for (single, host) in cache {
+            for (single, host) in cache.iter().filter(|(single, _)| !left.contains(single)) {
                 emit!(out, "\tldr s{host}, [x24, #{}]", 4 * single);
             }
         }
@@ -559,7 +579,10 @@ fn lower(w: &Writer, address: u32, op: u32) -> Option<(String, bool)> {
         return unconditional(&mut body, w, address, op).map(|continues| (body, continues));
     }
     let mut body = String::new();
-    let continues = instruction(&mut body, w, address, op)?;
+    w.conditional.set(condition != 0xE);
+    let continues = instruction(&mut body, w, address, op);
+    w.conditional.set(false);
+    let continues = continues?;
     if condition == 0xE {
         return Some((body, continues));
     }
@@ -1891,6 +1914,9 @@ fn block(program: &Program, w: &Writer, instructions: &[u32], run: usize) -> Opt
     *w.cache.borrow_mut() = None;
     w.used.borrow_mut().clear();
     w.written.borrow_mut().clear();
+    w.seen.borrow_mut().clear();
+    w.first_written.borrow_mut().clear();
+    w.so_far.borrow_mut().clear();
     w.doubles.set(false);
     // the cold code of a writing thrown away goes too
     let mark = w.cold.borrow().len();
@@ -1909,7 +1935,7 @@ fn block(program: &Program, w: &Writer, instructions: &[u32], run: usize) -> Opt
     w.cold.borrow_mut().truncate(mark);
     let cached = block_text(program, w, instructions, run);
     let mut text = String::new();
-    w.fill(&mut text);
+    w.fill_but(&mut text, &w.first_written.borrow().clone());
     *w.cache.borrow_mut() = None;
     let Some(cached) = cached else {
         w.cold.borrow_mut().truncate(mark);
@@ -2581,6 +2607,27 @@ mod tests {
             0xC3A0_0001, // movgt r0, #1
             0xEC8C_2A07, // vstmia r12, {s4-s10}
             0xE58C_0040, // str r0, [r12, #64]
+            0xE12F_FF1E,
+        ]);
+    }
+
+    /// a single written before anything reads it, which the block doesn't
+    /// read at its start, and a way out before it is: what leaves there
+    /// writes back only what it has.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn singles_written_first_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        alike(6, &[
+            0xEE00_2A90, // vmov s1, r2
+            0xE351_0014, // cmp r1, #20
+            0xCA00_0002, // bgt 1f
+            0xEE00_0A10, // vmov s0, r0
+            0xEE30_0A20, // vadd.f32 s0, s0, s1
+            0xED8C_0A00, // vstr s0, [r12]
+            0xEC8C_0A02, // 1: vstmia r12, {s0-s1}
             0xE12F_FF1E,
         ]);
     }
