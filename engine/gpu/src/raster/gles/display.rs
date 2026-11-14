@@ -288,6 +288,29 @@ pub(super) fn monotonic_micros() -> u64 {
 
 pub(super) const GBM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 
+/// whether this is BananaOS, the RG DS's light Linux, which its port
+/// launcher says with /run/banana and BANANA_TOP.
+fn banana_os() -> bool {
+    std::path::Path::new("/run/banana").is_dir() || std::env::var_os("BANANA_TOP").is_some()
+}
+
+/// BananaOS's port launcher turns the bottom panel's backlight off for a
+/// port, and leaves /run/banana/panel-off for it to go off again after a
+/// wake-up: both panels are lit and the marker cleared.
+fn light_panels() {
+    match std::fs::remove_file("/run/banana/panel-off") {
+        Ok(()) => log::info!("BananaOS: cleared /run/banana/panel-off"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("BananaOS: could not clear /run/banana/panel-off, {error}"),
+    }
+    for entry in std::fs::read_dir("/sys/class/backlight").into_iter().flatten().flatten() {
+        let power = entry.path().join("bl_power");
+        if let Err(error) = std::fs::write(&power, "0") {
+            log::warn!("BananaOS: could not light {}, {error}", power.display());
+        }
+    }
+}
+
 /// the panel, driven through KMS from a GBM surface the context draws into.
 pub(super) struct Kms {
     pub(super) drm: libloading::Library,
@@ -349,6 +372,7 @@ impl Kms {
             return Err("no KMS resources".into());
         }
         let res = &*resources;
+        let banana = banana_os();
         let mut panels = Vec::new();
         for i in 0..res.count_connectors as usize {
             let connector = call!(drm, "drmModeGetConnector", fn(i32, u32) -> *mut DrmModeConnector, fd, *res.connectors.add(i));
@@ -377,6 +401,17 @@ impl Kms {
                     possible = (*encoder).possible_crtcs;
                     call!(drm, "drmModeFreeEncoder", fn(*mut DrmModeEncoder) -> (), encoder);
                 }
+                // BananaOS leaves the encoder unset until a mode is: any of
+                // them may drive it
+                if banana {
+                    for e in 0..c.count_encoders.max(0) as usize {
+                        let encoder = call!(drm, "drmModeGetEncoder", fn(i32, u32) -> *mut DrmModeEncoder, fd, *c.encoders.add(e));
+                        if !encoder.is_null() {
+                            possible |= (*encoder).possible_crtcs;
+                            call!(drm, "drmModeFreeEncoder", fn(*mut DrmModeEncoder) -> (), encoder);
+                        }
+                    }
+                }
                 panels.push((c.connector_id, connector_name(c.connector_type, c.connector_type_id), mode, crtc, possible));
             }
             call!(drm, "drmModeFreeConnector", fn(*mut DrmModeConnector) -> (), connector);
@@ -388,7 +423,7 @@ impl Kms {
         }
         // the panel the top screen goes on: ZAKURO_KMS_TOP=DSI-1 names it,
         // DSI-2 on the RG DS under ROCKNIX, else the first connected
-        let top = std::env::var("ZAKURO_KMS_TOP").unwrap_or_else(|_| "DSI-2".into());
+        let top = std::env::var("ZAKURO_KMS_TOP").or_else(|_| std::env::var("BANANA_TOP")).unwrap_or_else(|_| "DSI-2".into());
         let (connector, name, mode, crtc, possible) = panels.remove(panels.iter().position(|panel| panel.1 == top).unwrap_or(0));
         // how the kernel says the panel is mounted
         let properties = call!(drm, "drmModeObjectGetProperties", fn(i32, u32, u32) -> *mut DrmModeObjectProperties, fd, connector, 0xC0C0_C0C0);
@@ -435,6 +470,9 @@ impl Kms {
         });
         let second = second.filter(|&(bottom, ..)| bottom != 0 && bottom != crtc);
         set_stacked(second.is_some());
+        if banana && second.is_some() {
+            light_panels();
+        }
         // sway lets go of the panels a moment after it stopped, as under
         // ROCKNIX, and a modeset before then fails. only busy is worth
         // waiting out: ArkOS's kernel keeps the call to root, where the
