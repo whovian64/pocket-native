@@ -170,6 +170,9 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
     let mut files = vec![("recomp.h".to_owned(), HEADER.to_owned())];
     let mut assembly: Vec<String> = Vec::new();
     let mut assembled = None;
+    // the executable's translated functions, for calls through a register
+    // to find their way in
+    let mut inner: Vec<u32> = Vec::new();
     let mut sources: Vec<String> = Vec::new();
     let mut source = String::new();
     // the headers the file being written includes
@@ -249,6 +252,9 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
         };
         for &entry in &translated {
             names.insert(entry, a64::name(&prefix, entry));
+        }
+        if unit.module.is_none() {
+            inner.extend(&translated);
         }
 
         let mut prototypes = String::new();
@@ -360,6 +366,29 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
     if a64 {
         // what the assembly of a function the C isn't written for hands on
         emit!(tables, "void recomp_out(Context *ctx) {{\n    CALL(recomp_call);\n}}\n");
+        // the translated function at an address of the executable, the way in
+        // for another, kept in the cache of the call that asked
+        for entry in &inner {
+            emit!(tables, "void b_{entry:08X}(void);");
+        }
+        emit!(tables, "static const struct {{ uint32_t address; void (*inner)(void); }} a64_inner[] = {{");
+        for entry in &inner {
+            emit!(tables, "    {{0x{entry:08X}u, b_{entry:08X}}},");
+        }
+        emit!(tables, "    {{0xFFFFFFFFu, 0}},\n}};");
+        emit!(tables, "typedef struct {{ uint32_t address, pad; void (*inner)(void); }} A64Cache;");
+        emit!(tables, "void recomp_a64_find(A64Cache *cache, uint32_t address) {{");
+        emit!(tables, "    uint32_t low = 0, high = {};", inner.len());
+        emit!(tables, "    while (low < high) {{");
+        emit!(tables, "        uint32_t middle = (low + high) / 2;");
+        emit!(tables, "        if (a64_inner[middle].address < address) low = middle + 1;");
+        emit!(tables, "        else high = middle;");
+        emit!(tables, "    }}");
+        emit!(tables, "    if (a64_inner[low].address == address) {{");
+        emit!(tables, "        cache->inner = a64_inner[low].inner;");
+        emit!(tables, "        cache->address = address;");
+        emit!(tables, "    }}");
+        emit!(tables, "}}\n");
     }
     emit!(tables, "RECOMP_EXPORT const uint32_t recomp_abi = RECOMP_ABI;");
     // code built to reach memory straight through the host's view of it

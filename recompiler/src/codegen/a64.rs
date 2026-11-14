@@ -1196,6 +1196,9 @@ fn branch_exchange(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     } else {
         emit!(out, "\tmov w22, w{rm}");
     }
+    if (op >> 4) & 0xF == 0b0011 && !w.relative {
+        return call_cached(out, w, a + 4);
+    }
     if (op >> 4) & 0xF == 0b0011 {
         let next = a + 4;
         guest(out, w, "w14", next);
@@ -1218,6 +1221,76 @@ fn branch_exchange(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
         jump_to(out, w);
     }
     Some(false)
+}
+
+/// blx to the address in w22 in the executable, whose code stays where it
+/// is: the translated function there, if there is one, called the way
+/// another calls it, its way in kept beside the call once found, anything
+/// else through the host.
+fn call_cached(out: &mut String, w: &Writer, next: u32) -> Option<bool> {
+    let (slow, over, back, other, done) = (w.local(), w.local(), w.local(), w.local(), w.local());
+    let cache = format!(".Lk{:08X}_{}", w.entry, w.made.get());
+    w.spill(out);
+    guest(out, w, "w14", next);
+    emit!(out, "{TEST_MARK}tbnz w22, #0, {slow}");
+    emit!(out, "\tadrp x16, {cache}");
+    emit!(out, "\tadd x16, x16, :lo12:{cache}");
+    emit!(out, "\tldr w17, [x16]");
+    emit!(out, "\tsub w17, w17, w22");
+    emit!(out, "\tcbnz w17, {slow}");
+    emit!(out, "\tldr x16, [x16, #8]");
+    emit!(out, "\tadd w28, w28, #1");
+    emit!(out, "\tsub w17, w28, #{}", DEPTH_LIMIT + 1);
+    emit!(out, "{TEST_MARK}tbz w17, #31, {over}");
+    emit!(out, "\tblr x16");
+    w.stale.set(true);
+    emit!(out, "\tcbz x26, {back}");
+    emit!(out, "\tsub w28, w28, #1");
+    guest(out, w, "w17", next);
+    emit!(out, "\tsub w16, w22, w17");
+    emit!(out, "\tcbnz w16, {other}");
+    let mut cold = String::new();
+    // empty, an odd address no call here goes to
+    emit!(cold, "\t.pushsection .data");
+    emit!(cold, "\t.p2align 3");
+    emit!(cold, "{cache}:");
+    emit!(cold, "\t.word 1, 0");
+    emit!(cold, "\t.quad 0");
+    emit!(cold, "\t.popsection");
+    emit!(cold, "{over}:");
+    emit!(cold, "\tsub w28, w28, #1");
+    emit!(cold, "\tpn_flush");
+    emit!(cold, "\tstr w22, [x19, #{R15}]");
+    emit!(cold, "\tmov w16, #{EXIT_UNWIND}");
+    emit!(cold, "\tstr w16, [x19, #{EXIT}]");
+    emit!(cold, "\tb pn_leave_sub");
+    emit!(cold, "{back}:");
+    depth_back(&mut cold);
+    returned(&mut cold, w, next);
+    emit!(cold, "\tb {done}");
+    emit!(cold, "{other}:");
+    jump_to(&mut cold, w);
+    // the host's, the way in found for next time
+    emit!(cold, "{slow}:");
+    emit!(cold, "\tpn_flush");
+    emit!(cold, "\tadrp x0, {cache}");
+    emit!(cold, "\tadd x0, x0, :lo12:{cache}");
+    emit!(cold, "\tmov w1, w22");
+    emit!(cold, "\tbl recomp_a64_find");
+    emit!(cold, "\tand w16, w22, #1");
+    emit!(cold, "\tstrb w16, [x19, #{THUMB}]");
+    emit!(cold, "\ttst w22, #1");
+    emit!(cold, "\tand w17, w22, #0xfffffffe");
+    emit!(cold, "\tand w16, w22, #0xfffffffc");
+    emit!(cold, "\tcsel w16, w17, w16, ne");
+    emit!(cold, "\tstr w16, [x19, #{R15}]");
+    call_out(&mut cold, w, Callee::Lookup);
+    returned(&mut cold, w, next);
+    emit!(cold, "\tb {done}");
+    w.cold.borrow_mut().push_str(&cold);
+    emit!(out, "{done}:");
+    w.fill(out);
+    Some(true)
 }
 
 /// mrs of the cpsr: the flags, q and ge over system mode.
