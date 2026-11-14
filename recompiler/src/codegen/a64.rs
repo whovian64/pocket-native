@@ -164,6 +164,14 @@ struct Writer<'a> {
     /// whether the block being written has VFP arithmetic a short vector
     /// would change, which runs only with fpscr's length 1.
     vector: std::cell::Cell<bool>,
+    /// the singles the block keeps in host registers, by guest register, and
+    /// what a first writing of it found: the singles it reads or writes,
+    /// those it writes, and whether it works on doubles, which it then
+    /// leaves in memory with everything else.
+    cache: std::cell::RefCell<Option<BTreeMap<u32, u32>>>,
+    used: std::cell::RefCell<BTreeSet<u32>>,
+    written: std::cell::RefCell<BTreeSet<u32>>,
+    doubles: std::cell::Cell<bool>,
 }
 
 impl Writer<'_> {
@@ -175,6 +183,53 @@ impl Writer<'_> {
 
     fn block(&self, address: u32) -> String {
         format!(".Lb{:08X}_{address:08X}", self.entry)
+    }
+
+    /// the host register a single is kept in in this block, if it is.
+    fn cached(&self, single: u32, write: bool) -> Option<u32> {
+        self.used.borrow_mut().insert(single);
+        if write {
+            self.written.borrow_mut().insert(single);
+        }
+        self.cache.borrow().as_ref().and_then(|cache| cache.get(&single).copied())
+    }
+
+    /// the singles the block wrote, back to memory, before anything leaves
+    /// the block or calls out of it.
+    fn spill(&self, out: &mut String) {
+        if let Some(cache) = self.cache.borrow().as_ref() {
+            for single in self.written.borrow().iter() {
+                emit!(out, "\tstr s{}, [x24, #{}]", cache[single], 4 * single);
+            }
+        }
+    }
+
+    /// the cached singles read from memory again, at the block's start and
+    /// after a call.
+    fn fill(&self, out: &mut String) {
+        if let Some(cache) = self.cache.borrow().as_ref() {
+            for (single, host) in cache {
+                emit!(out, "\tldr s{host}, [x24, #{}]", 4 * single);
+            }
+        }
+    }
+}
+
+/// the host registers singles are kept in, past v16-v19's scratch.
+const CACHE: [u32; 20] = [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 0, 1, 2, 3, 4, 5, 6, 7];
+
+/// a guest single's bits into or out of a w register.
+fn word_load(out: &mut String, w: &Writer, single: u32, register: &str) {
+    match w.cached(single, false) {
+        Some(host) => emit!(out, "\tfmov {register}, s{host}"),
+        None => emit!(out, "\tldr {register}, [x24, #{}]", 4 * single),
+    }
+}
+
+fn word_store(out: &mut String, w: &Writer, single: u32, register: &str) {
+    match w.cached(single, true) {
+        Some(host) => emit!(out, "\tfmov s{host}, {register}"),
+        None => emit!(out, "\tstr {register}, [x24, #{}]", 4 * single),
     }
 }
 
@@ -188,6 +243,7 @@ fn constant(out: &mut String, register: &str, value: u32) {
 
 /// hands over to the C at address, everything written back.
 fn fallback(out: &mut String, w: &Writer, address: u32) {
+    w.spill(out);
     emit!(out, "\tpn_flush");
     constant(out, "w16", address);
     emit!(out, "\tstr w16, [x19, #{R15}]");
@@ -198,6 +254,7 @@ fn fallback(out: &mut String, w: &Writer, address: u32) {
 
 /// hands over to the C at the address in w22.
 fn dispatch(out: &mut String, w: &Writer) {
+    w.spill(out);
     emit!(out, "\tpn_flush");
     emit!(out, "\tstr w22, [x19, #{R15}]");
     emit!(out, "\tmov x0, x19");
@@ -209,6 +266,7 @@ fn dispatch(out: &mut String, w: &Writer) {
 /// translated caller with the registers live, to anything else through the
 /// context.
 fn return_to(out: &mut String, w: &Writer) {
+    w.spill(out);
     let outer = w.local();
     emit!(out, "\tldr x16, [sp, #80]");
     emit!(out, "\tcbz x16, {outer}");
@@ -230,6 +288,7 @@ fn return_to(out: &mut String, w: &Writer) {
 /// a jump to the address in w22, which may switch to Thumb, through the
 /// C's dispatch.
 fn jump_to(out: &mut String, w: &Writer) {
+    w.spill(out);
     emit!(out, "\tpn_flush");
     emit!(out, "\tand w16, w22, #1");
     emit!(out, "\tstrb w16, [x19, #{THUMB}]");
@@ -253,6 +312,7 @@ enum Callee<'a> {
 /// a call, everything written back, r15 already in the context, counting
 /// depth as CALL does.
 fn call_out(out: &mut String, w: &Writer, callee: Callee) {
+    w.spill(out);
     let go = w.local();
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tadd w16, w16, #1");
@@ -304,6 +364,7 @@ fn inner(name: &str) -> Option<String> {
 /// as CALL does without touching NZCV, then dec as it comes back. over the
 /// limit everything goes back to the context with r15 at target.
 fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
+    w.spill(out);
     let go = w.local();
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tadd w16, w16, #1");
@@ -342,6 +403,7 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Op
         emit!(out, "\tcbz w16, {done}");
         jump_to(out, w);
         emit!(out, "{done}:");
+        w.fill(out);
         return Some(true);
     }
     constant(out, "w14", link);
@@ -354,6 +416,7 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Op
     }
     call_out(out, w, w.functions.get(&(target | thumb as u32)).map_or(Callee::Lookup, |name| Callee::Named(name)));
     returned(out, w, link);
+    w.fill(out);
     Some(true)
 }
 
@@ -385,6 +448,7 @@ fn returned(out: &mut String, w: &Writer, link: u32) {
 /// a tail call, or the C's dispatch.
 fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
     if w.labels.contains(&target) {
+        w.spill(out);
         emit!(out, "\tb {}", w.block(target));
     } else if let Some(name) = w.functions.get(&target).and_then(|name| inner(name)) {
         // a tail call: its return is this function's
@@ -473,9 +537,9 @@ fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
             let target = (a + 8).wrapping_add(sign_extend_24(op & 0x00FF_FFFF) << 2);
             if op & (1 << 24) != 0 { call(out, w, a + 4, target, false) } else { jump(out, w, target) }
         }
-        0b110 => vfp_load_store(out, a, op),
+        0b110 => vfp_load_store(out, w, a, op),
         0b111 if op & (1 << 24) != 0 => svc(out, w, a, op),
-        0b111 if op & 0x10 != 0 && matches!((op >> 8) & 0xF, 10 | 11) => vfp_transfer(out, op),
+        0b111 if op & 0x10 != 0 && matches!((op >> 8) & 0xF, 10 | 11) => vfp_transfer(out, w, op),
         0b111 if op & 0x10 != 0 => {
             let rd = (op >> 12) & 0xF;
             let data_cache = op & 0x0FFF_0F10 == 0x0E07_0F10 && !matches!(op & 0xF, 5 | 7 | 13);
@@ -654,6 +718,7 @@ fn parallel(out: &mut String, op: u32) -> Option<bool> {
 
 /// an svc the host runs in place, the code going on unless it says not to.
 fn svc(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
+    w.spill(out);
     let on = w.local();
     emit!(out, "\tpn_flush");
     constant(out, "w16", a + 4);
@@ -668,6 +733,7 @@ fn svc(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     emit!(out, "\tb pn_leave_sub");
     emit!(out, "{on}:");
     emit!(out, "\tpn_reload");
+    w.fill(out);
     Some(true)
 }
 
@@ -681,17 +747,23 @@ fn dreg(vd: u32, extra: bool) -> u32 {
 
 /// a VFP register of either size into or out of v, doubles taking the two
 /// singles at 2N.
-fn vfp_load(out: &mut String, double: bool, register: u32, v: u32) {
+fn vfp_load(out: &mut String, w: &Writer, double: bool, register: u32, v: u32) {
     if double {
+        w.doubles.set(true);
         emit!(out, "\tldr d{v}, [x24, #{}]", 8 * (register & 15));
+    } else if let Some(host) = w.cached(register, false) {
+        emit!(out, "\tfmov s{v}, s{host}");
     } else {
         emit!(out, "\tldr s{v}, [x24, #{}]", 4 * register);
     }
 }
 
-fn vfp_store(out: &mut String, double: bool, register: u32, v: u32) {
+fn vfp_store(out: &mut String, w: &Writer, double: bool, register: u32, v: u32) {
     if double {
+        w.doubles.set(true);
         emit!(out, "\tstr d{v}, [x24, #{}]", 8 * (register & 15));
+    } else if let Some(host) = w.cached(register, true) {
+        emit!(out, "\tfmov s{host}, s{v}");
     } else {
         emit!(out, "\tstr s{v}, [x24, #{}]", 4 * register);
     }
@@ -724,10 +796,10 @@ fn vfp_data(out: &mut String, w: &Writer, op: u32) -> Option<bool> {
         _ => return None,
     };
     scalar(w, double, rd);
-    vfp_load(out, double, rn, 16);
-    vfp_load(out, double, rm, 17);
+    vfp_load(out, w, double, rn, 16);
+    vfp_load(out, w, double, rm, 17);
     if operation <= 3 {
-        vfp_load(out, double, rd, 18);
+        vfp_load(out, w, double, rd, 18);
         emit!(out, "\tfmul {v}19, {v}16, {v}17");
     }
     match operation {
@@ -744,7 +816,7 @@ fn vfp_data(out: &mut String, w: &Writer, op: u32) -> Option<bool> {
         7 => emit!(out, "\tfsub {v}19, {v}16, {v}17"),
         _ => emit!(out, "\tfdiv {v}19, {v}16, {v}17"),
     }
-    vfp_store(out, double, rd, 19);
+    vfp_store(out, w, double, rd, 19);
     Some(true)
 }
 
@@ -758,9 +830,9 @@ fn vfp_extension(out: &mut String, w: &Writer, op: u32, double: bool, rd: u32, r
             scalar(w, double, rd);
             let second = (op >> 16) & 1 != 0;
             if second && top {
-                vfp_load(out, double, rm, 16);
+                vfp_load(out, w, double, rm, 16);
                 emit!(out, "\tfsqrt {v}19, {v}16");
-                vfp_store(out, double, rd, 19);
+                vfp_store(out, w, double, rd, 19);
                 return Some(true);
             }
             let change = |out: &mut String, register: &str| match (second, top) {
@@ -769,23 +841,24 @@ fn vfp_extension(out: &mut String, w: &Writer, op: u32, double: bool, rd: u32, r
                 _ => {}
             };
             if double {
+                w.doubles.set(true);
                 let (d, m) = (2 * (rd & 15), 2 * (rm & 15));
                 emit!(out, "\tldp w16, w17, [x24, #{}]", 4 * m);
                 change(out, "w17");
                 emit!(out, "\tstp w16, w17, [x24, #{}]", 4 * d);
             } else {
-                emit!(out, "\tldr w16, [x24, #{}]", 4 * rm);
+                word_load(out, w, rm, "w16");
                 change(out, "w16");
-                emit!(out, "\tstr w16, [x24, #{}]", 4 * rd);
+                word_store(out, w, rd, "w16");
             }
         }
         // vcmp against a register or zero, the result in fpscr's top bits
         // the way fcmp sets NZCV, the guest's flags kept
         (0b0100 | 0b0101, _) => {
-            vfp_load(out, double, rd, 16);
+            vfp_load(out, w, double, rd, 16);
             emit!(out, "\tmrs x23, nzcv");
             if (op >> 16) & 1 == 0 {
-                vfp_load(out, double, rm, 17);
+                vfp_load(out, w, double, rm, 17);
                 emit!(out, "\tfcmp {v}16, {v}17");
             } else {
                 emit!(out, "\tfcmp {v}16, #0.0");
@@ -802,26 +875,26 @@ fn vfp_extension(out: &mut String, w: &Writer, op: u32, double: bool, rd: u32, r
             let (vd, vm) = ((op >> 12) & 0xF, op & 0xF);
             let (d_bit, m_bit) = (op & (1 << 22) != 0, op & (1 << 5) != 0);
             if double {
-                vfp_load(out, true, rm, 16);
+                vfp_load(out, w, true, rm, 16);
                 emit!(out, "\tfcvt s19, d16");
-                vfp_store(out, false, sreg(vd, d_bit), 19);
+                vfp_store(out, w, false, sreg(vd, d_bit), 19);
             } else {
-                vfp_load(out, false, sreg(vm, m_bit), 16);
+                vfp_load(out, w, false, sreg(vm, m_bit), 16);
                 emit!(out, "\tfcvt d19, s16");
-                vfp_store(out, true, dreg(vd, d_bit), 19);
+                vfp_store(out, w, true, dreg(vd, d_bit), 19);
             }
         }
         // vcvt from an integer, bit 7 set for signed
         (0b1000, _) => {
-            emit!(out, "\tldr w16, [x24, #{}]", 4 * sreg(op & 0xF, op & (1 << 5) != 0));
+            word_load(out, w, sreg(op & 0xF, op & (1 << 5) != 0), "w16");
             emit!(out, "\t{} {v}19, w16", if top { "scvtf" } else { "ucvtf" });
-            vfp_store(out, double, rd, 19);
+            vfp_store(out, w, double, rd, 19);
         }
         // vcvt to an integer rounding toward zero, saturating, NaN to 0
         (0b1100 | 0b1101, true) => {
-            vfp_load(out, double, rm, 16);
+            vfp_load(out, w, double, rm, 16);
             emit!(out, "\t{} w16, {v}16", if (op >> 16) & 1 != 0 { "fcvtzs" } else { "fcvtzu" });
-            emit!(out, "\tstr w16, [x24, #{}]", 4 * sreg((op >> 12) & 0xF, op & (1 << 22) != 0));
+            word_store(out, w, sreg((op >> 12) & 0xF, op & (1 << 22) != 0), "w16");
         }
         _ => return None,
     }
@@ -830,7 +903,7 @@ fn vfp_extension(out: &mut String, w: &Writer, op: u32, double: bool, rd: u32, r
 
 /// vmrs, and the moves between a core register and a single. vmsr, which
 /// changes how later VFP code runs, is the C's.
-fn vfp_transfer(out: &mut String, op: u32) -> Option<bool> {
+fn vfp_transfer(out: &mut String, w: &Writer, op: u32) -> Option<bool> {
     let load = op & (1 << 20) != 0;
     let rt = (op >> 12) & 0xF;
     match (op >> 21) & 7 {
@@ -846,7 +919,11 @@ fn vfp_transfer(out: &mut String, op: u32) -> Option<bool> {
         }
         0 if rt != 15 => {
             let sn = sreg((op >> 16) & 0xF, op & (1 << 7) != 0);
-            emit!(out, "\t{} w{rt}, [x24, #{}]", if load { "ldr" } else { "str" }, 4 * sn);
+            if load {
+                word_load(out, w, sn, &format!("w{rt}"));
+            } else {
+                word_store(out, w, sn, &format!("w{rt}"));
+            }
             Some(true)
         }
         _ => None,
@@ -855,7 +932,7 @@ fn vfp_transfer(out: &mut String, op: u32) -> Option<bool> {
 
 /// vldr, vstr, vldm and vstm, and the moves between two core registers and
 /// a double or two singles, w17 walking up from the first address.
-fn vfp_load_store(out: &mut String, a: u32, op: u32) -> Option<bool> {
+fn vfp_load_store(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     let coprocessor = (op >> 8) & 0xF;
     if coprocessor != 10 && coprocessor != 11 {
         return None;
@@ -875,9 +952,13 @@ fn vfp_load_store(out: &mut String, a: u32, op: u32) -> Option<bool> {
             let sm = sreg(vm, m_bit);
             (sm, (sm + 1) & 31)
         };
-        let verb = if load { "ldr" } else { "str" };
-        emit!(out, "\t{verb} w{rt}, [x24, #{}]", 4 * low);
-        emit!(out, "\t{verb} w{rt2}, [x24, #{}]", 4 * high);
+        for (single, core) in [(low, rt), (high, rt2)] {
+            if load {
+                word_load(out, w, single, &format!("w{core}"));
+            } else {
+                word_store(out, w, single, &format!("w{core}"));
+            }
+        }
         return Some(true);
     }
     let pre = op & (1 << 24) != 0;
@@ -919,9 +1000,9 @@ fn vfp_load_store(out: &mut String, a: u32, op: u32) -> Option<bool> {
             };
             if load {
                 emit!(out, "\tldr w16, [x20, {address}, uxtw]");
-                emit!(out, "\tstr w16, [x24, #{}]", 4 * word);
+                word_store(out, w, word, "w16");
             } else {
-                emit!(out, "\tldr w16, [x24, #{}]", 4 * word);
+                word_load(out, w, word, "w16");
                 emit!(out, "\tstr w16, [x20, {address}, uxtw]");
             }
         }
@@ -955,6 +1036,7 @@ fn branch_exchange(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
         emit!(out, "\tstr w16, [x19, #{R15}]");
         call_out(out, w, Callee::Lookup);
         returned(out, w, next);
+        w.fill(out);
         return Some(true);
     }
     if rm == 14 {
@@ -1619,26 +1701,55 @@ fn blocks(program: &Program, w: &Writer, function: &Function) -> Vec<(u32, usize
     while i < instructions.len() {
         let start = instructions[i];
         let run = instructions[i + 1..].iter().take_while(|a| !w.labels.contains(a)).count() + 1;
-        let mut text = Some(String::new());
-        w.vector.set(false);
-        for (j, &address) in instructions[i..i + run].iter().enumerate() {
-            let op = program.text.read32(address).unwrap_or(0);
-            let Some((asm, continues)) = lower(w, address, op) else {
-                text = None;
-                break;
-            };
-            let body = text.as_mut().expect("still translating");
-            body.push_str(&asm);
-            let next = address + 4;
-            if continues && instructions.get(i + j + 1) != Some(&next) {
-                constant(body, "w22", next);
-                dispatch(body, w);
-            }
-        }
+        let text = block(program, w, &instructions[i..], run);
         blocks.push((start, run, text, w.vector.get()));
         i += run;
     }
     blocks
+}
+
+/// a block's assembly: written once to see which singles it uses, then
+/// again with them kept in host registers when it works on no doubles and
+/// they fit, read at its start and written back on every way out.
+fn block(program: &Program, w: &Writer, instructions: &[u32], run: usize) -> Option<String> {
+    *w.cache.borrow_mut() = None;
+    w.used.borrow_mut().clear();
+    w.written.borrow_mut().clear();
+    w.doubles.set(false);
+    let plain = block_text(program, w, instructions, run)?;
+    let used = w.used.borrow().clone();
+    if used.is_empty() || w.doubles.get() || used.len() > CACHE.len() {
+        return Some(plain);
+    }
+    *w.cache.borrow_mut() = Some(used.iter().copied().zip(CACHE).collect());
+    let cached = block_text(program, w, instructions, run);
+    let mut text = String::new();
+    w.fill(&mut text);
+    text.push_str(&cached?);
+    *w.cache.borrow_mut() = None;
+    Some(text)
+}
+
+fn block_text(program: &Program, w: &Writer, instructions: &[u32], run: usize) -> Option<String> {
+    let mut body = String::new();
+    w.vector.set(false);
+    let mut falls = false;
+    for (j, &address) in instructions[..run].iter().enumerate() {
+        let op = program.text.read32(address).unwrap_or(0);
+        let (asm, continues) = lower(w, address, op)?;
+        body.push_str(&asm);
+        let next = address + 4;
+        falls = continues && instructions.get(j + 1) == Some(&next);
+        if continues && !falls {
+            constant(&mut body, "w22", next);
+            dispatch(&mut body, w);
+        }
+    }
+    // on into the next block, which reads its own
+    if falls {
+        w.spill(&mut body);
+    }
+    Some(body)
 }
 
 /// how many of the function's instructions are in blocks the translator
@@ -1647,7 +1758,7 @@ pub fn coverage(program: &Program, entry: u32, function: &Function, labels: &BTr
     if function.mode != Mode::Arm {
         return 0;
     }
-    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default() };
+    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() };
     let blocks = blocks(program, &w, function);
     if !blocks.iter().any(|(start, _, text, _)| *start == entry && text.is_some()) {
         return 0;
@@ -1661,7 +1772,7 @@ pub fn refusals(program: &Program, entry: u32, function: &Function, labels: &BTr
     if function.mode != Mode::Arm {
         return vec![("thumb", function.instructions.len())];
     }
-    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default() };
+    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() };
     let instructions = &function.instructions;
     blocks(program, &w, function)
         .into_iter()
@@ -1714,7 +1825,7 @@ pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeS
 /// the function's assembly, entered at its entry as the C is, the C named
 /// c_name running it from anywhere else.
 pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str) {
-    let w = Writer { entry, labels, functions, fallback: c_name.to_owned(), made: Default::default(), vector: Default::default() };
+    let w = Writer { entry, labels, functions, fallback: c_name.to_owned(), made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() };
     let name = name(entry);
     let enter = w.local();
     emit!(out, "\t.globl {name}");
