@@ -69,6 +69,8 @@ pub fn preparing() -> (usize, usize) {
 pub(super) const SKIPPED: &str = "skipped at the start";
 /// what they give back for a precache list's program, let go once saved.
 pub(super) const SAVED: &str = "saved for later";
+/// one the driver turned down in an earlier start, which said why then.
+pub(super) const REFUSED: &str = "the driver turned this program down before";
 pub(super) static SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// the game starts now: the start's programs not built yet are left to be
@@ -583,6 +585,12 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
     if separable() {
         return build_separable(gl, vertex, fragment);
     }
+    // one the driver turned down before isn't built again, the driver's own
+    // version in the saved copy's name
+    let refused = cached.map(|path| path.with_extension("refused"));
+    if refused.as_deref().is_some_and(std::path::Path::exists) {
+        return Err(REFUSED.to_owned());
+    }
     let _compiling = compiler_lock();
     let _watched = Watched;
     // SAFETY: the context is current on this thread, the shaders are deleted
@@ -625,6 +633,7 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
                         }
                     }
                     gl.delete_program(program);
+                    refuse(refused.as_deref(), &error);
                     return Err(error);
                 }
                 stages[index] = began.elapsed();
@@ -648,6 +657,7 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
             if !linked {
                 let error = format!("could not link a program, {}", gl.get_program_info_log(program));
                 gl.delete_program(program);
+                refuse(refused.as_deref(), &error);
                 return Err(error);
             }
             if let (Some(path), Some(binary)) = (cached, gl.get_program_binary(program)) {
@@ -664,6 +674,14 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
         }
         log::debug!("program {} in {:.1} ms", if loaded { "loaded" } else { "compiled" }, started.elapsed().as_secs_f64() * 1000.0);
         Ok(program)
+    }
+}
+
+/// remembers a program the driver turned down, so that the next starts
+/// don't build it again, unless it was short of memory, which may pass.
+fn refuse(path: Option<&std::path::Path>, error: &str) {
+    if let Some(path) = path.filter(|_| !error.to_lowercase().contains("memory")) {
+        let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, error));
     }
 }
 

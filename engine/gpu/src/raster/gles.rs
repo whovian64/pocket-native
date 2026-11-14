@@ -2942,7 +2942,7 @@ impl Gles {
         disturb();
         let program = match build_program(&self.gl, &compiled, &fragment, cached.as_deref()) {
             Ok(program) => program,
-            Err(error) if self.retried.insert(key.clone()) => {
+            Err(error) if error != REFUSED && self.retried.insert(key.clone()) => {
                 log::warn!("{error}");
                 self.make_room();
                 build_program(&self.gl, &compiled, &fragment, cached.as_deref())?
@@ -2982,12 +2982,14 @@ impl Gles {
                     self.precache_stamp = None;
                 }
                 Err(error) => {
-                    log::warn!("{error}");
                     // the driver out of memory, most likely: the next draw
                     // that needs it tries again once room is made
-                    if self.retried.insert(key.clone()) {
-                        self.make_room();
-                        continue;
+                    if error != REFUSED {
+                        log::warn!("{error}");
+                        if self.retried.insert(key.clone()) {
+                            self.make_room();
+                            continue;
+                        }
                     }
                     self.inputs.remove(&key);
                     if key.3 != 0 {
@@ -4816,6 +4818,27 @@ mod tests {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             data
         })
+    }
+
+    /// a program the driver turned down is remembered beside its saved
+    /// copy, and the next build of it is turned down without the driver.
+    #[test]
+    fn a_program_the_driver_turned_down_is_not_built_again() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let dir = std::env::temp_dir().join(format!("zakuro-refused-{}", std::process::id()));
+        let cached = dir.join("0.bin");
+        let broken = "#version 310 es\nvoid main() { not a shader }\n";
+        let build = || gles.worker.run(|| build_program(&gles.gl, broken, broken, Some(&cached)));
+        assert!(build().is_err());
+        assert!(cached.with_extension("refused").exists());
+        assert_eq!(build().unwrap_err(), REFUSED);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
