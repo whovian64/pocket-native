@@ -76,7 +76,8 @@ pub fn dump(path: &std::path::Path) {
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let (range, _, offset) = (fields.next()?, fields.next()?, fields.next()?);
-            let path = fields.nth(2).unwrap_or("").to_owned();
+            // the rest of the line, a path with spaces in it whole
+            let path = fields.skip(2).collect::<Vec<_>>().join(" ");
             let (start, end) = range.split_once('-')?;
             Some((u64::from_str_radix(start, 16).ok()?, u64::from_str_radix(end, 16).ok()?, u64::from_str_radix(offset, 16).ok()?, path))
         })
