@@ -153,7 +153,9 @@ int main(int argc, char **argv) {
             }
             ctx.exit = 0;
             code(&ctx);
+            /* the host counts cycles from what is left of the budget */
             fold(((uint64_t)ctx.exit << 32) | ctx.r[15]);
+            fold((uint32_t)ctx.budget);
             if (t == traced) {
                 printf("%d exit %u r15 %08x", resumes, ctx.exit, ctx.r[15]);
                 for (int i = 0; i < 15; i++) printf(" %08x", ctx.r[i]);
