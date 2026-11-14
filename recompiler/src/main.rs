@@ -293,10 +293,10 @@ fn analyze(path: &str) {
     let names: std::collections::BTreeMap<u32, String> = analyses[0].functions.keys().map(|&entry| (entry, format!("f_{entry:08X}"))).collect();
     let (mut worth, mut covered, mut lacking) = (0, 0, std::collections::BTreeMap::<&str, usize>::new());
     for (&entry, function) in &analyses[0].functions {
-        let taken = recomp3ds::codegen::a64::coverage(&programs[0].1, entry, function, &function.labels, &names);
+        let taken = recomp3ds::codegen::a64::coverage(&programs[0].1, entry, function, &function.labels, &names, "");
         covered += taken;
-        worth += recomp3ds::codegen::a64::worth(&programs[0].1, entry, function, &function.labels, &names) as usize;
-        for (kind, run) in recomp3ds::codegen::a64::refusals(&programs[0].1, entry, function, &function.labels, &names) {
+        worth += recomp3ds::codegen::a64::worth(&programs[0].1, entry, function, &function.labels, &names, "") as usize;
+        for (kind, run) in recomp3ds::codegen::a64::refusals(&programs[0].1, entry, function, &function.labels, &names, "") {
             *lacking.entry(kind).or_default() += run;
         }
     }

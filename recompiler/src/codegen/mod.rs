@@ -169,6 +169,7 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
 pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(String, String)> {
     let mut files = vec![("recomp.h".to_owned(), HEADER.to_owned())];
     let mut assembly: Vec<String> = Vec::new();
+    let mut assembled = None;
     let mut sources: Vec<String> = Vec::new();
     let mut source = String::new();
     // the headers the file being written includes
@@ -236,18 +237,18 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
 
         // the executable's functions worth writing as assembly, which calls
         // and their entries go to from then on
-        let translated: BTreeSet<u32> = if a64 && !relative {
+        let translated: BTreeSet<u32> = if a64 {
             functions
                 .keys()
                 .copied()
                 .filter(|&entry| names.get(&entry) == Some(&name(&prefix, entry, false)))
-                .filter(|entry| a64::worth(unit.program, *entry, &resumed[entry], &resumed[entry].labels, &names))
+                .filter(|entry| a64::worth(unit.program, *entry, &resumed[entry], &resumed[entry].labels, &names, &prefix))
                 .collect()
         } else {
             BTreeSet::new()
         };
         for &entry in &translated {
-            names.insert(entry, a64::name(entry));
+            names.insert(entry, a64::name(&prefix, entry));
         }
 
         let mut prototypes = String::new();
@@ -261,7 +262,7 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
             emit!(prototypes, "void {}(Context *ctx);", name(&prefix, entry, function.mode == Mode::Thumb));
         }
         for &entry in &translated {
-            emit!(prototypes, "void {}(Context *ctx);", a64::name(entry));
+            emit!(prototypes, "void {}(Context *ctx);", a64::name(&prefix, entry));
         }
         files.push((header.clone(), prototypes));
 
@@ -279,12 +280,14 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
             let scope = Scope { labels: &resumable.labels, functions: &names, prefix: &prefix, relative, interpreted: &interpreted };
             write_function(&mut source, unit.program, &scope, entry, resumable);
             if translated.contains(&entry) {
-                if assembly.last().is_none_or(|_| written >= FILE_SIZE) {
-                    assembly.push(a64::PRELUDE.to_owned());
+                // a file for each unit: its local labels go by address
+                if assembly.last().is_none_or(|_| written >= FILE_SIZE) || assembled != Some(index) {
+                    assembly.push(a64::prelude(relative));
+                    assembled = Some(index);
                     written = 0;
                 }
                 let text = assembly.last_mut().expect("a file to write into");
-                a64::write(text, unit.program, entry, resumable, &resumable.labels, &names, &name(&prefix, entry, false));
+                a64::write(text, unit.program, entry, resumable, &resumable.labels, &names, &name(&prefix, entry, false), &prefix);
                 written += function.instructions.len();
             }
             size += function.instructions.len();
@@ -303,7 +306,7 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
             for &label in resumed.get(&entry).map_or(&function.labels, |resumable| &resumable.labels) {
                 let slot = entries.entry(key(label, function.mode)).or_insert_with(|| owner.clone());
                 if label == entry {
-                    *slot = if translated.contains(&entry) { a64::name(entry) } else { owner.clone() };
+                    *slot = if translated.contains(&entry) { a64::name(&prefix, entry) } else { owner.clone() };
                 }
             }
         }

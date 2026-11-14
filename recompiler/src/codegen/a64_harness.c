@@ -14,10 +14,14 @@
 
 extern const uint32_t recomp_entry_count;
 extern const Entry recomp_entries[];
+extern const uint32_t recomp_module_count;
+extern const Module recomp_modules[];
 
 #define SPAN ((uint64_t)1 << 32)
 #define SENTINEL 0x7F000000u
 #define MOST_PAGES 65536
+/* where the modules go, one after the other */
+#define MODULE_BASE 0x0DA5C000u
 
 static uint8_t *view;
 static uint32_t pages[MOST_PAGES];
@@ -63,13 +67,24 @@ static int by_number(const void *a, const void *b) {
 
 static Code lookup(Context *ctx, uint32_t address) {
     (void)ctx;
-    uint32_t low = 0, high = recomp_entry_count;
+    const Entry *entries = recomp_entries;
+    uint32_t count = recomp_entry_count;
+    for (uint32_t m = 0; m < recomp_module_count; m++) {
+        uint32_t offset = address - *recomp_modules[m].base;
+        if (offset < recomp_modules[m].size) {
+            entries = recomp_modules[m].entries;
+            count = recomp_modules[m].count;
+            address = offset;
+            break;
+        }
+    }
+    uint32_t low = 0, high = count;
     while (low < high) {
         uint32_t middle = (low + high) / 2;
-        if (recomp_entries[middle].address < address) low = middle + 1;
+        if (entries[middle].address < address) low = middle + 1;
         else high = middle;
     }
-    return low < recomp_entry_count && recomp_entries[low].address == address ? recomp_entries[low].code : 0;
+    return low < count && entries[low].address == address ? entries[low].code : 0;
 }
 
 static void interpret(Context *ctx, uint32_t address, uint32_t opcode) {
@@ -94,6 +109,7 @@ int main(int argc, char **argv) {
     action.sa_sigaction = on_fault;
     action.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &action, 0);
+    for (uint32_t m = 0; m < recomp_module_count; m++) *recomp_modules[m].base = MODULE_BASE + m * 0x01000000u;
     static uint32_t vfp[32], fpscr;
     for (int t = 0; t < trials; t++) {
         view = mmap(0, SPAN + 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);

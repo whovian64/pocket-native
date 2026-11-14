@@ -29,7 +29,12 @@ macro_rules! emit {
 
 /// what every assembly file starts with: writing the guest's state back to
 /// the context and reading it again, and the frame.
-pub const PRELUDE: &str = "\t.text
+/// what each file starts with, a module's restoring w27 as its code leaves.
+pub fn prelude(relative: bool) -> String {
+    format!("\t.set pn_module, {}\n{PRELUDE}", relative as u8)
+}
+
+const PRELUDE: &str = "\t.text
 \t.arch armv8-a
 .macro pn_flush_inline
 \tstp w0, w1, [x19, #0]
@@ -75,7 +80,7 @@ pub const PRELUDE: &str = "\t.text
 \tstp x21, x22, [sp, #32]
 \tstp x23, x24, [sp, #48]
 \tstp x25, x26, [sp, #64]
-\tstr xzr, [sp, #80]
+\tstp xzr, x27, [sp, #80]
 \tmov x19, x0
 \tldr x20, [x19, #144]
 \tldr x24, [x19, #112]
@@ -89,13 +94,16 @@ pub const PRELUDE: &str = "\t.text
 \tstp x23, x24, [sp, #48]
 \tstp x25, xzr, [sp, #64]
 \tmov x16, #1
-\tstr x16, [sp, #80]
+\tstp x16, x27, [sp, #80]
 .endm
 .macro pn_leave
 \tldp x19, x20, [sp, #16]
 \tldp x21, x22, [sp, #32]
 \tldp x23, x24, [sp, #48]
 \tldp x25, x26, [sp, #64]
+.if pn_module
+\tldr x27, [sp, #88]
+.endif
 \tldp x29, x30, [sp], #96
 .endm
 .macro pn_flush
@@ -147,8 +155,8 @@ const DEPTH_LIMIT: u32 = 2048;
 const CONDITIONS: [&str; 14] = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"];
 
 /// the name of a function's assembly.
-pub fn name(entry: u32) -> String {
-    format!("a_{entry:08X}")
+pub fn name(prefix: &str, entry: u32) -> String {
+    format!("{prefix}a_{entry:08X}")
 }
 
 /// a function being translated.
@@ -159,6 +167,10 @@ struct Writer<'a> {
     functions: &'a BTreeMap<u32, String>,
     /// the C that runs the function, which every fallback ends in.
     fallback: String,
+    /// what the unit's names start with, a module's not empty: its code
+    /// moves, its addresses offsets from where the host loaded it.
+    prefix: &'a str,
+    relative: bool,
     /// local labels made so far.
     made: std::cell::Cell<u32>,
     /// whether the block being written has VFP arithmetic a short vector
@@ -174,7 +186,12 @@ struct Writer<'a> {
     doubles: std::cell::Cell<bool>,
 }
 
-impl Writer<'_> {
+impl<'a> Writer<'a> {
+    fn new(entry: u32, labels: &'a BTreeSet<u32>, functions: &'a BTreeMap<u32, String>, fallback: String, prefix: &'a str) -> Self {
+        let relative = !prefix.is_empty();
+        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() }
+    }
+
     fn local(&self) -> String {
         let made = self.made.get();
         self.made.set(made + 1);
@@ -233,6 +250,19 @@ fn word_store(out: &mut String, w: &Writer, single: u32, register: &str) {
     }
 }
 
+/// a guest address into a register: in a module, an offset from its base,
+/// which w27 holds.
+fn guest(out: &mut String, w: &Writer, register: &str, at: u32) {
+    if !w.relative {
+        constant(out, register, at);
+    } else if at < 4096 {
+        emit!(out, "\tadd {register}, w27, #{at}");
+    } else {
+        constant(out, register, at);
+        emit!(out, "\tadd {register}, {register}, w27");
+    }
+}
+
 /// a 32-bit constant into a register.
 fn constant(out: &mut String, register: &str, value: u32) {
     emit!(out, "\tmovz {register}, #0x{:X}", value & 0xFFFF);
@@ -242,10 +272,10 @@ fn constant(out: &mut String, register: &str, value: u32) {
 }
 
 /// hands over to the C at address, everything written back.
-fn fallback(out: &mut String, w: &Writer, address: u32) {
+fn fallback(out: &mut String, w: &Writer, at: u32) {
     w.spill(out);
     emit!(out, "\tpn_flush");
-    constant(out, "w16", address);
+    guest(out, w, "w16", at);
     emit!(out, "\tstr w16, [x19, #{R15}]");
     emit!(out, "\tmov x0, x19");
     emit!(out, "\tpn_leave");
@@ -355,9 +385,9 @@ fn call_out(out: &mut String, w: &Writer, callee: Callee) {
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
 }
 
-/// the way into a translated function for another, or none.
-fn inner(name: &str) -> Option<String> {
-    name.strip_prefix("a_").map(|rest| format!("b_{rest}"))
+/// the way into a translated function of the unit for another, or none.
+fn inner(w: &Writer, name: &str) -> Option<String> {
+    name.strip_prefix(w.prefix)?.strip_prefix("a_").map(|rest| format!("{}b_{rest}", w.prefix))
 }
 
 /// a call into a translated function the registers live, counting depth
@@ -374,7 +404,7 @@ fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
     emit!(out, "\tsub w16, w16, #1");
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
     emit!(out, "\tpn_flush");
-    constant(out, "w16", target);
+    guest(out, w, "w16", target);
     emit!(out, "\tstr w16, [x19, #{R15}]");
     emit!(out, "\tmov w16, #{EXIT_UNWIND}");
     emit!(out, "\tstr w16, [x19, #{EXIT}]");
@@ -389,8 +419,8 @@ fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
 /// a guest call with link the return address, as call in mod.rs writes it,
 /// to Thumb code where thumb.
 fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Option<bool> {
-    if let Some(name) = w.functions.get(&target).and_then(|name| inner(name)).filter(|_| !thumb) {
-        constant(out, "w14", link);
+    if let Some(name) = w.functions.get(&target).and_then(|name| inner(w, name)).filter(|_| !thumb) {
+        guest(out, w, "w14", link);
         call_inner(out, w, target, &name);
         let (live, done) = (w.local(), w.local());
         emit!(out, "\tcbnz x26, {live}");
@@ -398,7 +428,7 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Op
         emit!(out, "\tb {done}");
         // back the plain way: on unless it isn't to the next instruction
         emit!(out, "{live}:");
-        constant(out, "w17", link);
+        guest(out, w, "w17", link);
         emit!(out, "\tsub w16, w22, w17");
         emit!(out, "\tcbz w16, {done}");
         jump_to(out, w);
@@ -406,9 +436,9 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Op
         w.fill(out);
         return Some(true);
     }
-    constant(out, "w14", link);
+    guest(out, w, "w14", link);
     emit!(out, "\tpn_flush");
-    constant(out, "w16", target);
+    guest(out, w, "w16", target);
     emit!(out, "\tstr w16, [x19, #{R15}]");
     if thumb {
         emit!(out, "\tmov w16, #1");
@@ -432,7 +462,7 @@ fn returned(out: &mut String, w: &Writer, link: u32) {
     emit!(out, "\tb pn_leave_sub");
     emit!(out, "{on}:");
     emit!(out, "\tldr w16, [x19, #{R15}]");
-    constant(out, "w17", link);
+    guest(out, w, "w17", link);
     emit!(out, "\tcmp w16, w17");
     emit!(out, "\tldrb w16, [x19, #{THUMB}]");
     emit!(out, "\tccmp w16, #0, #0, eq");
@@ -450,7 +480,7 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
     if w.labels.contains(&target) {
         w.spill(out);
         emit!(out, "\tb {}", w.block(target));
-    } else if let Some(name) = w.functions.get(&target).and_then(|name| inner(name)) {
+    } else if let Some(name) = w.functions.get(&target).and_then(|name| inner(w, name)) {
         // a tail call: its return is this function's
         let back = w.local();
         call_inner(out, w, target, &name);
@@ -460,12 +490,12 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
         return_to(out, w);
     } else if let Some(name) = w.functions.get(&target) {
         emit!(out, "\tpn_flush");
-        constant(out, "w16", target);
+        guest(out, w, "w16", target);
         emit!(out, "\tstr w16, [x19, #{R15}]");
         call_out(out, w, Callee::Named(name));
         emit!(out, "\tb pn_leave_sub");
     } else {
-        constant(out, "w22", target);
+        guest(out, w, "w22", target);
         dispatch(out, w);
     }
     Some(false)
@@ -511,7 +541,7 @@ fn unconditional(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> 
 
 fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     match (op >> 25) & 7 {
-        0b000 if op & 0x90 == 0x90 && (op >> 5) & 3 != 0 => extra_transfer(out, a, op),
+        0b000 if op & 0x90 == 0x90 && (op >> 5) & 3 != 0 => extra_transfer(out, w, a, op),
         0b000 if op & 0x90 == 0x90 && op & (1 << 24) != 0 => None,
         0b000 if op & 0x90 == 0x90 => match (op >> 21) & 7 {
             0b000 | 0b001 => multiply(out, op),
@@ -721,7 +751,7 @@ fn svc(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     w.spill(out);
     let on = w.local();
     emit!(out, "\tpn_flush");
-    constant(out, "w16", a + 4);
+    guest(out, w, "w16", a + 4);
     emit!(out, "\tstr w16, [x19, #{R15}]");
     emit!(out, "\tmov x0, x19");
     constant(out, "w1", op & 0x00FF_FFFF);
@@ -979,7 +1009,7 @@ fn vfp_load_store(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
         op & 0xFF
     };
     let base = if rn == 15 {
-        constant(out, "w15", a + 8);
+        guest(out, w, "w15", a + 8);
         "w15".to_owned()
     } else {
         format!("w{rn}")
@@ -1019,13 +1049,13 @@ fn vfp_load_store(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
 fn branch_exchange(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     let rm = op & 0xF;
     if rm == 15 {
-        constant(out, "w22", a + 8);
+        guest(out, w, "w22", a + 8);
     } else {
         emit!(out, "\tmov w22, w{rm}");
     }
     if (op >> 4) & 0xF == 0b0011 {
         let next = a + 4;
-        constant(out, "w14", next);
+        guest(out, w, "w14", next);
         emit!(out, "\tpn_flush");
         emit!(out, "\tand w16, w22, #1");
         emit!(out, "\tstrb w16, [x19, #{THUMB}]");
@@ -1143,6 +1173,14 @@ fn shifter_operand(out: &mut String, w: &Writer, a: u32, op: u32, carry: bool) -
     let rm = op & 0xF;
     let kind = (op >> 5) & 3;
     let amount = (op >> 7) & 0x1F;
+    if rm == 15 && w.relative {
+        // in a module only as it is, the shift at run time not worth it
+        if kind != 0 || amount != 0 {
+            return None;
+        }
+        guest(out, w, "w16", a + 8);
+        return Some(Carry::Kept);
+    }
     if rm == 15 {
         // the address the pipeline gives r15, shifted here
         let m = a + 8;
@@ -1442,7 +1480,7 @@ fn data_processing(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     let first = if matches!(opcode, 13 | 15) {
         String::new()
     } else if rn == 15 {
-        constant(out, "w15", a + 8);
+        guest(out, w, "w15", a + 8);
         "w15".to_owned()
     } else {
         format!("w{rn}")
@@ -1501,7 +1539,7 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
         return None;
     }
     let base = if rn == 15 {
-        constant(out, "w15", a + 8);
+        guest(out, w, "w15", a + 8);
         "w15".to_owned()
     } else {
         format!("w{rn}")
@@ -1544,7 +1582,7 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     } else {
         // storing r15 stores the address plus 12
         let value = if rd == 15 {
-            constant(out, "w16", a + 12);
+            guest(out, w, "w16", a + 12);
             "w16".to_owned()
         } else {
             format!("w{rd}")
@@ -1558,7 +1596,7 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
 }
 
 /// ldrh, strh, ldrsb, ldrsh, ldrd and strd.
-fn extra_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
+fn extra_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     let rn = (op >> 16) & 0xF;
     let rd = (op >> 12) & 0xF;
     let pre = op & (1 << 24) != 0;
@@ -1572,13 +1610,13 @@ fn extra_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
     let offset = if op & (1 << 22) != 0 {
         format!("#{}", ((op >> 4) & 0xF0) | (op & 0xF))
     } else if op & 0xF == 15 {
-        constant(out, "w16", a + 8);
+        guest(out, w, "w16", a + 8);
         "w16".to_owned()
     } else {
         format!("w{}", op & 0xF)
     };
     let base = if rn == 15 {
-        constant(out, "w15", a + 8);
+        guest(out, w, "w15", a + 8);
         "w15".to_owned()
     } else {
         format!("w{rn}")
@@ -1607,7 +1645,7 @@ fn extra_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
         (1, false) => {
             // a halfword of r15 stores the address plus 8
             let value = if rd == 15 {
-                constant(out, "w16", a + 8);
+                guest(out, w, "w16", a + 8);
                 "w16".to_owned()
             } else {
                 format!("w{rd}")
@@ -1674,7 +1712,7 @@ fn block_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
     } else {
         for &register in &registers {
             let value = if register == 15 {
-                constant(out, "w16", a + 12);
+                guest(out, w, "w16", a + 12);
                 "w16".to_owned()
             } else if register == rn && writeback && list & ((1 << rn) - 1) != 0 {
                 // the base when it is not the lowest register stores its new value
@@ -1741,7 +1779,7 @@ fn block_text(program: &Program, w: &Writer, instructions: &[u32], run: usize) -
         let next = address + 4;
         falls = continues && instructions.get(j + 1) == Some(&next);
         if continues && !falls {
-            constant(&mut body, "w22", next);
+            guest(&mut body, w, "w22", next);
             dispatch(&mut body, w);
         }
     }
@@ -1754,11 +1792,11 @@ fn block_text(program: &Program, w: &Writer, instructions: &[u32], run: usize) -
 
 /// how many of the function's instructions are in blocks the translator
 /// takes, none when its entry's block isn't one.
-pub fn coverage(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>) -> usize {
+pub fn coverage(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, prefix: &str) -> usize {
     if function.mode != Mode::Arm {
         return 0;
     }
-    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() };
+    let w = Writer::new(entry, labels, functions, String::new(), prefix);
     let blocks = blocks(program, &w, function);
     if !blocks.iter().any(|(start, _, text, _)| *start == entry && text.is_some()) {
         return 0;
@@ -1768,11 +1806,11 @@ pub fn coverage(program: &Program, entry: u32, function: &Function, labels: &BTr
 
 /// what keeps the translator off each block it doesn't take: the kind of
 /// its first instruction it can't, with how many instructions the block holds.
-pub fn refusals(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>) -> Vec<(&'static str, usize)> {
+pub fn refusals(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, prefix: &str) -> Vec<(&'static str, usize)> {
     if function.mode != Mode::Arm {
         return vec![("thumb", function.instructions.len())];
     }
-    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() };
+    let w = Writer::new(entry, labels, functions, String::new(), prefix);
     let instructions = &function.instructions;
     blocks(program, &w, function)
         .into_iter()
@@ -1817,35 +1855,47 @@ fn kind(op: u32) -> &'static str {
 
 /// whether the function is worth translating: ARM code whose entry the
 /// translator takes, with half its instructions or more.
-pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>) -> bool {
-    let translated = coverage(program, entry, function, labels, functions);
+pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, prefix: &str) -> bool {
+    let translated = coverage(program, entry, function, labels, functions, prefix);
     translated > 0 && translated * 2 >= function.instructions.len()
 }
 
 /// the function's assembly, entered at its entry as the C is, the C named
 /// c_name running it from anywhere else.
-pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str) {
-    let w = Writer { entry, labels, functions, fallback: c_name.to_owned(), made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default() };
-    let name = name(entry);
+pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str, prefix: &str) {
+    let w = Writer::new(entry, labels, functions, c_name.to_owned(), prefix);
+    let name = name(prefix, entry);
     let enter = w.local();
     emit!(out, "\t.globl {name}");
     emit!(out, "\t.hidden {name}");
     emit!(out, "\t.type {name}, %function");
     emit!(out, "\t.p2align 4");
     emit!(out, "{name}:");
-    // anywhere but the entry is the C's
+    // anywhere but the entry is the C's. a module's base goes in w27 once
+    // the caller's is saved, the guest's registers free till then
     emit!(out, "\tldr w16, [x0, #{R15}]");
     emit!(out, "\tldrb w17, [x0, #{THUMB}]");
-    constant(out, "w15", entry);
-    emit!(out, "\tcmp w16, w15");
+    if w.relative {
+        emit!(out, "\tadrp x15, {prefix}base");
+        emit!(out, "\tldr w15, [x15, :lo12:{prefix}base]");
+        constant(out, "w1", entry);
+        emit!(out, "\tadd w1, w1, w15");
+        emit!(out, "\tcmp w16, w1");
+    } else {
+        constant(out, "w15", entry);
+        emit!(out, "\tcmp w16, w15");
+    }
     emit!(out, "\tccmp w17, #0, #0, eq");
     emit!(out, "\tb.eq {enter}");
     emit!(out, "\tb {c_name}");
     emit!(out, "{enter}:");
     emit!(out, "\tpn_enter");
+    if w.relative {
+        emit!(out, "\tmov w27, w15");
+    }
     emit!(out, "\tpn_reload");
     emit!(out, "\tb {}", w.block(entry));
-    let inner = format!("b_{entry:08X}");
+    let inner = format!("{prefix}b_{entry:08X}");
     emit!(out, "\t.globl {inner}");
     emit!(out, "\t.hidden {inner}");
     emit!(out, "\t.type {inner}, %function");
@@ -1878,7 +1928,7 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
                 emit!(out, "{on}:");
                 out.push_str(&text);
                 emit!(stubs, "{out_of_budget}:");
-                constant(&mut stubs, "w22", start);
+                guest(&mut stubs, &w, "w22", start);
                 constant(&mut stubs, "w23", run as u32);
                 emit!(stubs, "\tb pn_budget_sub");
             }
@@ -1902,6 +1952,10 @@ mod tests {
     const CALLEE: u32 = BASE + 0x800;
     /// a Thumb function: adds r0, 1, then bx lr.
     const THUMB_CALLEE: u32 = BASE + 0xC00;
+    /// where the harness loads a module, and where a module's copy of a
+    /// program starts in it.
+    const MODULE_BASE: u32 = 0x0DA5_C000;
+    const MODULE_OFFSET: u32 = 0xFA0;
 
     struct Random(u64);
 
@@ -2139,7 +2193,7 @@ mod tests {
     }
 
     /// the files built with the harness for qemu, its digests per trial.
-    fn run(dir: &std::path::Path, files: &[(String, String)], trials: u32) -> String {
+    fn run(dir: &std::path::Path, files: &[(String, String)], trials: u32, entry: u32) -> String {
         std::fs::create_dir_all(dir).unwrap();
         let mut sources = vec![dir.join("harness.c")];
         std::fs::write(&sources[0], include_str!("a64_harness.c")).unwrap();
@@ -2159,7 +2213,7 @@ mod tests {
             .output()
             .unwrap();
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
-        let ran = Command::new("qemu-aarch64-static").arg(&binary).arg(trials.to_string()).output().unwrap();
+        let ran = Command::new("qemu-aarch64-static").arg(&binary).arg(trials.to_string()).arg(format!("{entry:x}")).output().unwrap();
         assert!(ran.status.success(), "{}: {}", dir.display(), String::from_utf8_lossy(&ran.stderr));
         String::from_utf8(ran.stdout).unwrap()
     }
@@ -2181,8 +2235,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("a64-fixed-{}-{seed}", std::process::id()));
         let hybrid = generate_with(&units, &[], true);
         assert!(hybrid.iter().any(|(name, text)| name.ends_with(".S") && text.contains("a_00100000:")), "the program isn't translated");
-        let expected = run(&root.join("c"), &generate_with(&units, &[], false), 60);
-        let got = run(&root.join("a64"), &hybrid, 60);
+        let expected = run(&root.join("c"), &generate_with(&units, &[], false), 60, BASE);
+        let got = run(&root.join("a64"), &hybrid, 60, BASE);
         assert_eq!(expected, got, "files in {}", root.display());
         if std::env::var_os("A64_KEEP").is_none() {
             let _ = std::fs::remove_dir_all(&root);
@@ -2223,32 +2277,42 @@ mod tests {
         }
         let programs: u64 = std::env::var("A64_FUZZ").ok().and_then(|n| n.parse().ok()).unwrap_or(12);
         let root = std::env::temp_dir().join(format!("a64-fuzz-{}", std::process::id()));
-        let (mut translated, mut covered, mut total) = (0, 0, 0);
+        let (mut translated, mut moved_translated, mut covered, mut total) = (0, 0, 0, 0);
         for seed in 0..programs {
             let words = program(seed);
-            let program = Program {
-                text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
-                seeds: vec![(BASE, Source::Entry)],
+            let at = |base: u32| Program {
+                text: Segment { base, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
+                seeds: vec![(base, Source::Entry)],
                 slots: None,
             };
+            let program = at(BASE);
             let analysis = discover::analyze(&program);
-            let units = [Unit { module: None, program: &program, analysis: &analysis }];
-            let plain = generate_with(&units, &[], false);
-            let hybrid = generate_with(&units, &[], true);
+            // every third one a module too, run from there: its code moves,
+            // at offsets on both sides of 4096 apart from where it's loaded,
+            // and jumps through r10 go to the executable's copy
+            let moved = at(MODULE_OFFSET);
+            let moved_analysis = discover::analyze(&moved);
+            let module = seed % 3 == 2;
+            let units = [Unit { module: None, program: &program, analysis: &analysis }, Unit { module: Some("test.cro"), program: &moved, analysis: &moved_analysis }];
+            let units = if module { &units[..] } else { &units[..1] };
+            let entry = if module { MODULE_BASE + MODULE_OFFSET } else { BASE };
+            let plain = generate_with(units, &[], false);
+            let hybrid = generate_with(units, &[], true);
             translated += hybrid.iter().filter(|(name, _)| name.ends_with(".S")).map(|(_, text)| text.matches("%function").count()).sum::<usize>();
+            moved_translated += hybrid.iter().filter(|(name, _)| name.ends_with(".S")).map(|(_, text)| text.matches("pn_module, 1").count()).sum::<usize>();
             for (&entry, function) in &analysis.functions {
                 let names: BTreeMap<u32, String> = analysis.functions.keys().map(|&e| (e, format!("f_{e:08X}"))).collect();
-                covered += coverage(&program, entry, function, &function.labels, &names);
+                covered += coverage(&program, entry, function, &function.labels, &names, "");
                 total += function.instructions.len();
             }
-            let expected = run(&root.join(format!("{seed}-c")), &plain, 60);
-            let got = run(&root.join(format!("{seed}-a64")), &hybrid, 60);
+            let expected = run(&root.join(format!("{seed}-c")), &plain, 60, entry);
+            let got = run(&root.join(format!("{seed}-a64")), &hybrid, 60, entry);
             if expected != got {
                 let line = expected.lines().zip(got.lines()).find(|(a, b)| a != b);
                 panic!("program {seed} differs, first at {line:?}, files in {}", root.display());
             }
         }
-        eprintln!("{programs} programs alike, {translated} functions as assembly, {covered} of {total} instructions in blocks it takes");
+        eprintln!("{programs} programs alike, {translated} functions as assembly, {moved_translated} files of a module's, {covered} of {total} instructions in blocks it takes");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
