@@ -56,6 +56,11 @@ static void on_fault(int signal_number, siginfo_t *info, void *context) {
     pages[page_count++] = (uint32_t)(offset >> 12);
 }
 
+static int by_number(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
 static Code lookup(Context *ctx, uint32_t address) {
     (void)ctx;
     uint32_t low = 0, high = recomp_entry_count;
@@ -103,7 +108,7 @@ int main(int argc, char **argv) {
         uint64_t s = mix((uint64_t)t * 7919u + 1);
         for (int i = 0; i < 11; i++) {
             s = mix(s);
-            ctx.r[i] = i % 3 == 0 ? (uint32_t)s : (uint32_t)(s & 0x1FF);
+            ctx.r[i] = i % 2 == 0 ? (uint32_t)s : (uint32_t)(s & 0x1FF);
         }
         s = mix(s);
         ctx.r[11] = (uint32_t)(s & 0x3C);
@@ -142,8 +147,10 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 16; i++) fold(ctx.r[i]);
         fold(ctx.n | ctx.z << 8 | ctx.c << 16 | (uint64_t)ctx.v << 24 | (uint64_t)ctx.q << 32 | (uint64_t)ctx.thumb << 40);
         fold(((uint64_t)(uint32_t)ctx.budget << 32) | ctx.depth);
-        /* only pages written count: a load the C compiler found dead and
-           left out touches no page where the assembly's does */
+        /* only pages written count, in order of address: a load the C
+           compiler found dead and left out touches no page where the
+           assembly's does, or touches it later */
+        qsort(pages, page_count, sizeof pages[0], by_number);
         for (int p = 0; p < page_count; p++) {
             uint64_t offset = (uint64_t)pages[p] << 12;
             int written = 0;

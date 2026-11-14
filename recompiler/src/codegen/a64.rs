@@ -79,7 +79,13 @@ pub const PRELUDE: &str = "\t.text
 
 // the context's fields the code touches, as recomp.h lays them out
 const R15: u32 = 60;
+const Q: u32 = 68;
 const THUMB: u32 = 69;
+const GE: u32 = 70;
+const EXCLUSIVE: u32 = 71;
+const HOST: u32 = 128;
+/// the host's lookup, in its table of functions.
+const LOOKUP: u32 = 56;
 const EXIT: u32 = 76;
 const DEPTH: u32 = 84;
 const EXIT_BUDGET: u32 = 2;
@@ -175,10 +181,16 @@ fn jump_to(out: &mut String, w: &Writer) {
     emit!(out, "\tb {}", w.fallback);
 }
 
-/// a call to name, everything written back, r15 already in the context,
-/// counting depth as CALL does, and what follows it: the caller leaves too
-/// when the host has to take over.
-fn call_out(out: &mut String, w: &Writer, name: &str) {
+/// what a call runs: a function by name, or whatever the host has for r15,
+/// as recomp_call does.
+enum Callee<'a> {
+    Named(&'a str),
+    Lookup,
+}
+
+/// a call, everything written back, r15 already in the context, counting
+/// depth as CALL does.
+fn call_out(out: &mut String, w: &Writer, callee: Callee) {
     let go = w.local();
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tadd w16, w16, #1");
@@ -192,21 +204,56 @@ fn call_out(out: &mut String, w: &Writer, name: &str) {
     emit!(out, "\tpn_leave");
     emit!(out, "\tret");
     emit!(out, "{go}:");
-    emit!(out, "\tmov x0, x19");
-    emit!(out, "\tbl {name}");
+    match callee {
+        Callee::Named(name) => {
+            emit!(out, "\tmov x0, x19");
+            emit!(out, "\tbl {name}");
+        }
+        Callee::Lookup => {
+            let (none, done) = (w.local(), w.local());
+            emit!(out, "\tmov x0, x19");
+            emit!(out, "\tldr x16, [x19, #{HOST}]");
+            emit!(out, "\tldr x16, [x16, #{LOOKUP}]");
+            emit!(out, "\tldr w1, [x19, #{R15}]");
+            emit!(out, "\tldrb w17, [x19, #{THUMB}]");
+            emit!(out, "\torr w1, w1, w17");
+            emit!(out, "\tblr x16");
+            emit!(out, "\tcbz x0, {none}");
+            emit!(out, "\tmov x16, x0");
+            emit!(out, "\tmov x0, x19");
+            emit!(out, "\tblr x16");
+            emit!(out, "\tb {done}");
+            emit!(out, "{none}:");
+            emit!(out, "\tmov w16, #{EXIT_UNWIND}");
+            emit!(out, "\tstr w16, [x19, #{EXIT}]");
+            emit!(out, "{done}:");
+        }
+    }
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tsub w16, w16, #1");
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
 }
 
-/// a guest call with link the return address, as call in mod.rs writes it.
-fn call(out: &mut String, w: &Writer, link: u32, target: u32) -> Option<bool> {
-    let name = w.functions.get(&target)?;
+/// a guest call with link the return address, as call in mod.rs writes it,
+/// to Thumb code where thumb.
+fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Option<bool> {
     constant(out, "w14", link);
     emit!(out, "\tpn_flush");
     constant(out, "w16", target);
     emit!(out, "\tstr w16, [x19, #{R15}]");
-    call_out(out, w, name);
+    if thumb {
+        emit!(out, "\tmov w16, #1");
+        emit!(out, "\tstrb w16, [x19, #{THUMB}]");
+    }
+    call_out(out, w, w.functions.get(&(target | thumb as u32)).map_or(Callee::Lookup, |name| Callee::Named(name)));
+    returned(out, w, link);
+    Some(true)
+}
+
+/// after a call: the caller leaves too when the host has to take over, and
+/// anything but a plain return to link goes through the C's dispatch, the
+/// context as it is.
+fn returned(out: &mut String, w: &Writer, link: u32) {
     let (on, again) = (w.local(), w.local());
     // the host takes over, or anything but a plain return to the next
     // instruction goes through the C's dispatch, the context as it is
@@ -226,7 +273,6 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32) -> Option<bool> {
     emit!(out, "\tb {}", w.fallback);
     emit!(out, "{again}:");
     emit!(out, "\tpn_reload");
-    Some(true)
 }
 
 /// a branch without link: to a label of this function, a known function as
@@ -238,7 +284,7 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
         emit!(out, "\tpn_flush");
         constant(out, "w16", target);
         emit!(out, "\tstr w16, [x19, #{R15}]");
-        call_out(out, w, name);
+        call_out(out, w, Callee::Named(name));
         emit!(out, "\tpn_leave");
         emit!(out, "\tret");
     } else {
@@ -257,7 +303,8 @@ fn sign_extend_24(value: u32) -> u32 {
 fn lower(w: &Writer, address: u32, op: u32) -> Option<(String, bool)> {
     let condition = op >> 28;
     if condition == 0xF {
-        return None;
+        let mut body = String::new();
+        return unconditional(&mut body, w, address, op).map(|continues| (body, continues));
     }
     let mut body = String::new();
     let continues = instruction(&mut body, w, address, op)?;
@@ -272,12 +319,32 @@ fn lower(w: &Writer, address: u32, op: u32) -> Option<(String, bool)> {
     Some((out, true))
 }
 
+/// blx to Thumb, clrex, pld and the barriers.
+fn unconditional(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
+    if op & 0xFE00_0000 == 0xFA00_0000 {
+        let offset = (sign_extend_24(op & 0x00FF_FFFF) << 2) | (((op >> 24) & 1) << 1);
+        return call(out, w, a + 4, (a + 8).wrapping_add(offset) & !1, true);
+    }
+    if op & 0xFFF0_00F0 == 0xF570_0010 {
+        emit!(out, "\tstrb wzr, [x19, #{EXCLUSIVE}]");
+        return Some(true);
+    }
+    matches!((op >> 25) & 7, 0b010 | 0b011).then_some(true)
+}
+
 fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     match (op >> 25) & 7 {
         0b000 if op & 0x90 == 0x90 && (op >> 5) & 3 != 0 => extra_transfer(out, a, op),
-        0b000 if op & 0x90 == 0x90 => None,
+        0b000 if op & 0x90 == 0x90 && op & (1 << 24) != 0 => None,
+        0b000 if op & 0x90 == 0x90 => match (op >> 21) & 7 {
+            0b000 | 0b001 => multiply(out, op),
+            0b010 | 0b100..=0b111 => multiply_long(out, op),
+            _ => None,
+        },
         0b000 if (op >> 23) & 3 == 0b10 && op & (1 << 20) == 0 => match (op >> 4) & 0xF {
-            0b0001 if (op >> 21) & 3 != 0b11 => branch_exchange(out, op),
+            0b0000 if op & (1 << 22) == 0 && op & (1 << 21) == 0 => mrs(out, op),
+            0b0001 if (op >> 21) & 3 == 0b11 => clz(out, op),
+            0b0001 | 0b0011 => branch_exchange(out, w, a, op),
             _ => None,
         },
         0b000 => data_processing(out, w, a, op),
@@ -289,20 +356,116 @@ fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
         0b100 => block_transfer(out, w, a, op),
         0b101 => {
             let target = (a + 8).wrapping_add(sign_extend_24(op & 0x00FF_FFFF) << 2);
-            if op & (1 << 24) != 0 { call(out, w, a + 4, target) } else { jump(out, w, target) }
+            if op & (1 << 24) != 0 { call(out, w, a + 4, target, false) } else { jump(out, w, target) }
         }
         _ => None,
     }
 }
 
-/// bx lr returns, any other bx is the C's.
-fn branch_exchange(out: &mut String, op: u32) -> Option<bool> {
-    if op & 0xF != 14 {
+/// bx and blx through a register: bx lr returns, any other bx jumps, and
+/// blx calls whatever the host has there.
+fn branch_exchange(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
+    let rm = op & 0xF;
+    if rm == 15 {
+        constant(out, "w22", a + 8);
+    } else {
+        emit!(out, "\tmov w22, w{rm}");
+    }
+    if (op >> 4) & 0xF == 0b0011 {
+        let next = a + 4;
+        constant(out, "w14", next);
+        emit!(out, "\tpn_flush");
+        emit!(out, "\tand w16, w22, #1");
+        emit!(out, "\tstrb w16, [x19, #{THUMB}]");
+        emit!(out, "\ttst w22, #1");
+        emit!(out, "\tand w17, w22, #0xfffffffe");
+        emit!(out, "\tand w16, w22, #0xfffffffc");
+        emit!(out, "\tcsel w16, w17, w16, ne");
+        emit!(out, "\tstr w16, [x19, #{R15}]");
+        call_out(out, w, Callee::Lookup);
+        returned(out, w, next);
+        return Some(true);
+    }
+    if rm == 14 {
+        return_to(out);
+    } else {
+        jump_to(out, w);
+    }
+    Some(false)
+}
+
+/// mrs of the cpsr: the flags, q and ge over system mode.
+fn mrs(out: &mut String, op: u32) -> Option<bool> {
+    let rd = (op >> 12) & 0xF;
+    if rd == 15 {
         return None;
     }
-    emit!(out, "\tmov w22, w14");
-    return_to(out);
-    Some(false)
+    emit!(out, "\tmrs x16, nzcv");
+    emit!(out, "\tand w16, w16, #0xf0000000");
+    emit!(out, "\tldrb w17, [x19, #{Q}]");
+    emit!(out, "\torr w16, w16, w17, lsl #27");
+    emit!(out, "\tldrb w17, [x19, #{GE}]");
+    emit!(out, "\tand w17, w17, #0xf");
+    emit!(out, "\torr w16, w16, w17, lsl #16");
+    emit!(out, "\torr w{rd}, w16, #0x1f");
+    Some(true)
+}
+
+fn clz(out: &mut String, op: u32) -> Option<bool> {
+    let (rd, rm) = ((op >> 12) & 0xF, op & 0xF);
+    if rd == 15 || rm == 15 {
+        return None;
+    }
+    emit!(out, "\tclz w{rd}, w{rm}");
+    Some(true)
+}
+
+/// mul and mla, which set N and Z alone.
+fn multiply(out: &mut String, op: u32) -> Option<bool> {
+    let (rd, rn, rs, rm) = ((op >> 16) & 0xF, (op >> 12) & 0xF, (op >> 8) & 0xF, op & 0xF);
+    let accumulate = op & (1 << 21) != 0;
+    if [rd, rs, rm].contains(&15) || accumulate && rn == 15 {
+        return None;
+    }
+    if accumulate {
+        emit!(out, "\tmadd w{rd}, w{rm}, w{rs}, w{rn}");
+    } else {
+        emit!(out, "\tmul w{rd}, w{rm}, w{rs}");
+    }
+    if op & (1 << 20) != 0 {
+        logical_flags(out, &format!("w{rd}"), Carry::Kept);
+    }
+    Some(true)
+}
+
+/// umull, umlal, smull, smlal and umaal, hi written last.
+fn multiply_long(out: &mut String, op: u32) -> Option<bool> {
+    let (hi, lo, rs, rm) = ((op >> 16) & 0xF, (op >> 12) & 0xF, (op >> 8) & 0xF, op & 0xF);
+    if [hi, lo, rs, rm].contains(&15) {
+        return None;
+    }
+    let kind = (op >> 21) & 7;
+    // the guest's registers are w, their top halves always clear
+    match kind {
+        0b010 => {
+            emit!(out, "\tumaddl x16, w{rm}, w{rs}, x{lo}");
+            emit!(out, "\tadd x16, x16, x{hi}");
+        }
+        0b100 => emit!(out, "\tumull x16, w{rm}, w{rs}"),
+        0b110 => emit!(out, "\tsmull x16, w{rm}, w{rs}"),
+        _ => {
+            emit!(out, "\torr x23, x{lo}, x{hi}, lsl #32");
+            let op = if kind == 0b101 { "umaddl" } else { "smaddl" };
+            emit!(out, "\t{op} x16, w{rm}, w{rs}, x23");
+        }
+    }
+    emit!(out, "\tlsr x17, x16, #32");
+    emit!(out, "\tmov w{lo}, w16");
+    emit!(out, "\tmov w{hi}, w17");
+    if kind != 0b010 && op & (1 << 20) != 0 {
+        logical_flags(out, "x16", Carry::Kept);
+    }
+    Some(true)
 }
 
 /// where the shifter's carry comes from, for the logical ops that set flags.
@@ -840,6 +1003,8 @@ mod tests {
 
     const BASE: u32 = 0x0010_0000;
     const CALLEE: u32 = BASE + 0x800;
+    /// a Thumb function: adds r0, 1, then bx lr.
+    const THUMB_CALLEE: u32 = BASE + 0xC00;
 
     struct Random(u64);
 
@@ -911,45 +1076,70 @@ mod tests {
         r.condition() << 28 | 0b100 << 25 | r.below(2) << 24 | r.below(2) << 23 | r.below(2) << 21 | load << 20 | rn << 16 | list
     }
 
-    /// a function of random instructions at BASE calling one at CALLEE.
+    /// a function of random instructions at BASE calling one at CALLEE and
+    /// a Thumb one at THUMB_CALLEE.
     fn program(seed: u64) -> Vec<u32> {
         let mut r = Random(seed * 0x9E37_79B9 + 1);
         let count = 8 + r.below(40) as usize;
-        let mut main = Vec::with_capacity(count + 1);
-        for i in 0..count {
+        let mut main: Vec<u32> = Vec::with_capacity(count + 4);
+        // r10 at the callee, plus one for Thumb
+        let at_callee = [0xE3A0_A601, 0xE28A_AB02];
+        let at_thumb = [0xE3A0_A601, 0xE28A_AB03, 0xE38A_A001];
+        // a third of the program from one kind, so that the rare ones get
+        // dense somewhere: data processing, transfers, extra transfers,
+        // ldm and stm, multiplies, calls, clz and mrs, branches
+        let focus = r.below(8) as usize;
+        let (from, span) = [(0, 40), (40, 13), (53, 6), (59, 6), (80, 4), (86, 4), (84, 2), (65, 6)][focus];
+        while main.len() < count {
+            let i = main.len();
             let a = BASE + 4 * i as u32;
             let branch = |r: &mut Random, to: usize, link: bool| {
                 let target = BASE + 4 * to as u32;
                 let offset = (target.wrapping_sub(a + 8) >> 2) & 0x00FF_FFFF;
                 r.condition() << 28 | 0b101 << 25 | (link as u32) << 24 | offset
             };
+            let offset_to = |target: u32| (target.wrapping_sub(a + 8) >> 2) & 0x00FF_FFFF;
             // mostly what the translator takes, now and then what the C
-            // runs, a multiply, an svc, ldm and stm
-            main.push(match r.below(100) {
-                0..=44 => data_processing(&mut r),
-                45..=59 => transfer(&mut r),
-                60..=66 => extra(&mut r),
-                67..=74 => multiple(&mut r),
-                75..=82 => {
+            // runs, an svc, swp
+            let roll = if r.below(10) < 3 { from + r.below(span) } else { r.below(100) };
+            match roll {
+                0..=39 | 93..=99 => main.push(data_processing(&mut r)),
+                40..=52 => main.push(transfer(&mut r)),
+                53..=58 => main.push(extra(&mut r)),
+                59..=64 => main.push(multiple(&mut r)),
+                65..=70 => {
                     let to = i + 1 + r.below((count - i) as u32) as usize;
-                    branch(&mut r, to, false)
+                    main.push(branch(&mut r, to, false));
                 }
-                83 | 84 => {
+                71 | 72 => {
                     let to = r.below(i as u32 + 1) as usize;
-                    branch(&mut r, to, false)
+                    main.push(branch(&mut r, to, false));
                 }
-                85..=90 => {
-                    let offset = (CALLEE.wrapping_sub(a + 8) >> 2) & 0x00FF_FFFF;
-                    r.condition() << 28 | 0x0B00_0000 | offset
+                73..=76 => main.push(r.condition() << 28 | 0x0B00_0000 | offset_to(CALLEE)),
+                77 | 78 => main.push(r.condition() << 28 | 0x012F_FF1E),
+                79 => main.push(0xE1A0_F00E),
+                80 | 81 => main.push(r.condition() << 28 | r.below(2) << 21 | r.below(2) << 20 | r.below(11) << 16 | r.below(11) << 12 | r.below(11) << 8 | 0x90 | r.below(11)),
+                82 | 83 => {
+                    let kind = [0b010, 0b100, 0b101, 0b110, 0b111][r.below(5) as usize];
+                    let s = if kind == 0b010 { 0 } else { r.below(2) };
+                    main.push(r.condition() << 28 | kind << 21 | s << 20 | r.below(11) << 16 | r.below(11) << 12 | r.below(11) << 8 | 0x90 | r.below(11));
                 }
-                91 | 92 => r.condition() << 28 | 0x012F_FF1E,
-                93 => 0xE1A0_F00E,
-                94 => 0xE000_0291 | r.below(8) << 16,
-                95 => 0xEF00_0000 | r.below(0x100),
-                96 => 0xE92D_4010,
-                97 => 0xE8BD_4010,
-                _ => data_processing(&mut r),
-            });
+                84 => main.push(r.condition() << 28 | 0x016F_0F10 | r.below(11) << 12 | r.below(11)),
+                85 => main.push(r.condition() << 28 | 0x010F_0000 | r.below(11) << 12),
+                86 => {
+                    main.extend(at_callee);
+                    main.push(r.condition() << 28 | 0x012F_FF3A);
+                }
+                87 => {
+                    main.extend(at_thumb);
+                    main.push(r.condition() << 28 | 0x012F_FF1A);
+                }
+                88 => main.push(0xFA00_0000 | offset_to(THUMB_CALLEE)),
+                89 => main.push(0xEB00_0000 | offset_to(0x0020_0000)),
+                90 => main.push(0xEF00_0000 | r.below(0x100)),
+                91 => main.push(0xE100_0090 | r.below(11) << 16 | r.below(11) << 12 | r.below(11)),
+                _ => main.push(0xF57F_F05F),
+            }
         }
         main.push(0xE12F_FF1E);
         let mut words = main;
@@ -958,6 +1148,8 @@ mod tests {
             words.push(data_processing(&mut r) & !(0xF << 12) | r.below(4) << 12);
         }
         words.push(0xE12F_FF1E);
+        words.resize(((THUMB_CALLEE - BASE) / 4) as usize, 0xE1A0_0000);
+        words.push(0x4770_3001);
         words
     }
 
