@@ -1222,6 +1222,99 @@ fn logical_flags(out: &mut String, register: &str, carry: Carry) {
     emit!(out, "\tmsr nzcv, x23");
 }
 
+/// whether AArch64's logical instructions take value as an immediate: a
+/// repeated element that is a rotated run of ones, neither all nor none.
+fn bitmask(value: u32) -> bool {
+    if value == 0 || value == u32::MAX {
+        return false;
+    }
+    let mut size = 32;
+    while size > 2 && (value & ((1 << (size / 2)) - 1)) == (value >> (size / 2)) & ((1 << (size / 2)) - 1) {
+        size /= 2;
+    }
+    let mask = if size == 32 { u32::MAX } else { (1 << size) - 1 };
+    let element = (value & mask) as u64;
+    (0..size).any(|r| {
+        let rotated = ((element >> r) | (element << (size - r))) & mask as u64;
+        rotated & (rotated + 1) == 0
+    })
+}
+
+/// the second operand as AArch64 takes it straight, an immediate or a
+/// register shifted by a constant, when the operation has such a form.
+fn direct_operand(op: u32, opcode: u32) -> Option<String> {
+    let arithmetic = matches!(opcode, 2 | 4 | 10 | 11);
+    let logical = matches!(opcode, 0 | 1 | 8 | 9 | 12);
+    if op & (1 << 25) != 0 {
+        let value = (op & 0xFF).rotate_right(((op >> 8) & 0xF) * 2);
+        return match () {
+            _ if arithmetic && value <= 4095 => Some(format!("#{value}")),
+            _ if arithmetic && value & 0xFFF == 0 && value >> 12 <= 4095 => Some(format!("#{}, lsl #12", value >> 12)),
+            _ if logical && bitmask(value) => Some(format!("#0x{value:x}")),
+            _ => None,
+        };
+    }
+    let rm = op & 0xF;
+    if op & (1 << 4) != 0 || rm == 15 {
+        return None;
+    }
+    let m = format!("w{rm}");
+    let shifted = arithmetic || logical || opcode == 14;
+    match ((op >> 5) & 3, (op >> 7) & 0x1F) {
+        (0, 0) => Some(m),
+        (0, n) if shifted => Some(format!("{m}, lsl #{n}")),
+        (1, n) if shifted && n > 0 => Some(format!("{m}, lsr #{n}")),
+        (2, n) if shifted && n > 0 => Some(format!("{m}, asr #{n}")),
+        (3, n) if (logical || opcode == 14) && n > 0 => Some(format!("{m}, ror #{n}")),
+        _ => None,
+    }
+}
+
+/// the shifter's carry for an operand direct_operand takes, into w17 when
+/// it comes from the register.
+fn direct_carry(out: &mut String, op: u32) -> Carry {
+    if op & (1 << 25) != 0 {
+        let rotate = ((op >> 8) & 0xF) * 2;
+        return if rotate == 0 { Carry::Kept } else { Carry::Constant((op & 0xFF).rotate_right(rotate) >> 31) };
+    }
+    let (rm, kind, amount) = (op & 0xF, (op >> 5) & 3, (op >> 7) & 0x1F);
+    if amount == 0 {
+        return Carry::Kept;
+    }
+    let at = if kind == 0 { 32 - amount } else { amount - 1 };
+    emit!(out, "\tubfx w17, w{rm}, #{at}, #1");
+    Carry::Register
+}
+
+/// mov and mvn of an operand AArch64 takes straight, into d.
+fn direct_move(out: &mut String, op: u32, d: &str, invert: bool) -> bool {
+    if op & (1 << 25) != 0 {
+        let value = (op & 0xFF).rotate_right(((op >> 8) & 0xF) * 2);
+        constant(out, d, if invert { !value } else { value });
+        return true;
+    }
+    let rm = op & 0xF;
+    if op & (1 << 4) != 0 || rm == 15 {
+        return false;
+    }
+    let m = format!("w{rm}");
+    let shift = match ((op >> 5) & 3, (op >> 7) & 0x1F) {
+        (0, 0) => None,
+        (0, n) => Some(("lsl", n)),
+        (1, n) if n > 0 => Some(("lsr", n)),
+        (2, n) if n > 0 => Some(("asr", n)),
+        (3, n) if n > 0 => Some(("ror", n)),
+        _ => return false,
+    };
+    match (shift, invert) {
+        (None, false) => emit!(out, "\tmov {d}, {m}"),
+        (None, true) => emit!(out, "\tmvn {d}, {m}"),
+        (Some((kind, n)), false) => emit!(out, "\t{kind} {d}, {m}, #{n}"),
+        (Some((kind, n)), true) => emit!(out, "\tmvn {d}, {m}, {kind} #{n}"),
+    }
+    true
+}
+
 fn data_processing(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     let opcode = (op >> 21) & 0xF;
     let set_flags = op & (1 << 20) != 0;
@@ -1236,7 +1329,34 @@ fn data_processing(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     if op & (1 << 25) == 0 && op & (1 << 4) != 0 && rn == 15 && !matches!(opcode, 13 | 15) {
         return None;
     }
-    let carry = shifter_operand(out, w, a, op, set_flags && logical)?;
+    let d = if compare || rd == 15 { "w22".to_owned() } else { format!("w{rd}") };
+    let direct = if matches!(opcode, 13 | 15) { None } else { direct_operand(op, opcode) };
+    // the carry from the register before the result can overwrite it
+    let mut carry = Carry::Kept;
+    let moved = matches!(opcode, 13 | 15) && {
+        let mut text = String::new();
+        if set_flags {
+            carry = direct_carry(&mut text, op);
+        }
+        let done = direct_move(&mut text, op, &d, opcode == 15);
+        if done {
+            out.push_str(&text);
+        }
+        done
+    };
+    let second = match &direct {
+        Some(operand) => {
+            if set_flags && logical {
+                carry = direct_carry(out, op);
+            }
+            operand.clone()
+        }
+        None if moved => String::new(),
+        None => {
+            carry = shifter_operand(out, w, a, op, set_flags && logical)?;
+            "w16".to_owned()
+        }
+    };
     let first = if matches!(opcode, 13 | 15) {
         String::new()
     } else if rn == 15 {
@@ -1245,23 +1365,24 @@ fn data_processing(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     } else {
         format!("w{rn}")
     };
-    let d = if compare || rd == 15 { "w22".to_owned() } else { format!("w{rd}") };
     let s = if set_flags { "s" } else { "" };
+    let b = second;
     match opcode {
-        0 | 8 => emit!(out, "\tand {d}, {first}, w16"),
-        1 | 9 => emit!(out, "\teor {d}, {first}, w16"),
-        2 => emit!(out, "\tsub{s} {d}, {first}, w16"),
-        3 => emit!(out, "\tsub{s} {d}, w16, {first}"),
-        4 => emit!(out, "\tadd{s} {d}, {first}, w16"),
-        5 => emit!(out, "\tadc{s} {d}, {first}, w16"),
-        6 => emit!(out, "\tsbc{s} {d}, {first}, w16"),
-        7 => emit!(out, "\tsbc{s} {d}, w16, {first}"),
-        10 => emit!(out, "\tcmp {first}, w16"),
-        11 => emit!(out, "\tcmn {first}, w16"),
-        12 => emit!(out, "\torr {d}, {first}, w16"),
-        13 => emit!(out, "\tmov {d}, w16"),
-        14 => emit!(out, "\tbic {d}, {first}, w16"),
-        _ => emit!(out, "\tmvn {d}, w16"),
+        0 | 8 => emit!(out, "\tand {d}, {first}, {b}"),
+        1 | 9 => emit!(out, "\teor {d}, {first}, {b}"),
+        2 => emit!(out, "\tsub{s} {d}, {first}, {b}"),
+        3 => emit!(out, "\tsub{s} {d}, {b}, {first}"),
+        4 => emit!(out, "\tadd{s} {d}, {first}, {b}"),
+        5 => emit!(out, "\tadc{s} {d}, {first}, {b}"),
+        6 => emit!(out, "\tsbc{s} {d}, {first}, {b}"),
+        7 => emit!(out, "\tsbc{s} {d}, {b}, {first}"),
+        10 => emit!(out, "\tcmp {first}, {b}"),
+        11 => emit!(out, "\tcmn {first}, {b}"),
+        12 => emit!(out, "\torr {d}, {first}, {b}"),
+        _ if moved => {}
+        13 => emit!(out, "\tmov {d}, {b}"),
+        14 => emit!(out, "\tbic {d}, {first}, {b}"),
+        _ => emit!(out, "\tmvn {d}, {b}"),
     }
     if set_flags && logical {
         logical_flags(out, &d, carry);
@@ -1328,16 +1449,16 @@ fn single_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool
     let address = if pre { "w17" } else { base.as_str() };
     let suffix = if byte { "b" } else { "" };
     if load {
-        emit!(out, "\tldr{suffix} w16, [x20, {address}, uxtw]");
+        // straight into rd, which a writeback of the same register gives way to
+        let into = if rd == 15 { "w22".to_owned() } else { format!("w{rd}") };
+        emit!(out, "\tldr{suffix} {into}, [x20, {address}, uxtw]");
         if writeback && rn != rd {
             emit!(out, "\tmov w{rn}, w17");
         }
         if rd == 15 {
-            emit!(out, "\tmov w22, w16");
             return_to(out, w);
             return Some(false);
         }
-        emit!(out, "\tmov w{rd}, w16");
     } else {
         // storing r15 stores the address plus 12
         let value = if rd == 15 {
@@ -1391,9 +1512,15 @@ fn extra_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
     match (kind, load) {
         (1, true) | (2, true) | (3, true) => {
             let read = ["", "ldrh", "ldrsb", "ldrsh"][kind as usize];
-            emit!(out, "\t{read} w16, [x20, {address}, uxtw]");
-            back(out);
-            emit!(out, "\tmov w{rd}, w16");
+            // the loaded value wins over a writeback of the same register
+            if writeback && rn == rd {
+                emit!(out, "\t{read} w16, [x20, {address}, uxtw]");
+                back(out);
+                emit!(out, "\tmov w{rd}, w16");
+            } else {
+                emit!(out, "\t{read} w{rd}, [x20, {address}, uxtw]");
+                back(out);
+            }
         }
         (1, false) => {
             // a halfword of r15 stores the address plus 8
