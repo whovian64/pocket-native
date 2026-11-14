@@ -204,6 +204,9 @@ struct Writer<'a> {
     /// after a call till the fill: the host registers hold whatever the
     /// callee left, and memory the singles, so nothing spills.
     stale: std::cell::Cell<bool>,
+    /// whether the function hands over to the C at a label of its own,
+    /// which it then needs written.
+    needs_c: std::cell::Cell<bool>,
     /// what the code seldom runs, past the function's end, and the stubs
     /// shared there it used: leaving, the C's dispatch as the context is,
     /// and the way out over the depth limit.
@@ -214,7 +217,7 @@ struct Writer<'a> {
 impl<'a> Writer<'a> {
     fn new(entry: u32, labels: &'a BTreeSet<u32>, functions: &'a BTreeMap<u32, String>, fallback: String, prefix: &'a str) -> Self {
         let relative = !prefix.is_empty();
-        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default(), seen: Default::default(), first_written: Default::default(), so_far: Default::default(), conditional: Default::default(), stale: Default::default(), cold: Default::default(), shared: Default::default() }
+        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default(), seen: Default::default(), first_written: Default::default(), so_far: Default::default(), conditional: Default::default(), stale: Default::default(), needs_c: Default::default(), cold: Default::default(), shared: Default::default() }
     }
 
     /// a stub shared past the end: 0 leaves, 1 hands over to the C as
@@ -326,6 +329,7 @@ fn constant(out: &mut String, register: &str, value: u32) {
 
 /// hands over to the C at address, everything written back.
 fn fallback(out: &mut String, w: &Writer, at: u32) {
+    w.needs_c.set(true);
     w.spill(out);
     emit!(out, "\tpn_flush");
     guest(out, w, "w16", at);
@@ -335,14 +339,9 @@ fn fallback(out: &mut String, w: &Writer, at: u32) {
     emit!(out, "\tb {}", w.fallback);
 }
 
-/// hands over to the C at the address in w22.
+/// goes on at the ARM address in w22, as the C's dispatch does.
 fn dispatch(out: &mut String, w: &Writer) {
-    w.spill(out);
-    emit!(out, "\tpn_flush");
-    emit!(out, "\tstr w22, [x19, #{R15}]");
-    emit!(out, "\tmov x0, x19");
-    emit!(out, "\tpn_leave");
-    emit!(out, "\tb {}", w.fallback);
+    jump_to(out, w);
 }
 
 /// a return to the address in w22, which may switch to Thumb: to a
@@ -2068,8 +2067,9 @@ pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeS
 
 /// the function's assembly, entered at its entry as the C is, the C named
 /// c_name running it from anywhere else it doesn't take: the blocks it
-/// does take, by their start, which the host may come into it at.
-pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str, prefix: &str) -> Vec<u32> {
+/// does take, by their start, which the host may come into it at, and
+/// whether it hands over to the C at a label of its own.
+pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str, prefix: &str) -> (Vec<u32>, bool) {
     let w = Writer::new(entry, labels, functions, c_name.to_owned(), prefix);
     let name = name(prefix, entry);
     let elsewhere = w.local();
@@ -2170,7 +2170,21 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
         emit!(tail, "\tb pn_leave_sub");
     }
     if shared[1] {
+        // on at r15 as the context has it: in a block of this function
+        // straight, the registers read again
+        let c = w.local();
         emit!(tail, "{}:", w.stub(1));
+        emit!(tail, "\tldrb w17, [x19, #{THUMB}]");
+        emit!(tail, "\tcbnz w17, {c}");
+        emit!(tail, "\tldr w16, [x19, #{R15}]");
+        if w.relative {
+            emit!(tail, "\tsub w16, w16, w27");
+        }
+        emit!(tail, "\tbl {}", w.stub(4));
+        emit!(tail, "\tcbz x15, {c}");
+        emit!(tail, "\tpn_reload");
+        emit!(tail, "\tbr x15");
+        emit!(tail, "{c}:");
         emit!(tail, "\tmov x0, x19");
         emit!(tail, "\tpn_leave");
         emit!(tail, "\tb {c_name}");
@@ -2188,7 +2202,8 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
         depth_back(&mut tail);
         emit!(tail, "\tb pn_leave_sub");
     }
-    if shared[4] {
+    // the others may have used it
+    if w.shared.get()[4] {
         emit!(tail, "{}:", w.stub(4));
         tree(&mut tail, &w, &translated);
         for &start in &translated {
@@ -2214,7 +2229,7 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
         }
     }
     emit!(out, "\t.size {name}, .-{name}\n");
-    translated
+    (translated, w.needs_c.get())
 }
 
 /// a search for the block at the guest address in w16 among starts, in
@@ -2678,6 +2693,28 @@ mod tests {
             0xEDCC_0A05, // vstr s1, [r12, #20]
             0xE12F_FF1E,
         ]);
+    }
+
+    /// a call to the C coming back past the next instruction, to a label of
+    /// the caller.
+    #[test]
+    #[ignore = "needs aarch64-linux-gnu-gcc and qemu-aarch64-static, run with --ignored"]
+    fn returns_elsewhere_run_as_the_c_does() {
+        if !tool("aarch64-linux-gnu-gcc") || !tool("qemu-aarch64-static") {
+            return;
+        }
+        let mut words = vec![
+            0xE352_0000, // cmp r2, #0
+            0x0A00_0001, // beq 1f
+            0xEB00_0000 | ((CALLEE.wrapping_sub(BASE + 8 + 8) >> 2) & 0x00FF_FFFF),
+            0xE280_0001, // add r0, r0, #1, which the return passes over
+            0xE281_1001, // 1: add r1, r1, #1
+            0xE12F_FF1E,
+        ];
+        words.resize(((CALLEE - BASE) / 4) as usize, 0xE1A0_0000);
+        // swp r3, r4, [r12], which keeps it C; add lr, lr, #4; bx lr
+        words.extend([0xE10C_3094, 0xE28E_E004, 0xE12F_FF1E]);
+        alike(8, &words);
     }
 
     /// a switch through a table of addresses, into each of its cases.

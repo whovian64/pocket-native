@@ -279,7 +279,8 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
             let interpreted = std::cell::RefCell::new(Vec::new());
             let resumable = &resumed[&entry];
             let scope = Scope { labels: &resumable.labels, functions: &names, prefix: &prefix, relative, interpreted: &interpreted };
-            write_function(&mut source, unit.program, &scope, entry, resumable);
+            let c_name = name(&prefix, entry, false);
+            let mut c = true;
             if translated.contains(&entry) {
                 // a file for each unit: its local labels go by address
                 if assembly.last().is_none_or(|_| written >= FILE_SIZE) || assembled != Some(index) {
@@ -287,12 +288,23 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
                     assembled = Some(index);
                     written = 0;
                 }
-                let text = assembly.last_mut().expect("a file to write into");
-                let taken = a64::write(text, unit.program, entry, resumable, &resumable.labels, &names, &name(&prefix, entry, false), &prefix);
-                starts.insert(entry, taken.into_iter().collect::<BTreeSet<u32>>());
+                let mut text = String::new();
+                let (taken, needs_c) = a64::write(&mut text, unit.program, entry, resumable, &resumable.labels, &names, &c_name, &prefix);
+                let taken: BTreeSet<u32> = taken.into_iter().collect();
+                // every block taken, the C would only hand on what isn't
+                // its own: none of it, unless something calls it by name
+                if !needs_c && taken == resumable.labels && !names.values().any(|name| *name == c_name) && !replaced.iter().any(|item| item.address == entry) {
+                    text = text.replace(&format!("\tb {c_name}\n"), "\tb recomp_out\n");
+                    c = false;
+                }
+                assembly.last_mut().expect("a file to write into").push_str(&text);
+                starts.insert(entry, taken);
                 written += function.instructions.len();
             }
-            size += function.instructions.len();
+            if c {
+                write_function(&mut source, unit.program, &scope, entry, resumable);
+                size += function.instructions.len();
+            }
             if size >= FILE_SIZE {
                 sources.push(std::mem::take(&mut source));
                 included.clear();
@@ -345,6 +357,10 @@ pub fn generate_with(units: &[Unit], overrides: &[Override], a64: bool) -> Vec<(
         sources.push(source);
     }
 
+    if a64 {
+        // what the assembly of a function the C isn't written for hands on
+        emit!(tables, "void recomp_out(Context *ctx) {{\n    CALL(recomp_call);\n}}\n");
+    }
     emit!(tables, "RECOMP_EXPORT const uint32_t recomp_abi = RECOMP_ABI;");
     // code built to reach memory straight through the host's view of it
     emit!(tables, "#ifdef RECOMP_FASTMEM\nRECOMP_EXPORT const uint32_t recomp_fastmem = 1;\n#endif");
