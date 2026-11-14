@@ -185,12 +185,26 @@ struct Writer<'a> {
     /// after a call till the fill: the host registers hold whatever the
     /// callee left, and memory the singles, so nothing spills.
     stale: std::cell::Cell<bool>,
+    /// what the code seldom runs, past the function's end, and the stubs
+    /// shared there it used: leaving, the C's dispatch as the context is,
+    /// and the way out over the depth limit.
+    cold: std::cell::RefCell<String>,
+    shared: std::cell::Cell<[bool; 3]>,
 }
 
 impl<'a> Writer<'a> {
     fn new(entry: u32, labels: &'a BTreeSet<u32>, functions: &'a BTreeMap<u32, String>, fallback: String, prefix: &'a str) -> Self {
         let relative = !prefix.is_empty();
-        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default(), stale: Default::default() }
+        Writer { entry, labels, functions, fallback, prefix, relative, made: Default::default(), vector: Default::default(), cache: Default::default(), used: Default::default(), written: Default::default(), doubles: Default::default(), stale: Default::default(), cold: Default::default(), shared: Default::default() }
+    }
+
+    /// a stub shared past the end: 0 leaves, 1 hands over to the C as
+    /// the context is, 2 leaves over the depth limit with w16 one past it.
+    fn stub(&self, which: usize) -> String {
+        let mut shared = self.shared.get();
+        shared[which] = true;
+        self.shared.set(shared);
+        format!(".L{}{:08X}", ["l", "r", "u"][which], self.entry)
     }
 
     fn local(&self) -> String {
@@ -350,18 +364,11 @@ enum Callee<'a> {
 /// depth as CALL does.
 fn call_out(out: &mut String, w: &Writer, callee: Callee) {
     w.spill(out);
-    let go = w.local();
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tadd w16, w16, #1");
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
     emit!(out, "\tcmp w16, #{DEPTH_LIMIT}");
-    emit!(out, "\tb.le {go}");
-    emit!(out, "\tsub w16, w16, #1");
-    emit!(out, "\tstr w16, [x19, #{DEPTH}]");
-    emit!(out, "\tmov w16, #{EXIT_UNWIND}");
-    emit!(out, "\tstr w16, [x19, #{EXIT}]");
-    emit!(out, "\tb pn_leave_sub");
-    emit!(out, "{go}:");
+    emit!(out, "\tb.gt {}", w.stub(2));
     match callee {
         Callee::Named(name) => {
             emit!(out, "\tmov x0, x19");
@@ -403,21 +410,24 @@ fn inner(w: &Writer, name: &str) -> Option<String> {
 /// limit everything goes back to the context with r15 at target.
 fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
     w.spill(out);
-    let go = w.local();
+    let over = w.local();
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
     emit!(out, "\tadd w16, w16, #1");
     emit!(out, "\tstr w16, [x19, #{DEPTH}]");
     emit!(out, "\tsub w17, w16, #{}", DEPTH_LIMIT + 1);
-    emit!(out, "\ttbnz w17, #31, {go}");
-    emit!(out, "\tsub w16, w16, #1");
-    emit!(out, "\tstr w16, [x19, #{DEPTH}]");
-    emit!(out, "\tpn_flush");
-    guest(out, w, "w16", target);
-    emit!(out, "\tstr w16, [x19, #{R15}]");
-    emit!(out, "\tmov w16, #{EXIT_UNWIND}");
-    emit!(out, "\tstr w16, [x19, #{EXIT}]");
-    emit!(out, "\tb pn_leave_sub");
-    emit!(out, "{go}:");
+    emit!(out, "{TEST_MARK}tbz w17, #31, {over}");
+    {
+        let mut cold = w.cold.borrow_mut();
+        emit!(cold, "{over}:");
+        emit!(cold, "\tsub w16, w16, #1");
+        emit!(cold, "\tstr w16, [x19, #{DEPTH}]");
+        emit!(cold, "\tpn_flush");
+        guest(&mut cold, w, "w16", target);
+        emit!(cold, "\tstr w16, [x19, #{R15}]");
+        emit!(cold, "\tmov w16, #{EXIT_UNWIND}");
+        emit!(cold, "\tstr w16, [x19, #{EXIT}]");
+        emit!(cold, "\tb pn_leave_sub");
+    }
     emit!(out, "\tbl {name}");
     w.stale.set(true);
     emit!(out, "\tldr w16, [x19, #{DEPTH}]");
@@ -431,16 +441,19 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Op
     if let Some(name) = w.functions.get(&target).and_then(|name| inner(w, name)).filter(|_| !thumb) {
         guest(out, w, "w14", link);
         call_inner(out, w, target, &name);
-        let (live, done) = (w.local(), w.local());
-        emit!(out, "\tcbnz x26, {live}");
-        returned(out, w, link);
-        emit!(out, "\tb {done}");
+        let (slow, other, done) = (w.local(), w.local(), w.local());
         // back the plain way: on unless it isn't to the next instruction
-        emit!(out, "{live}:");
+        emit!(out, "\tcbz x26, {slow}");
         guest(out, w, "w17", link);
         emit!(out, "\tsub w16, w22, w17");
-        emit!(out, "\tcbz w16, {done}");
-        jump_to(out, w);
+        emit!(out, "\tcbnz w16, {other}");
+        let mut cold = String::new();
+        emit!(cold, "{slow}:");
+        returned(&mut cold, w, link);
+        emit!(cold, "\tb {done}");
+        emit!(cold, "{other}:");
+        jump_to(&mut cold, w);
+        w.cold.borrow_mut().push_str(&cold);
         emit!(out, "{done}:");
         w.fill(out);
         return Some(true);
@@ -463,23 +476,16 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Op
 /// anything but a plain return to link goes through the C's dispatch, the
 /// context as it is.
 fn returned(out: &mut String, w: &Writer, link: u32) {
-    let (on, again) = (w.local(), w.local());
     // the host takes over, or anything but a plain return to the next
     // instruction goes through the C's dispatch, the context as it is
     emit!(out, "\tldr w16, [x19, #{EXIT}]");
-    emit!(out, "\tcbz w16, {on}");
-    emit!(out, "\tb pn_leave_sub");
-    emit!(out, "{on}:");
+    emit!(out, "\tcbnz w16, {}", w.stub(0));
     emit!(out, "\tldr w16, [x19, #{R15}]");
     guest(out, w, "w17", link);
     emit!(out, "\tcmp w16, w17");
     emit!(out, "\tldrb w16, [x19, #{THUMB}]");
     emit!(out, "\tccmp w16, #0, #0, eq");
-    emit!(out, "\tb.eq {again}");
-    emit!(out, "\tmov x0, x19");
-    emit!(out, "\tpn_leave");
-    emit!(out, "\tb {}", w.fallback);
-    emit!(out, "{again}:");
+    emit!(out, "\tb.ne {}", w.stub(1));
     emit!(out, "\tpn_reload");
 }
 
@@ -491,11 +497,8 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
         emit!(out, "\tb {}", w.block(target));
     } else if let Some(name) = w.functions.get(&target).and_then(|name| inner(w, name)) {
         // a tail call: its return is this function's
-        let back = w.local();
         call_inner(out, w, target, &name);
-        emit!(out, "\tcbnz x26, {back}");
-        emit!(out, "\tb pn_leave_sub");
-        emit!(out, "{back}:");
+        emit!(out, "\tcbz x26, {}", w.stub(0));
         return_to(out, w);
         // not taken, the registers are as they were
         w.stale.set(false);
@@ -761,7 +764,6 @@ fn parallel(out: &mut String, op: u32) -> Option<bool> {
 /// an svc the host runs in place, the code going on unless it says not to.
 fn svc(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     w.spill(out);
-    let on = w.local();
     emit!(out, "\tpn_flush");
     guest(out, w, "w16", a + 4);
     emit!(out, "\tstr w16, [x19, #{R15}]");
@@ -771,9 +773,7 @@ fn svc(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     emit!(out, "\tldr x16, [x16, #{SVC}]");
     emit!(out, "\tblr x16");
     emit!(out, "\tldr w16, [x19, #{EXIT}]");
-    emit!(out, "\tcbz w16, {on}");
-    emit!(out, "\tb pn_leave_sub");
-    emit!(out, "{on}:");
+    emit!(out, "\tcbnz w16, {}", w.stub(0));
     emit!(out, "\tpn_reload");
     w.fill(out);
     Some(true)
@@ -1845,7 +1845,12 @@ fn block(program: &Program, w: &Writer, instructions: &[u32], run: usize) -> Opt
     w.used.borrow_mut().clear();
     w.written.borrow_mut().clear();
     w.doubles.set(false);
-    let plain = block_text(program, w, instructions, run)?;
+    // the cold code of a writing thrown away goes too
+    let mark = w.cold.borrow().len();
+    let Some(plain) = block_text(program, w, instructions, run) else {
+        w.cold.borrow_mut().truncate(mark);
+        return None;
+    };
     // the most used when they don't all fit, the rest left in memory, as
     // are those used once, reading and writing them back costing more
     let mut used: Vec<(u32, usize)> = w.used.borrow().iter().filter(|&(_, &uses)| uses > 1).map(|(&single, &uses)| (single, uses)).collect();
@@ -1854,11 +1859,16 @@ fn block(program: &Program, w: &Writer, instructions: &[u32], run: usize) -> Opt
     }
     used.sort_by_key(|&(single, uses)| (std::cmp::Reverse(uses), single));
     *w.cache.borrow_mut() = Some(used.iter().map(|&(single, _)| single).zip(CACHE).collect());
+    w.cold.borrow_mut().truncate(mark);
     let cached = block_text(program, w, instructions, run);
     let mut text = String::new();
     w.fill(&mut text);
-    text.push_str(&cached?);
     *w.cache.borrow_mut() = None;
+    let Some(cached) = cached else {
+        w.cold.borrow_mut().truncate(mark);
+        return None;
+    };
+    text.push_str(&cached);
     Some(text)
 }
 
@@ -1951,7 +1961,8 @@ fn kind(op: u32) -> &'static str {
 /// translator takes, with half its instructions or more.
 pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, prefix: &str) -> bool {
     let translated = coverage(program, entry, function, labels, functions, prefix);
-    translated > 0 && translated * 2 >= function.instructions.len()
+    // short of the 1 MiB conditional branches reach to the stubs past the end
+    translated > 0 && translated * 2 >= function.instructions.len() && function.instructions.len() <= 20_000
 }
 
 /// the function's assembly, entered at its entry as the C is, the C named
@@ -1959,7 +1970,7 @@ pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeS
 pub fn write(out: &mut String, program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, c_name: &str, prefix: &str) {
     let w = Writer::new(entry, labels, functions, c_name.to_owned(), prefix);
     let name = name(prefix, entry);
-    let enter = w.local();
+    let elsewhere = w.local();
     emit!(out, "\t.globl {name}");
     emit!(out, "\t.hidden {name}");
     emit!(out, "\t.type {name}, %function");
@@ -1980,9 +1991,7 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
         emit!(out, "\tcmp w16, w15");
     }
     emit!(out, "\tccmp w17, #0, #0, eq");
-    emit!(out, "\tb.eq {enter}");
-    emit!(out, "\tb {c_name}");
-    emit!(out, "{enter}:");
+    emit!(out, "\tb.ne {elsewhere}");
     emit!(out, "\tpn_enter");
     if w.relative {
         emit!(out, "\tmov w27, w15");
@@ -2019,7 +2028,7 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
                     constant(&mut body, "w16", run as u32);
                     emit!(body, "\tsub w21, w21, w16");
                 }
-                emit!(body, "{BUDGET_MARK}{out_of_budget}");
+                emit!(body, "{TEST_MARK}tbnz w21, #31, {out_of_budget}");
                 body.push_str(&text);
                 emit!(stubs, "{out_of_budget}:");
                 guest(&mut stubs, &w, "w22", start);
@@ -2029,36 +2038,60 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
             None => fallback(&mut body, &w, start),
         }
     }
-    // tbnz reaches 32 KiB: past that, round a b
-    let near = instructions(&body) + instructions(&stubs) < NEAR;
-    for line in body.lines() {
-        match line.strip_prefix(BUDGET_MARK) {
-            Some(label) if near => emit!(out, "\ttbnz w21, #31, {label}"),
-            Some(label) => {
+    // past the last instruction is wherever it goes on to, then what the
+    // code seldom does
+    let mut tail = stubs;
+    tail.push_str(&w.cold.borrow());
+    emit!(tail, "{elsewhere}:");
+    emit!(tail, "\tb {c_name}");
+    let shared = w.shared.get();
+    if shared[0] {
+        emit!(tail, "{}:", w.stub(0));
+        emit!(tail, "\tb pn_leave_sub");
+    }
+    if shared[1] {
+        emit!(tail, "{}:", w.stub(1));
+        emit!(tail, "\tmov x0, x19");
+        emit!(tail, "\tpn_leave");
+        emit!(tail, "\tb {c_name}");
+    }
+    if shared[2] {
+        emit!(tail, "{}:", w.stub(2));
+        emit!(tail, "\tsub w16, w16, #1");
+        emit!(tail, "\tstr w16, [x19, #{DEPTH}]");
+        emit!(tail, "\tmov w16, #{EXIT_UNWIND}");
+        emit!(tail, "\tstr w16, [x19, #{EXIT}]");
+        emit!(tail, "\tb pn_leave_sub");
+    }
+    // tbz and tbnz reach 32 KiB: past that, round a b
+    let near = instructions(&body) + instructions(&tail) < NEAR;
+    for line in body.lines().chain(tail.lines()) {
+        match line.strip_prefix(TEST_MARK) {
+            Some(test) if near => emit!(out, "\t{test}"),
+            Some(test) => {
+                let (op, rest) = test.split_once(' ').expect("a test and its operands");
+                let (operands, label) = rest.rsplit_once(", ").expect("a label");
                 let on = w.local();
-                emit!(out, "\ttbz w21, #31, {on}");
+                emit!(out, "\t{} {operands}, {on}", if op == "tbz" { "tbnz" } else { "tbz" });
                 emit!(out, "\tb {label}");
                 emit!(out, "{on}:");
             }
             None => emit!(out, "{line}"),
         }
     }
-    // past the last instruction is wherever it goes on to
-    out.push_str(&stubs);
     emit!(out, "\t.size {name}, .-{name}\n");
 }
 
-/// what write marks a block's way out of the budget with, for a branch it
-/// picks once it knows how far the stubs are.
-const BUDGET_MARK: &str = "#budget ";
-/// instructions tbnz reaches past, with room to spare.
+/// what write marks a tbz or tbnz with, for a branch it picks once it knows
+/// how far its label is.
+const TEST_MARK: &str = "#test ";
+/// instructions tbz reaches past, with room to spare.
 const NEAR: usize = 7000;
-
 /// about how many instructions assembly holds, the macros counted as their
 /// longest.
 fn instructions(text: &str) -> usize {
     text.lines()
-        .filter(|line| (line.starts_with('\t') && !line.starts_with("\t.")) || line.starts_with(BUDGET_MARK))
+        .filter(|line| (line.starts_with('\t') && !line.starts_with("\t.")) || line.starts_with(TEST_MARK))
         .map(|line| if line.starts_with("\tpn_") { 10 } else { 1 })
         .sum()
 }
