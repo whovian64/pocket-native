@@ -52,10 +52,11 @@ pub fn shown(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
 }
 
 /// the areas while the keyboard is up over the bottom screen: as shown when
-/// that screen has a display of its own or the room, else by itself.
+/// that screen has a display of its own or the panel's pixels for the
+/// keyboard's 640 across, else by itself.
 pub fn typing(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
     let shown = shown(settings);
-    if zakuro_gpu::second_window() || zakuro_gpu::stacked() || shown[1].is_some_and(|area| area[2] >= 480) {
+    if zakuro_gpu::second_window() || zakuro_gpu::stacked() || shown[1].is_some_and(|area| area[2] as f32 * zakuro_gpu::layout_scale() >= 600.0) {
         return shown;
     }
     areas(Layout::TopOnly, true, settings.aspect, zakuro_gpu::layout_size())
