@@ -106,6 +106,17 @@ pub fn generate(
     for (name, contents) in &generated {
         write(&dir.join(name), contents.as_bytes())?;
     }
+    // the code files an earlier build wrote past this one's, and objects of
+    // them, which would only take room
+    let fresh: std::collections::BTreeSet<&str> = generated.iter().map(|(name, _)| name.as_str()).collect();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let stem = file.strip_suffix(".o").or_else(|| file.strip_suffix(".c")).or_else(|| file.strip_suffix(".S")).unwrap_or("");
+        let ours = (stem.starts_with("code") || stem.starts_with("a64_")) && stem.len() > 4 && stem[4..].bytes().all(|b| b.is_ascii_digit() || b == b'_');
+        if ours && !fresh.contains(format!("{stem}.c").as_str()) && !fresh.contains(format!("{stem}.S").as_str()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     let mut sources: Vec<String> = generated.iter().map(|(name, _)| name.clone()).filter(|name| name.ends_with(".c") || name.ends_with(".S")).collect();
     for file in &files {
         let name = format!("hand/{}", file.path.file_name().unwrap_or_default().to_string_lossy());
