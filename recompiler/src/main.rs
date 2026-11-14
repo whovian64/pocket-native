@@ -288,6 +288,24 @@ fn analyze(path: &str) {
     println!("thumb       {thumb} functions");
     println!("decoded     {instructions} instructions, shared code once per function");
     println!("analysis    {elapsed:.2?}");
+    // what the AArch64 translator would take of the executable, and what
+    // keeps it off the rest
+    let names: std::collections::BTreeMap<u32, String> = analyses[0].functions.keys().map(|&entry| (entry, format!("f_{entry:08X}"))).collect();
+    let (mut worth, mut covered, mut lacking) = (0, 0, std::collections::BTreeMap::<&str, usize>::new());
+    for (&entry, function) in &analyses[0].functions {
+        let taken = recomp3ds::codegen::a64::coverage(&programs[0].1, entry, function, &function.labels, &names);
+        covered += taken;
+        worth += recomp3ds::codegen::a64::worth(&programs[0].1, entry, function, &function.labels, &names) as usize;
+        for (kind, run) in recomp3ds::codegen::a64::refusals(&programs[0].1, entry, function, &function.labels, &names) {
+            *lacking.entry(kind).or_default() += run;
+        }
+    }
+    println!("a64         {worth} functions worth it, {covered} of {} instructions in blocks it takes", executable_instructions(&analyses[0]));
+    let mut lacking: Vec<_> = lacking.into_iter().collect();
+    lacking.sort_by_key(|&(_, run)| std::cmp::Reverse(run));
+    for (kind, run) in lacking.iter().take(8) {
+        println!("  {run:>9}  in blocks held back by {kind}");
+    }
     println!();
 
     if !missed.is_empty() {
@@ -517,4 +535,8 @@ fn shaders(rom: &str, dir: Option<&Path>, precache: Option<Vec<&Path>>) {
         }
     }
     println!("{} shader binaries, {} shaders", found.len(), found.iter().map(|s| s.entries.len()).sum::<usize>());
+}
+
+fn executable_instructions(analysis: &Analysis) -> usize {
+    analysis.functions.values().map(|f| f.instructions.len()).sum()
 }

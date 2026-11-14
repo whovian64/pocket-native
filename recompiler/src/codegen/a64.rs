@@ -159,6 +159,22 @@ fn return_to(out: &mut String) {
     emit!(out, "\tret");
 }
 
+/// a jump to the address in w22, which may switch to Thumb, through the
+/// C's dispatch.
+fn jump_to(out: &mut String, w: &Writer) {
+    emit!(out, "\tpn_flush");
+    emit!(out, "\tand w16, w22, #1");
+    emit!(out, "\tstrb w16, [x19, #{THUMB}]");
+    emit!(out, "\ttst w22, #1");
+    emit!(out, "\tand w17, w22, #0xfffffffe");
+    emit!(out, "\tand w16, w22, #0xfffffffc");
+    emit!(out, "\tcsel w16, w17, w16, ne");
+    emit!(out, "\tstr w16, [x19, #{R15}]");
+    emit!(out, "\tmov x0, x19");
+    emit!(out, "\tpn_leave");
+    emit!(out, "\tb {}", w.fallback);
+}
+
 /// a call to name, everything written back, r15 already in the context,
 /// counting depth as CALL does, and what follows it: the caller leaves too
 /// when the host has to take over.
@@ -258,6 +274,7 @@ fn lower(w: &Writer, address: u32, op: u32) -> Option<(String, bool)> {
 
 fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
     match (op >> 25) & 7 {
+        0b000 if op & 0x90 == 0x90 && (op >> 5) & 3 != 0 => extra_transfer(out, a, op),
         0b000 if op & 0x90 == 0x90 => None,
         0b000 if (op >> 23) & 3 == 0b10 && op & (1 << 20) == 0 => match (op >> 4) & 0xF {
             0b0001 if (op >> 21) & 3 != 0b11 => branch_exchange(out, op),
@@ -269,6 +286,7 @@ fn instruction(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
         0b001 => data_processing(out, w, a, op),
         0b010 => single_transfer(out, a, op),
         0b011 if op & 0x10 == 0 => single_transfer(out, a, op),
+        0b100 => block_transfer(out, w, a, op),
         0b101 => {
             let target = (a + 8).wrapping_add(sign_extend_24(op & 0x00FF_FFFF) << 2);
             if op & (1 << 24) != 0 { call(out, w, a + 4, target) } else { jump(out, w, target) }
@@ -528,6 +546,135 @@ fn single_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
     Some(true)
 }
 
+/// ldrh, strh, ldrsb, ldrsh, ldrd and strd.
+fn extra_transfer(out: &mut String, a: u32, op: u32) -> Option<bool> {
+    let rn = (op >> 16) & 0xF;
+    let rd = (op >> 12) & 0xF;
+    let pre = op & (1 << 24) != 0;
+    let load = op & (1 << 20) != 0;
+    let writeback = !pre || op & (1 << 21) != 0;
+    let kind = (op >> 5) & 3;
+    let pair = kind >= 2 && !load;
+    if (writeback && rn == 15) || (load && rd == 15) || (pair && (rd & 1 != 0 || rd == 14)) {
+        return None;
+    }
+    let offset = if op & (1 << 22) != 0 {
+        format!("#{}", ((op >> 4) & 0xF0) | (op & 0xF))
+    } else if op & 0xF == 15 {
+        constant(out, "w16", a + 8);
+        "w16".to_owned()
+    } else {
+        format!("w{}", op & 0xF)
+    };
+    let base = if rn == 15 {
+        constant(out, "w15", a + 8);
+        "w15".to_owned()
+    } else {
+        format!("w{rn}")
+    };
+    let sign = if op & (1 << 23) != 0 { "add" } else { "sub" };
+    emit!(out, "\t{sign} w17, {base}, {offset}");
+    let address = if pre { "w17" } else { base.as_str() };
+    let back = |out: &mut String| {
+        if writeback {
+            emit!(out, "\tmov w{rn}, w17");
+        }
+    };
+    match (kind, load) {
+        (1, true) | (2, true) | (3, true) => {
+            let read = ["", "ldrh", "ldrsb", "ldrsh"][kind as usize];
+            emit!(out, "\t{read} w16, [x20, {address}, uxtw]");
+            back(out);
+            emit!(out, "\tmov w{rd}, w16");
+        }
+        (1, false) => {
+            // a halfword of r15 stores the address plus 8
+            let value = if rd == 15 {
+                constant(out, "w16", a + 8);
+                "w16".to_owned()
+            } else {
+                format!("w{rd}")
+            };
+            emit!(out, "\tstrh {value}, [x20, {address}, uxtw]");
+            back(out);
+        }
+        (2, false) => {
+            emit!(out, "\tldr w16, [x20, {address}, uxtw]");
+            emit!(out, "\tadd w22, {address}, #4");
+            emit!(out, "\tldr w23, [x20, w22, uxtw]");
+            back(out);
+            emit!(out, "\tmov w{rd}, w16");
+            emit!(out, "\tmov w{}, w23", rd + 1);
+        }
+        _ => {
+            emit!(out, "\tstr w{rd}, [x20, {address}, uxtw]");
+            emit!(out, "\tadd w22, {address}, #4");
+            emit!(out, "\tstr w{}, [x20, w22, uxtw]", rd + 1);
+            back(out);
+        }
+    }
+    Some(true)
+}
+
+/// ldm and stm, w17 walking up from the lowest address, w23 the base after.
+fn block_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool> {
+    let rn = (op >> 16) & 0xF;
+    let pre = op & (1 << 24) != 0;
+    let up = op & (1 << 23) != 0;
+    let writeback = op & (1 << 21) != 0;
+    let load = op & (1 << 20) != 0;
+    let list = op & 0xFFFF;
+    if op & (1 << 22) != 0 || list == 0 || rn == 15 {
+        return None;
+    }
+    let span = list.count_ones() * 4;
+    let base = format!("w{rn}");
+    match (up, pre) {
+        (true, false) => emit!(out, "\tmov w17, {base}"),
+        (true, true) => emit!(out, "\tadd w17, {base}, #4"),
+        (false, false) => emit!(out, "\tsub w17, {base}, #{}", span - 4),
+        (false, true) => emit!(out, "\tsub w17, {base}, #{span}"),
+    }
+    emit!(out, "\t{} w23, {base}, #{span}", if up { "add" } else { "sub" });
+    let registers: Vec<u32> = (0..16).filter(|i| list & (1 << i) != 0).collect();
+    if load {
+        if writeback && list & (1 << rn) == 0 {
+            emit!(out, "\tmov w{rn}, w23");
+        }
+        for &register in &registers {
+            if register == 15 {
+                emit!(out, "\tldr w22, [x20, w17, uxtw]");
+                if rn == 13 {
+                    return_to(out);
+                } else {
+                    jump_to(out, w);
+                }
+                return Some(false);
+            }
+            emit!(out, "\tldr w{register}, [x20, w17, uxtw]");
+            emit!(out, "\tadd w17, w17, #4");
+        }
+    } else {
+        for &register in &registers {
+            let value = if register == 15 {
+                constant(out, "w16", a + 12);
+                "w16".to_owned()
+            } else if register == rn && writeback && list & ((1 << rn) - 1) != 0 {
+                // the base when it is not the lowest register stores its new value
+                "w23".to_owned()
+            } else {
+                format!("w{register}")
+            };
+            emit!(out, "\tstr {value}, [x20, w17, uxtw]");
+            emit!(out, "\tadd w17, w17, #4");
+        }
+        if writeback {
+            emit!(out, "\tmov w{rn}, w23");
+        }
+    }
+    Some(true)
+}
+
 /// a function's blocks, each as its assembly or None for one the C runs,
 /// with how many instructions it holds.
 fn blocks(program: &Program, w: &Writer, function: &Function) -> Vec<(u32, usize, Option<String>)> {
@@ -570,6 +717,48 @@ pub fn coverage(program: &Program, entry: u32, function: &Function, labels: &BTr
         return 0;
     }
     blocks.iter().filter(|(.., text)| text.is_some()).map(|(_, run, _)| run).sum()
+}
+
+/// what keeps the translator off each block it doesn't take: the kind of
+/// its first instruction it can't, with how many instructions the block holds.
+pub fn refusals(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>) -> Vec<(&'static str, usize)> {
+    if function.mode != Mode::Arm {
+        return vec![("thumb", function.instructions.len())];
+    }
+    let w = Writer { entry, labels, functions, fallback: String::new(), made: Default::default() };
+    let instructions = &function.instructions;
+    blocks(program, &w, function)
+        .into_iter()
+        .filter(|(.., text)| text.is_none())
+        .map(|(start, run, _)| {
+            let at = instructions.iter().position(|&a| a == start).unwrap_or(0);
+            let refused = instructions[at..at + run].iter().map(|&a| program.text.read32(a).unwrap_or(0)).find(|&op| lower(&w, start, op).is_none());
+            (refused.map_or("other", kind), run)
+        })
+        .collect()
+}
+
+/// the kind of an instruction, for saying what the translator lacks.
+fn kind(op: u32) -> &'static str {
+    if op >> 28 == 0xF {
+        return "unconditional space";
+    }
+    match (op >> 25) & 7 {
+        0b000 if op & 0x90 == 0x90 && (op >> 5) & 3 != 0 => "halfword, signed and double transfers",
+        0b000 if op & 0x90 == 0x90 && op & (1 << 24) != 0 => "swap and exclusive",
+        0b000 if op & 0x90 == 0x90 => "multiplies",
+        0b000 if (op >> 23) & 3 == 0b10 && op & (1 << 20) == 0 => "status, bx, clz and the rest",
+        0b000 if op & 0x10 != 0 => "shifts by a register",
+        0b001 if (op >> 23) & 3 == 0b10 && op & (1 << 20) == 0 => "msr",
+        0b000 | 0b001 => "data processing writing pc",
+        0b010 | 0b011 if op & (1 << 25) != 0 && op & 0x10 != 0 => "media",
+        0b010 | 0b011 => "loads of pc and literal writebacks",
+        0b100 => "ldm and stm",
+        0b101 => "calls to unknown targets",
+        0b110 => "vfp transfers",
+        0b111 if op & (1 << 24) != 0 => "svc",
+        _ => "vfp and coprocessor",
+    }
 }
 
 /// whether the function is worth translating: ARM code whose entry the
@@ -697,6 +886,31 @@ mod tests {
         r.condition() << 28 | 1 << 26 | pre << 24 | r.below(2) << 23 | r.below(2) << 22 | writeback << 21 | r.below(2) << 20 | rn << 16 | r.below(11) << 12 | offset
     }
 
+    fn extra(r: &mut Random) -> u32 {
+        let pre = r.below(2);
+        let writeback = if pre == 1 { r.below(2) } else { 0 };
+        let load = r.below(2);
+        let kind = 1 + r.below(3);
+        // ldrd and strd want an even register below r14
+        let rd = if kind >= 2 && load == 0 { 2 * r.below(5) } else { r.below(11) };
+        let offset = if r.below(2) == 0 { 1 << 22 | (r.below(16) << 8) | r.below(16) } else { 11 };
+        r.condition() << 28 | pre << 24 | r.below(2) << 23 | writeback << 21 | load << 20 | (12 + r.below(2)) << 16 | rd << 12 | 1 << 7 | kind << 5 | 1 << 4 | offset
+    }
+
+    fn multiple(r: &mut Random) -> u32 {
+        let load = r.below(2);
+        let rn = 12 + r.below(2);
+        // loads stay off the bases, so that the addresses stay near
+        let mut list = r.below(0x800) | if r.below(4) == 0 { 1 << 14 } else { 0 };
+        if load == 0 && r.below(3) == 0 {
+            list |= 1 << rn;
+        }
+        if list == 0 {
+            list = 1;
+        }
+        r.condition() << 28 | 0b100 << 25 | r.below(2) << 24 | r.below(2) << 23 | r.below(2) << 21 | load << 20 | rn << 16 | list
+    }
+
     /// a function of random instructions at BASE calling one at CALLEE.
     fn program(seed: u64) -> Vec<u32> {
         let mut r = Random(seed * 0x9E37_79B9 + 1);
@@ -712,8 +926,10 @@ mod tests {
             // mostly what the translator takes, now and then what the C
             // runs, a multiply, an svc, ldm and stm
             main.push(match r.below(100) {
-                0..=54 => data_processing(&mut r),
-                55..=74 => transfer(&mut r),
+                0..=44 => data_processing(&mut r),
+                45..=59 => transfer(&mut r),
+                60..=66 => extra(&mut r),
+                67..=74 => multiple(&mut r),
                 75..=82 => {
                     let to = i + 1 + r.below((count - i) as u32) as usize;
                     branch(&mut r, to, false)
