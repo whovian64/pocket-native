@@ -5,7 +5,8 @@
 //! same budget, so a function runs the same however much of it translates.
 //!
 //! x19 holds the context, x20 the view of memory, w21 the budget, x24 the
-//! VFP registers, x25 fpscr, w0-w14 the guest's r0-r14 and NZCV its flags.
+//! VFP registers, x25 fpscr, w0-w14 the guest's r0-r14 and NZCV its flags,
+//! w27 a module's base and w28 the call depth, written back with the rest.
 //! w15-w17, w22-w23 and v16-v19 are scratch.
 //!
 //! a function has two ways in: a_ from the C and the host, which takes the
@@ -53,6 +54,7 @@ const PRELUDE: &str = "\t.text
 \tand w16, w16, #0x01010101
 \tstr w16, [x19, #64]
 \tstr w21, [x19, #72]
+\tstr w28, [x19, #84]
 .endm
 .macro pn_reload_inline
 \tldp w0, w1, [x19, #0]
@@ -70,22 +72,24 @@ const PRELUDE: &str = "\t.text
 \tand w16, w16, #0xf0000000
 \tmsr nzcv, x16
 \tldr w21, [x19, #72]
+\tldr w28, [x19, #84]
 .endm
 .macro pn_enter
-\tstp x29, x30, [sp, #-96]!
+\tstp x29, x30, [sp, #-112]!
 \tmov x29, sp
 \tstp x19, x20, [sp, #16]
 \tstp x21, x22, [sp, #32]
 \tstp x23, x24, [sp, #48]
 \tstp x25, x26, [sp, #64]
 \tstp xzr, x27, [sp, #80]
+\tstr x28, [sp, #96]
 \tmov x19, x0
 \tldr x20, [x19, #144]
 \tldr x24, [x19, #112]
 \tldr x25, [x19, #120]
 .endm
 .macro pn_enter_inner
-\tstp x29, x30, [sp, #-96]!
+\tstp x29, x30, [sp, #-112]!
 \tmov x29, sp
 \tstp x19, x20, [sp, #16]
 \tstp x21, x22, [sp, #32]
@@ -102,7 +106,8 @@ const PRELUDE: &str = "\t.text
 .if pn_module
 \tldr x27, [sp, #88]
 .endif
-\tldp x29, x30, [sp], #96
+\tldr x28, [sp, #96]
+\tldp x29, x30, [sp], #112
 .endm
 .macro pn_flush
 \tbl pn_flush_sub
@@ -189,7 +194,7 @@ struct Writer<'a> {
     /// shared there it used: leaving, the C's dispatch as the context is,
     /// and the way out over the depth limit.
     cold: std::cell::RefCell<String>,
-    shared: std::cell::Cell<[bool; 3]>,
+    shared: std::cell::Cell<[bool; 4]>,
 }
 
 impl<'a> Writer<'a> {
@@ -199,12 +204,13 @@ impl<'a> Writer<'a> {
     }
 
     /// a stub shared past the end: 0 leaves, 1 hands over to the C as
-    /// the context is, 2 leaves over the depth limit with w16 one past it.
+    /// the context is, 2 leaves over the depth limit with w16 one past it,
+    /// 3 leaves after call_inner's slow way back.
     fn stub(&self, which: usize) -> String {
         let mut shared = self.shared.get();
         shared[which] = true;
         self.shared.set(shared);
-        format!(".L{}{:08X}", ["l", "r", "u"][which], self.entry)
+        format!(".L{}{:08X}", ["l", "r", "u", "d"][which], self.entry)
     }
 
     fn local(&self) -> String {
@@ -321,7 +327,7 @@ fn return_to(out: &mut String, w: &Writer) {
     let outer = w.local();
     emit!(out, "\tldr x16, [sp, #80]");
     emit!(out, "\tcbz x16, {outer}");
-    emit!(out, "\tldp x29, x30, [sp], #96");
+    emit!(out, "\tldp x29, x30, [sp], #112");
     emit!(out, "\tmov x26, #1");
     emit!(out, "\tret");
     emit!(out, "{outer}:");
@@ -411,16 +417,13 @@ fn inner(w: &Writer, name: &str) -> Option<String> {
 fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
     w.spill(out);
     let over = w.local();
-    emit!(out, "\tldr w16, [x19, #{DEPTH}]");
-    emit!(out, "\tadd w16, w16, #1");
-    emit!(out, "\tstr w16, [x19, #{DEPTH}]");
-    emit!(out, "\tsub w17, w16, #{}", DEPTH_LIMIT + 1);
+    emit!(out, "\tadd w28, w28, #1");
+    emit!(out, "\tsub w17, w28, #{}", DEPTH_LIMIT + 1);
     emit!(out, "{TEST_MARK}tbz w17, #31, {over}");
     {
         let mut cold = w.cold.borrow_mut();
         emit!(cold, "{over}:");
-        emit!(cold, "\tsub w16, w16, #1");
-        emit!(cold, "\tstr w16, [x19, #{DEPTH}]");
+        emit!(cold, "\tsub w28, w28, #1");
         emit!(cold, "\tpn_flush");
         guest(&mut cold, w, "w16", target);
         emit!(cold, "\tstr w16, [x19, #{R15}]");
@@ -430,9 +433,14 @@ fn call_inner(out: &mut String, w: &Writer, target: u32, name: &str) {
     }
     emit!(out, "\tbl {name}");
     w.stale.set(true);
-    emit!(out, "\tldr w16, [x19, #{DEPTH}]");
-    emit!(out, "\tsub w16, w16, #1");
-    emit!(out, "\tstr w16, [x19, #{DEPTH}]");
+}
+
+/// after call_inner the slow way back, the callee gone through the
+/// context, whose depth is one too many.
+fn depth_back(out: &mut String) {
+    emit!(out, "\tldr w28, [x19, #{DEPTH}]");
+    emit!(out, "\tsub w28, w28, #1");
+    emit!(out, "\tstr w28, [x19, #{DEPTH}]");
 }
 
 /// a guest call with link the return address, as call in mod.rs writes it,
@@ -444,11 +452,13 @@ fn call(out: &mut String, w: &Writer, link: u32, target: u32, thumb: bool) -> Op
         let (slow, other, done) = (w.local(), w.local(), w.local());
         // back the plain way: on unless it isn't to the next instruction
         emit!(out, "\tcbz x26, {slow}");
+        emit!(out, "\tsub w28, w28, #1");
         guest(out, w, "w17", link);
         emit!(out, "\tsub w16, w22, w17");
         emit!(out, "\tcbnz w16, {other}");
         let mut cold = String::new();
         emit!(cold, "{slow}:");
+        depth_back(&mut cold);
         returned(&mut cold, w, link);
         emit!(cold, "\tb {done}");
         emit!(cold, "{other}:");
@@ -498,7 +508,8 @@ fn jump(out: &mut String, w: &Writer, target: u32) -> Option<bool> {
     } else if let Some(name) = w.functions.get(&target).and_then(|name| inner(w, name)) {
         // a tail call: its return is this function's
         call_inner(out, w, target, &name);
-        emit!(out, "\tcbz x26, {}", w.stub(0));
+        emit!(out, "\tcbz x26, {}", w.stub(3));
+        emit!(out, "\tsub w28, w28, #1");
         return_to(out, w);
         // not taken, the registers are as they were
         w.stale.set(false);
@@ -2061,6 +2072,11 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
         emit!(tail, "\tstr w16, [x19, #{DEPTH}]");
         emit!(tail, "\tmov w16, #{EXIT_UNWIND}");
         emit!(tail, "\tstr w16, [x19, #{EXIT}]");
+        emit!(tail, "\tb pn_leave_sub");
+    }
+    if shared[3] {
+        emit!(tail, "{}:", w.stub(3));
+        depth_back(&mut tail);
         emit!(tail, "\tb pn_leave_sub");
     }
     // tbz and tbnz reach 32 KiB: past that, round a b
