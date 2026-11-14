@@ -181,7 +181,8 @@ Every setting has a line of help at the bottom of the menu.
 
 **Advanced settings** are saved per game. They switch the engine's speed
 hacks and its graphics, CPU and loading options for a game that doesn't
-run or look right, and set the language and region the game is told.
+run or look right, and set the language and region the game is told,
+and **Your name**, which every game is told.
 **Most compatible** turns off every speed hack at once: if that fixes a
 game, turn them back on one at a time to find the one it trips over.
 Settings under a "requires restart" heading need **Restart game**.
@@ -194,6 +195,17 @@ top screen fills it.
 below the target, up to 30 or 60 fps. It follows motion in 16 pixel
 blocks, so slow scenes come out smooth and fast ones can smear thin
 details. It's off by default.
+
+**Typing.** A game that asks for a name or other text opens a keyboard
+over the bottom screen, the game waiting under it: the d-pad and A type,
+or a finger on the bottom screen. On one panel where the bottom screen
+is small, it's shown by itself while you type.
+
+**Texture packs.** A Citra or Azahar texture pack goes in a `textures`
+folder in the game's `data` folder, next to its `log.txt`: what the pack
+puts in `load/textures/<title id>/`, its PNGs and `pack.json`. It needs
+the GPU drawing, and its pictures take memory, so a big pack may be too
+much for a handheld with 1 GB.
 
 ## For developers
 
