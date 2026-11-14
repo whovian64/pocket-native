@@ -1808,37 +1808,53 @@ fn block_transfer(out: &mut String, w: &Writer, a: u32, op: u32) -> Option<bool>
         (false, true) => emit!(out, "\tsub w17, {base}, #{span}"),
     }
     emit!(out, "\t{} w23, {base}, #{span}", if up { "add" } else { "sub" });
+    // the words in pairs from the lowest one's host address: the same but
+    // for a list running past the top of the guest's memory, which no code
+    // does
+    emit!(out, "\tadd x17, x20, w17, uxtw");
     let registers: Vec<u32> = (0..16).filter(|i| list & (1 << i) != 0).collect();
     if load {
         if writeback && list & (1 << rn) == 0 {
             emit!(out, "\tmov w{rn}, w23");
         }
-        for &register in &registers {
-            if register == 15 {
-                emit!(out, "\tldr w22, [x20, w17, uxtw]");
-                if rn == 13 {
-                    return_to(out, w);
-                } else {
-                    jump_to(out, w);
-                }
-                return Some(false);
+        let loaded: Vec<u32> = registers.iter().copied().filter(|&register| register != 15).collect();
+        for (i, pair) in loaded.chunks(2).enumerate() {
+            match pair {
+                [a, b] => emit!(out, "\tldp w{a}, w{b}, [x17, #{}]", 8 * i),
+                [a] => emit!(out, "\tldr w{a}, [x17, #{}]", 8 * i),
+                _ => unreachable!(),
             }
-            emit!(out, "\tldr w{register}, [x20, w17, uxtw]");
-            emit!(out, "\tadd w17, w17, #4");
+        }
+        if list & (1 << 15) != 0 {
+            emit!(out, "\tldr w22, [x17, #{}]", 4 * loaded.len());
+            if rn == 13 {
+                return_to(out, w);
+            } else {
+                jump_to(out, w);
+            }
+            return Some(false);
         }
     } else {
-        for &register in &registers {
-            let value = if register == 15 {
-                guest(out, w, "w16", a + 12);
-                "w16".to_owned()
-            } else if register == rn && writeback && list & ((1 << rn) - 1) != 0 {
-                // the base when it is not the lowest register stores its new value
-                "w23".to_owned()
-            } else {
-                format!("w{register}")
-            };
-            emit!(out, "\tstr {value}, [x20, w17, uxtw]");
-            emit!(out, "\tadd w17, w17, #4");
+        let values: Vec<String> = registers
+            .iter()
+            .map(|&register| {
+                if register == 15 {
+                    guest(out, w, "w16", a + 12);
+                    "w16".to_owned()
+                } else if register == rn && writeback && list & ((1 << rn) - 1) != 0 {
+                    // the base when it is not the lowest register stores its new value
+                    "w23".to_owned()
+                } else {
+                    format!("w{register}")
+                }
+            })
+            .collect();
+        for (i, pair) in values.chunks(2).enumerate() {
+            match pair {
+                [a, b] => emit!(out, "\tstp {a}, {b}, [x17, #{}]", 8 * i),
+                [a] => emit!(out, "\tstr {a}, [x17, #{}]", 8 * i),
+                _ => unreachable!(),
+            }
         }
         if writeback {
             emit!(out, "\tmov w{rn}, w23");
