@@ -88,17 +88,18 @@ const PRELUDE: &str = "\t.text
 \tldr x24, [x19, #112]
 \tldr x25, [x19, #120]
 .endm
+// a translated caller's x19-x25 and x27 are this function's too, and what
+// it keeps in x21-x23 and x28 it reads again: an inner frame holds only
+// its way back
 .macro pn_enter_inner
 \tstp x29, x30, [sp, #-112]!
 \tmov x29, sp
-\tstp x19, x20, [sp, #16]
-\tstp x21, x22, [sp, #32]
-\tstp x23, x24, [sp, #48]
-\tstp x25, xzr, [sp, #64]
 \tmov x16, #1
-\tstp x16, x27, [sp, #80]
+\tstr x16, [sp, #80]
 .endm
 .macro pn_leave
+\tldr x16, [sp, #80]
+\tcbnz x16, 1f
 \tldp x19, x20, [sp, #16]
 \tldp x21, x22, [sp, #32]
 \tldp x23, x24, [sp, #48]
@@ -107,6 +108,10 @@ const PRELUDE: &str = "\t.text
 \tldr x27, [sp, #88]
 .endif
 \tldr x28, [sp, #96]
+\tb 2f
+1:
+\tmov x26, #0
+2:
 \tldp x29, x30, [sp], #112
 .endm
 .macro pn_flush
