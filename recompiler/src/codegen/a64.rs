@@ -1991,42 +1991,71 @@ pub fn write(out: &mut String, program: &Program, entry: u32, function: &Functio
     emit!(out, "{inner}:");
     emit!(out, "\tpn_enter_inner");
     emit!(out, "\tb {}", w.block(entry));
-    let mut stubs = String::new();
+    // the way the code runs on falls through, what it seldom does in stubs
+    // past the end
+    let (mut body, mut stubs) = (String::new(), String::new());
     for (start, run, text, vector) in blocks(program, &w, function) {
-        emit!(out, "{}:", w.block(start));
+        emit!(body, "{}:", w.block(start));
         match text {
             Some(text) => {
-                let (out_of_budget, on) = (w.local(), w.local());
+                let out_of_budget = w.local();
                 // a short vector is the C's
                 if vector {
-                    let scalar = w.local();
-                    emit!(out, "\tldr w16, [x25]");
-                    emit!(out, "\tand w16, w16, #0x{FPSCR_LEN:x}");
-                    emit!(out, "\tcbz w16, {scalar}");
-                    fallback(out, &w, start);
-                    emit!(out, "{scalar}:");
+                    let short = w.local();
+                    emit!(body, "\tldr w16, [x25]");
+                    emit!(body, "\tand w16, w16, #0x{FPSCR_LEN:x}");
+                    emit!(body, "\tcbnz w16, {short}");
+                    emit!(stubs, "{short}:");
+                    fallback(&mut stubs, &w, start);
                 }
                 if run < 4096 {
-                    emit!(out, "\tsub w21, w21, #{run}");
+                    emit!(body, "\tsub w21, w21, #{run}");
                 } else {
-                    constant(out, "w16", run as u32);
-                    emit!(out, "\tsub w21, w21, w16");
+                    constant(&mut body, "w16", run as u32);
+                    emit!(body, "\tsub w21, w21, w16");
                 }
-                emit!(out, "\ttbz w21, #31, {on}");
-                emit!(out, "\tb {out_of_budget}");
-                emit!(out, "{on}:");
-                out.push_str(&text);
+                emit!(body, "{BUDGET_MARK}{out_of_budget}");
+                body.push_str(&text);
                 emit!(stubs, "{out_of_budget}:");
                 guest(&mut stubs, &w, "w22", start);
                 constant(&mut stubs, "w23", run as u32);
                 emit!(stubs, "\tb pn_budget_sub");
             }
-            None => fallback(out, &w, start),
+            None => fallback(&mut body, &w, start),
+        }
+    }
+    // tbnz reaches 32 KiB: past that, round a b
+    let near = instructions(&body) + instructions(&stubs) < NEAR;
+    for line in body.lines() {
+        match line.strip_prefix(BUDGET_MARK) {
+            Some(label) if near => emit!(out, "\ttbnz w21, #31, {label}"),
+            Some(label) => {
+                let on = w.local();
+                emit!(out, "\ttbz w21, #31, {on}");
+                emit!(out, "\tb {label}");
+                emit!(out, "{on}:");
+            }
+            None => emit!(out, "{line}"),
         }
     }
     // past the last instruction is wherever it goes on to
     out.push_str(&stubs);
     emit!(out, "\t.size {name}, .-{name}\n");
+}
+
+/// what write marks a block's way out of the budget with, for a branch it
+/// picks once it knows how far the stubs are.
+const BUDGET_MARK: &str = "#budget ";
+/// instructions tbnz reaches past, with room to spare.
+const NEAR: usize = 7000;
+
+/// about how many instructions assembly holds, the macros counted as their
+/// longest.
+fn instructions(text: &str) -> usize {
+    text.lines()
+        .filter(|line| (line.starts_with('\t') && !line.starts_with("\t.")) || line.starts_with(BUDGET_MARK))
+        .map(|line| if line.starts_with("\tpn_") { 10 } else { 1 })
+        .sum()
 }
 
 #[cfg(test)]
