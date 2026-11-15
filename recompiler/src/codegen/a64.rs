@@ -2135,7 +2135,7 @@ fn kind(op: u32) -> &'static str {
 pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, prefix: &str) -> bool {
     let translated = coverage(program, entry, function, labels, functions, prefix);
     // short of the 1 MiB conditional branches reach to the stubs past the end
-    translated > 0 && translated * 2 >= function.instructions.len() && function.instructions.len() <= 20_000
+    translated > 0 && translated * 2 >= function.instructions.len() && function.instructions.len() <= 8_000
 }
 
 /// the function's assembly, entered at its entry as the C is, the C named
