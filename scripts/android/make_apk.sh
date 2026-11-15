@@ -25,7 +25,8 @@ sed -e "s|@PACKAGE@|$package|" -e "s|@VERSION_CODE@|$code|" -e "s|@VERSION@|$ver
     -e "s|@LABEL@|$(printf %s "$escaped" | sed 's/[|&\\]/\\&/g')|" \
     "$here/AndroidManifest.xml" > "$work/AndroidManifest.xml"
 
-"$BUILD_TOOLS_BIN/aapt2" link -o "$work/unaligned.apk" --manifest "$work/AndroidManifest.xml" -I "$ANDROID_JAR" -A "$assets"
+"$BUILD_TOOLS_BIN/aapt2" compile --dir "$here/res" -o "$work/res.zip"
+"$BUILD_TOOLS_BIN/aapt2" link -o "$work/unaligned.apk" --manifest "$work/AndroidManifest.xml" -I "$ANDROID_JAR" -A "$assets" "$work/res.zip"
 mkdir -p "$work/classes" "$work/dex"
 mapfile -t sources < <(find "$here/java" -name '*.java')
 javac -nowarn --release 11 -classpath "$ANDROID_JAR" -d "$work/classes" "${sources[@]}"

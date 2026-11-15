@@ -7,12 +7,14 @@ use std::sync::Arc;
 use zakuro_gpu::{Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
 
 const FONT: &[u8] = include_bytes!("../../assets/fonts/menu.font");
+const LOGO: &[u8] = include_bytes!("../../assets/logo/mono.alpha");
 /// the overlay's textures: one white texel for the boxes, the atlas, and a
 /// white disc for round buttons.
 const WHITE: u64 = 1;
 const ATLAS: u64 = 2;
 const DISC: u64 = 3;
 const DISC_SIZE: u32 = 64;
+const LOGO_ID: u64 = 4;
 
 #[derive(Clone, Copy)]
 struct Glyph {
@@ -90,6 +92,7 @@ pub struct Canvas<'a> {
     boxes: OverlayMesh,
     discs: OverlayMesh,
     text: OverlayMesh,
+    logo: Option<OverlayMesh>,
 }
 
 fn quad(mesh: &mut OverlayMesh, [left, top, right, bottom]: [f32; 4], [u0, v0, u1, v1]: [f32; 4], color: [u8; 4]) {
@@ -109,7 +112,7 @@ pub fn rgba([r, g, b]: [u8; 3], alpha: u8) -> [u8; 4] {
 impl<'a> Canvas<'a> {
     pub fn new(font: &'a Font, (width, height): (u32, u32)) -> Canvas<'a> {
         let mesh = |texture| OverlayMesh { texture, clip: [0, 0, width, height], vertices: Vec::new(), indices: Vec::new() };
-        Canvas { font, boxes: mesh(WHITE), discs: mesh(DISC), text: mesh(ATLAS) }
+        Canvas { font, boxes: mesh(WHITE), discs: mesh(DISC), text: mesh(ATLAS), logo: None }
     }
 
     pub fn measure(&self, face: usize, text: &str) -> f32 {
@@ -155,12 +158,31 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// the monochrome logo's size, in panel pixels as drawn.
+    pub fn logo_size() -> [f32; 2] {
+        [u16::from_le_bytes([LOGO[0], LOGO[1]]) as f32, u16::from_le_bytes([LOGO[2], LOGO[3]]) as f32]
+    }
+
+    /// the monochrome logo in color, its top left at x, y.
+    pub fn logo(&mut self, x: f32, y: f32, color: [u8; 4]) {
+        let [width, height] = Canvas::logo_size();
+        let clip = self.boxes.clip;
+        let mesh = self.logo.get_or_insert_with(|| OverlayMesh { texture: LOGO_ID, clip, vertices: Vec::new(), indices: Vec::new() });
+        quad(mesh, [x, y, x + width, y + height], [0.0, 0.0, 1.0, 1.0], color);
+    }
+
     pub fn finish(self) -> Overlay {
-        let textures = vec![
+        let mut textures = vec![
             OverlayTexture { id: WHITE, offset: None, size: [1, 1], pixels: vec![255; 4], linear: false },
             OverlayTexture { id: ATLAS, offset: None, size: self.font.size, pixels: self.font.pixels.to_vec(), linear: false },
             OverlayTexture { id: DISC, offset: None, size: [DISC_SIZE; 2], pixels: self.font.disc.to_vec(), linear: true },
         ];
-        Overlay { textures, meshes: vec![self.boxes, self.discs, self.text], free: Vec::new(), whole: false, bottom: false }
+        let mut meshes = vec![self.boxes, self.discs, self.text];
+        if let Some(logo) = self.logo {
+            let [width, height] = Canvas::logo_size().map(|side| side as u32);
+            textures.push(OverlayTexture { id: LOGO_ID, offset: None, size: [width, height], pixels: LOGO[4..].iter().flat_map(|&alpha| [alpha; 4]).collect(), linear: false });
+            meshes.push(logo);
+        }
+        Overlay { textures, meshes, free: Vec::new(), whole: false, bottom: false }
     }
 }

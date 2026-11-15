@@ -13,13 +13,20 @@ use eframe::egui;
 use games::Game;
 use jobs::{Engine, Job, Kind};
 
+const LOGO: &[u8] = include_bytes!("../../assets/logo/colour.rgba");
+
+/// the colour logo's width, height and RGBA.
+fn logo() -> ([usize; 2], &'static [u8]) {
+    ([u16::from_le_bytes([LOGO[0], LOGO[1]]) as usize, u16::from_le_bytes([LOGO[2], LOGO[3]]) as usize], &LOGO[4..])
+}
+
 fn main() -> eframe::Result {
     let (kit, problem) = match jobs::kit_root() {
         Ok(kit) => (kit, None),
         Err(problem) => (PathBuf::new(), Some(problem)),
     };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("Pocket Native").with_inner_size([900.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_drag_and_drop(true),
+        viewport: egui::ViewportBuilder::default().with_title("Pocket Native").with_inner_size([900.0, 640.0]).with_min_inner_size([640.0, 420.0]).with_drag_and_drop(true).with_icon(egui::IconData { rgba: logo().1.to_vec(), width: logo().0[0] as u32, height: logo().0[1] as u32 }),
         ..Default::default()
     };
     // winit takes no dropped files on Wayland: X11 where there is one
@@ -74,6 +81,7 @@ struct App {
     list: Vec<(String, String)>,
     games: Vec<Game>,
     icons: Vec<Option<egui::TextureHandle>>,
+    logo: egui::TextureHandle,
     /// games still being read, off the window's thread.
     detecting: Option<Receiver<Game>>,
     job: Option<Job>,
@@ -100,6 +108,7 @@ impl App {
             kit,
             games: Vec::new(),
             icons: Vec::new(),
+            logo: cc.egui_ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied(logo().0, logo().1), egui::TextureOptions::LINEAR),
             detecting: None,
             job: None,
             show_log: false,
@@ -231,6 +240,8 @@ impl eframe::App for App {
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                let [width, height] = logo().0.map(|side| side as f32);
+                ui.image((self.logo.id(), egui::vec2(36.0 * width / height, 36.0)));
                 ui.heading("Pocket Native");
                 ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION")).weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

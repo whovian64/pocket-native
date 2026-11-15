@@ -651,6 +651,8 @@ impl Menu {
 pub fn preparing(canvas: &mut Canvas, (width, height): (u32, u32), done: usize, total: usize, remaining: Option<std::time::Duration>) {
     let (width, height) = (width as f32, height as f32);
     let centred = |canvas: &mut Canvas, size: usize, text: &str, y: f32, color: [u8; 3]| canvas.text(size, text, (width - canvas.measure(size, text)) / 2.0, y, rgba(color, 255), false);
+    let [logo_width, logo_height] = Canvas::logo_size();
+    canvas.logo(((width - logo_width) / 2.0).round(), height / 2.0 - 52.0 - logo_height, rgba(TEXT, 255));
     centred(canvas, BIG, "Preparing shaders", height / 2.0 - 40.0, TEXT);
     let (left, right, top) = (width * 0.2, width * 0.8, height / 2.0);
     canvas.fill([left, top, right, top + 10.0], rgba([32, 48, 72], 255));
