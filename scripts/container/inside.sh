@@ -67,7 +67,7 @@ if [ -s "/out/Pocket Native/pocket-native/games/$id/title.hints" ]; then
 fi
 overrides=()
 [ -d "titles/$id/overrides" ] && overrides=(--overrides "titles/$id/overrides")
-RECOMP_CFLAGS=-DRECOMP_FASTMEM CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/release/3dsrecomp" build "$game" "/work/recomp/$id" "${overrides[@]}"
+RECOMP_CFLAGS=-DRECOMP_FASTMEM RECOMP_A64=1 CC=aarch64-linux-gnu-gcc-8 "$CARGO_TARGET_DIR/release/3dsrecomp" build "$game" "/work/recomp/$id" "${overrides[@]}"
 
 echo "== finding the game's shaders"
 rm -rf /work/vertex
