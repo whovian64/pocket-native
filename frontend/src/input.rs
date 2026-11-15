@@ -124,9 +124,10 @@ pub fn gamepad() -> Option<(String, String)> {
 
 /// the pad in /proc/bus/input/devices' text, its event device and name.
 fn pad_among(devices: &str) -> Option<(String, String)> {
-    // muOS hides the pad it reads behind its own, so that one goes first
+    // muOS hides the pad it reads behind its own, so that one goes first, and
+    // a pad's keyboard half, ROCKNIX's "OSH PB Controller Keyboard", last
     let mut blocks: Vec<&str> = devices.split("\n\n").collect();
-    blocks.sort_by_key(|block| !block.contains("N: Name=\"muOS-Keys\""));
+    blocks.sort_by_key(|block| (!block.contains("N: Name=\"muOS-Keys\""), block.lines().any(|line| line.starts_with("N: Name=") && line.contains("Keyboard"))));
     blocks.into_iter().find_map(|block| {
         // the name comes in quotes
         let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?.trim_matches('"');
@@ -733,6 +734,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(pad_among(&devices), Some(("/dev/input/event4".to_owned(), "TRIMUI Player1".to_owned())));
+    }
+
+    #[test]
+    fn the_osh_pb_pad_wins_over_its_keyboard_half() {
+        // an RG351P's devices under ROCKNIX, the keyboard half listed first
+        let devices = ["rk805 pwrkey", "OpenSimHardware OSH PB Controller Keyboard", "OpenSimHardware OSH PB Controller", "adc-keys"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("I: Bus=0003 Vendor=1209 Product=3100 Version=0111\nN: Name=\"{name}\"\nH: Handlers=event{i}\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(pad_among(&devices), Some(("/dev/input/event2".to_owned(), "OpenSimHardware OSH PB Controller".to_owned())));
     }
 
     #[test]
