@@ -39,9 +39,11 @@ pull requests:
   and the tables buffer bound from the start ([#28](https://github.com/whovian64/pocket-native/pull/28))
 - **Sekyleky**: the New 3DS system modes' memory ([#33](https://github.com/whovian64/pocket-native/pull/33)),
   Stretch filling both displays on two-screen handhelds ([#32](https://github.com/whovian64/pocket-native/pull/32))
-  and the device's motion sensors on Android ([#53](https://github.com/whovian64/pocket-native/pull/53))
+  the device's motion sensors on Android ([#53](https://github.com/whovian64/pocket-native/pull/53))
+  and texture packs ([#52](https://github.com/whovian64/pocket-native/pull/52))
 - **kxn203**: game profiles ([#3](https://github.com/whovian64/pocket-native/pull/3))
-  and the script that rebuilds every game built before ([#34](https://github.com/whovian64/pocket-native/pull/34))
+  the script that rebuilds every game built before ([#34](https://github.com/whovian64/pocket-native/pull/34))
+  and Bravely Default's real-time GPU ([#67](https://github.com/whovian64/pocket-native/pull/67))
 - **Kvn0l**: the Monster Hunter 4 Ultimate profile
 - **peuic**: the Miyoo Flip under spruceOS ([#27](https://github.com/whovian64/pocket-native/pull/27))
 - **sabogalc**: Z3DS-compressed `.zcci` games ([#29](https://github.com/whovian64/pocket-native/pull/29))
@@ -50,6 +52,8 @@ pull requests:
 - **ecer96**: culling that leaves a mesh drawn more than once alone,
   which made Super Mario 3D Land's coins and blocks flicker
 - **birgitzprinz**: the RG351P/M's OSH PB pad ([#45](https://github.com/whovian64/pocket-native/pull/45))
+- **AleWiccan**: TrimUI handhelds on their stock firmware's PowerVR driver ([#70](https://github.com/whovian64/pocket-native/pull/70))
+- **buffgwen**: nuubOS's Wayland window ([#82](https://github.com/whovian64/pocket-native/pull/82))
 
 ## Menu font
 
