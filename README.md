@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo/pocket-native.png" alt="" width="200"></p>
+
 # Pocket Native
 
 Nintendo 3DS games on cheap handhelds and Android, rebuilt for them
