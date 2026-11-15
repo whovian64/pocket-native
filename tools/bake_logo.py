@@ -10,7 +10,7 @@ The colour logo is the first, the monochrome one the second. Writes:
     assets/logo/colour.rgba     u16 width, u16 height, then RGBA, for the kit
     assets/logo/pocket-native.png
     scripts/android/res/mipmap-*/ic_launcher.png and ic_launcher_foreground.png,
-                                the adaptive icon's logo inside its safe circle
+                                the adaptive icon's logo
 """
 import struct
 import sys
@@ -50,9 +50,9 @@ def main(colour_png, mono_png):
         folder = ROOT / "scripts" / "android" / "res" / f"mipmap-{density}"
         folder.mkdir(parents=True, exist_ok=True)
         square(colour, side).save(folder / "ic_launcher.png", optimize=True)
-        # 108 dp, the logo inside the middle 66 dp a launcher's mask keeps
+        # 108 dp, the logo filling the middle 72 dp a launcher shows
         canvas = Image.new("RGBA", (side * 9 // 4,) * 2)
-        logo = square(colour, side * 9 // 4 * 60 // 108)
+        logo = square(colour, side * 9 // 4 * 70 // 108)
         canvas.paste(logo, ((canvas.width - logo.width) // 2,) * 2)
         canvas.save(folder / "ic_launcher_foreground.png", optimize=True)
 
