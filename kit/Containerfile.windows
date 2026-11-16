@@ -1,0 +1,10 @@
+# the kit's window for Windows, cross built: Ubuntu 22.04's MinGW, new enough
+# for Rust's Windows target
+FROM docker.io/library/ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        gcc libc6-dev gcc-mingw-w64-x86-64 ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/opt/rustup PATH=/opt/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | CARGO_HOME=/opt/cargo sh -s -- -y --profile minimal --component rustfmt,clippy --no-modify-path --target x86_64-pc-windows-gnu \
+    && chmod -R a+rX /opt/rustup /opt/cargo
+ENV CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc

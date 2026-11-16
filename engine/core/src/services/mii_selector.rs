@@ -21,10 +21,10 @@ const MII: usize = 0x0C;
 const RESULT_SIZE: usize = 0x84;
 
 /// what the selector hands back, a Mii picked, not a guest, the console's.
-pub fn result() -> Vec<u8> {
+pub fn result(name: &str) -> Vec<u8> {
     let mut result = vec![0; RESULT_SIZE];
     result[GUEST_MII_INDEX..GUEST_MII_INDEX + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-    result[MII..MII + STORE_DATA_SIZE].copy_from_slice(&console_mii());
+    result[MII..MII + STORE_DATA_SIZE].copy_from_slice(&console_mii(name));
     result
 }
 
@@ -32,7 +32,7 @@ pub fn result() -> Vec<u8> {
 /// coins: the console's Mii in the first of Mii Maker's hundred places, the
 /// rest empty, as a console has it after its first Mii. each half carries a
 /// CRC-16/XMODEM of itself, big endian.
-pub fn database() -> Vec<u8> {
+pub fn database(name: &str) -> Vec<u8> {
     const MIIS: usize = 0x8;
     const MII_SIZE: usize = 0x5C;
     const HEARD: usize = 0x23F8;
@@ -45,7 +45,7 @@ pub fn database() -> Vec<u8> {
     let mut db = vec![0u8; SIZE];
     db[..4].copy_from_slice(b"CFOG");
     db[4..8].copy_from_slice(&0x100u32.to_le_bytes());
-    db[MIIS..MIIS + MII_SIZE].copy_from_slice(&console_mii()[..MII_SIZE]);
+    db[MIIS..MIIS + MII_SIZE].copy_from_slice(&console_mii(name)[..MII_SIZE]);
     // the Miis met or received, a list of three thousand with no head or
     // tail, each place pointing nowhere
     db[HEARD..HEARD + 4].copy_from_slice(b"CFHE");
@@ -68,7 +68,7 @@ const MII_ID: u32 = 0x9000_0000 | (421 * 86_400 / 2);
 
 /// the console's own Mii, named after the console's user as cfg names it,
 /// with the face a new male Mii starts with.
-fn console_mii() -> [u8; STORE_DATA_SIZE] {
+fn console_mii(name: &str) -> [u8; STORE_DATA_SIZE] {
     let mut mii = [0u8; STORE_DATA_SIZE];
     // the format's version, then made on a 3DS
     mii[0x00] = 3;
@@ -80,7 +80,7 @@ fn console_mii() -> [u8; STORE_DATA_SIZE] {
     // with the console's MAC address
     mii[0x10..0x16].copy_from_slice(&MAC_ADDRESS);
     // male, no birthday and red as the favorite color are all zero
-    put_name(&mut mii[0x1A..0x2E], "Zakuro");
+    put_name(&mut mii[0x1A..0x2E], name);
     // height and build
     mii[0x2E] = 64;
     mii[0x2F] = 64;
@@ -112,7 +112,7 @@ fn console_mii() -> [u8; STORE_DATA_SIZE] {
         mii[0x3C + i * 2..0x3E + i * 2].copy_from_slice(&(halfword as u16).to_le_bytes());
     }
     // the user made it
-    put_name(&mut mii[0x48..0x5C], "Zakuro");
+    put_name(&mut mii[0x48..0x5C], name);
     let checksum = crc16(&mii[..CHECKSUM]);
     mii[CHECKSUM..].copy_from_slice(&checksum.to_be_bytes());
     mii
@@ -152,10 +152,10 @@ mod tests {
     /// checksums hold.
     #[test]
     fn the_database_holds_the_consoles_mii() {
-        let db = database();
+        let db = database("Zakuro");
         assert_eq!(db.len(), 0x4BD20);
         assert_eq!(&db[..4], b"CFOG");
-        assert_eq!(db[0x8..0x8 + 0x5C], console_mii()[..0x5C]);
+        assert_eq!(db[0x8..0x8 + 0x5C], console_mii("Zakuro")[..0x5C]);
         assert!(db[0x8 + 0x5C..0x23F8].iter().all(|&b| b == 0), "one Mii");
         assert_eq!(u16::from_be_bytes([db[0xC81E], db[0xC81F]]), crc16(&db[..0xC81E]));
         assert_eq!(&db[0xC820..0xC824], b"CFRA");
@@ -170,7 +170,7 @@ mod tests {
     /// the answer reads as a Mii picked, with data a title's checks take.
     #[test]
     fn the_selector_answers_with_the_consoles_mii() {
-        let result = result();
+        let result = result("Zakuro");
         assert_eq!(result.len(), RESULT_SIZE);
         assert_eq!(result[..8], [0; 8], "a Mii was picked, not a guest");
         let mii = &result[MII..MII + STORE_DATA_SIZE];

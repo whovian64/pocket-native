@@ -28,15 +28,17 @@ use crate::{GpuMemory, Picture, ScreenRef};
 
 mod between;
 mod display;
+mod prepare;
 mod programs;
 mod sources;
 
 use display::*;
+use prepare::Precache;
 use programs::*;
 use sources::*;
 pub use display::{layout_scale, layout_size, panel_timing, second_window, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
-pub use programs::{compiling, compiling_stand_ins, note_compiler_crash};
-pub(crate) use programs::COMPILING;
+pub use programs::{compiling, compiling_stand_ins, note_compiler_crash, preparing, skip_preparing, waited_draws};
+pub(crate) use programs::{COMPILING, WAITED};
 
 const VERTEX_SIZE: usize = 24 * 4;
 const PROCTEX_WORDS: usize = 8;
@@ -1557,7 +1559,12 @@ pub struct Gles {
     surfaces: Vec<Surface>,
     framebuffers: rustc_hash::FxHashMap<(Option<usize>, Option<usize>), glow::Framebuffer>,
     textures: rustc_hash::FxHashMap<usize, Texture>,
-    samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap, Lod, bool), glow::Sampler>,
+    /// texture pack pictures on the GPU, by the hash of the texture each
+    /// replaces.
+    // ponytail: kept for the whole game, a budget and letting the least used
+    // go if a pack ever outgrows the GPU's memory
+    replaced: rustc_hash::FxHashMap<u64, glow::Texture>,
+        samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap, Lod, bool), glow::Sampler>,
     blank: glow::Texture,
     transfer: Option<glow::Program>,
     reinterpreter: Option<glow::Program>,
@@ -1587,6 +1594,16 @@ pub struct Gles {
     pictures: u64,
     warned_logic_op: bool,
     preloading: bool,
+    precaching: bool,
+    /// the precache list's programs, built at a first start, with the setup
+    /// each came from: one the game uses goes into the manifest then, as the
+    /// next starts prepare the manifest and leave the list.
+    precached: HashMap<ProgramKey, String>,
+    /// where to note the list built once its programs are, beside their
+    /// saved copies, which a cleared cache takes with them.
+    precache_stamp: Option<std::path::PathBuf>,
+    /// the list's lines still to hand out, a few each time the screens go up.
+    precache: Option<Precache>,
     /// the console's resolution times this over 4 is what the surfaces are
     /// drawn at, 4 native.
     quarters: u32,
@@ -1685,6 +1702,7 @@ impl Gles {
                 surfaces: Vec::new(),
                 framebuffers: Default::default(),
                 textures: Default::default(),
+                replaced: Default::default(),
                 samplers: Default::default(),
                 blank,
                 transfer: None,
@@ -1706,12 +1724,19 @@ impl Gles {
                 pictures: 0,
                 warned_logic_op: false,
                 preloading: false,
+                precaching: false,
+                precached: HashMap::new(),
+                precache_stamp: None,
+                precache: None,
                 quarters: 4,
                 natives: Default::default(),
             };
             gles.prepare_helpers();
             gles.preload();
+            gles.preload_precache();
+            gles.preload_vertex_list();
             gles.prepare_stand_ins();
+            PREPARING.store(compiling() + PRECACHE_LEFT.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
             Ok(gles)
         }
     }
@@ -1758,90 +1783,6 @@ impl Gles {
                 }
             }
         }
-    }
-
-    fn preload(&mut self) {
-        let Some(path) = manifest_path() else { return };
-        let Ok(text) = std::fs::read_to_string(&path) else { return };
-        if text.lines().next() != Some(MANIFEST_HEADER) {
-            log::info!("{} is from another version, starting it over", path.display());
-            let _ = std::fs::remove_file(&path);
-            let _ = vertex_path(&path, 0).parent().map(std::fs::remove_dir_all);
-            return;
-        }
-        let started = std::time::Instant::now();
-        self.preloading = true;
-        // with several compiler threads they all take the list, the start
-        // waiting for the last of them, rather than the GL thread building
-        // one program after another
-        let queue = self.compiler.is_some() && compilers() > 1;
-        let built_before = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed);
-        let (mut translating, mut programs) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
-        let mut units: HashMap<u64, Option<ShaderUnit>> = HashMap::new();
-        let mut count = 0;
-        for line in text.lines().skip(1) {
-            let mut fields = line.split_whitespace();
-            let vertex = match fields.next() {
-                Some("0") => 0,
-                Some(field) => {
-                    let Ok(parts) = field.split(':').map(|part| u64::from_str_radix(part, 16)).collect::<Result<Vec<u64>, _>>() else { continue };
-                    let Some((&[fingerprint, entry], semantics)) = parts.split_first_chunk::<2>() else { continue };
-                    let Ok(semantics) = <[u32; SEMANTICS]>::try_from(semantics.iter().map(|&value| value as u32).collect::<Vec<u32>>()) else { continue };
-                    let unit = units.entry(fingerprint).or_insert_with(|| {
-                        let bytes = std::fs::read(vertex_path(&path, fingerprint)).ok().filter(|bytes| bytes.len() == (PROGRAM_SIZE + DESCRIPTOR_SIZE) * 4)?;
-                        let mut unit = ShaderUnit::new();
-                        for (word, chunk) in unit.program.iter_mut().chain(unit.descriptors.iter_mut()).zip(bytes.as_chunks::<4>().0) {
-                            *word = u32::from_le_bytes(*chunk);
-                        }
-                        unit.prepare();
-                        Some(unit)
-                    });
-                    let Some(unit) = unit else { continue };
-                    unit.entry_point = entry as u32;
-                    let began = std::time::Instant::now();
-                    let stage = self.vertex_stage(unit, semantics);
-                    translating += began.elapsed();
-                    let Ok(hash) = stage else { continue };
-                    hash
-                }
-                None => continue,
-            };
-            let Some(Ok(flags)) = fields.next().map(|field| u32::from_str_radix(field, 16)) else { continue };
-            let mut r = [0u32; 0x300];
-            for (register, value) in fields.filter_map(|field| field.split_once('=')) {
-                if let (Ok(register @ 0..0x300), Ok(value)) = (usize::from_str_radix(register, 16), u32::from_str_radix(value, 16)) {
-                    r[register] = value;
-                }
-            }
-            let mut packed = Vec::new();
-            if flags & 1 << 17 != 0 {
-                let Some(lighting) = crate::lighting::Lighting::read(&r) else { continue };
-                lighting.pack(&mut packed);
-            }
-            let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
-            let (constants, lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
-            let began = std::time::Instant::now();
-            match self.program(&constants, writes_depth, &lighting, vertex, !queue, None) {
-                Ok(_) => count += 1,
-                Err(error) => log::warn!("could not prepare a shader from {}, {error}", path.display()),
-            }
-            programs += began.elapsed();
-        }
-        let waiting = std::time::Instant::now();
-        while self.compiler.as_ref().is_some_and(|compiler| !compiler.pending.is_empty()) {
-            self.take_compiled(true);
-        }
-        self.preloading = false;
-        let built = BUILD_MICROS.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(built_before) as f64 / 1e6;
-        log::info!(
-            "prepared {count} shaders from {} in {:.1} s: {:.1} s translating vertex programs, {:.1} s handing out programs, {:.1} s waiting on the compiler threads, {:.1} s building them in all",
-            path.display(),
-            started.elapsed().as_secs_f64(),
-            translating.as_secs_f64(),
-            programs.as_secs_f64(),
-            waiting.elapsed().as_secs_f64(),
-            built
-        );
     }
 
     /// a vertex program's variant for a buffer upside down, y turned over
@@ -2924,7 +2865,19 @@ impl Gles {
     fn program(&mut self, constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, lighting: &[u32], vertex: u64, wait: bool, inputs: Option<&dyn Fn() -> String>) -> Result<Option<glow::Program>, String> {
         let key = (*constants, writes_depth, lighting.to_vec(), vertex);
         if let Some(&program) = self.programs.get(&key) {
+            if !self.precached.is_empty() && !self.preloading {
+                if let Some(setup) = self.precached.remove(&key) {
+                    self.inputs.insert(key.clone(), setup);
+                    self.note_program(&key);
+                }
+            }
             return Ok(Some(program));
+        }
+        // a precached one left as a saved copy, loaded on its first use
+        if !self.preloading {
+            if let Some(setup) = self.precached.remove(&key) {
+                self.inputs.insert(key.clone(), setup);
+            }
         }
         // what the compiler finished, still compiles or could not, and what
         // it is given, are seen to here, only a program built here and now
@@ -2969,11 +2922,11 @@ impl Gles {
         if let Some(inputs) = inputs {
             self.inputs.insert(key.clone(), inputs());
         }
-        if !wait && (!self.preloading || compilers() > 1) {
+        if !wait {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached }).is_err() {
+                if compiler.jobs.send(Compile { key, vertex: compiled, fragment, cached, preload: self.preloading, saved: self.precaching }).is_err() {
                     BUILDING.store(0, std::sync::atomic::Ordering::Relaxed);
                     BUILDING_STAND_INS.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.compiler = None;
@@ -2989,7 +2942,7 @@ impl Gles {
         disturb();
         let program = match build_program(&self.gl, &compiled, &fragment, cached.as_deref()) {
             Ok(program) => program,
-            Err(error) if self.retried.insert(key.clone()) => {
+            Err(error) if error != REFUSED && self.retried.insert(key.clone()) => {
                 log::warn!("{error}");
                 self.make_room();
                 build_program(&self.gl, &compiled, &fragment, cached.as_deref())?
@@ -3022,13 +2975,21 @@ impl Gles {
                     self.programs.insert(key.clone(), program);
                     self.note_program(&key);
                 }
+                Err(error) if error == SAVED => {}
+                Err(error) if error == SKIPPED => {
+                    self.inputs.remove(&key);
+                    self.precached.remove(&key);
+                    self.precache_stamp = None;
+                }
                 Err(error) => {
-                    log::warn!("{error}");
                     // the driver out of memory, most likely: the next draw
                     // that needs it tries again once room is made
-                    if self.retried.insert(key.clone()) {
-                        self.make_room();
-                        continue;
+                    if error != REFUSED {
+                        log::warn!("{error}");
+                        if self.retried.insert(key.clone()) {
+                            self.make_room();
+                            continue;
+                        }
                     }
                     self.inputs.remove(&key);
                     if key.3 != 0 {
@@ -3039,6 +3000,13 @@ impl Gles {
                         }
                     }
                     self.compiler.as_mut().expect("the compiler is still there").failed.insert(key, error);
+                }
+            }
+        }
+        if self.compiler.as_ref().is_some_and(|compiler| compiler.pending.is_empty()) {
+            if let Some(path) = self.precache_stamp.take() {
+                if let Err(error) = std::fs::write(&path, "") {
+                    log::warn!("could not note the precache list built in {}, {error}", path.display());
                 }
             }
         }
@@ -3843,6 +3811,9 @@ impl Gles {
     }
 
     pub(crate) fn present(&mut self, shown: [Option<(crate::PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<Arc<crate::Overlay>>, smooth: bool, interpolate: bool, frames: u32) {
+        if self.precache.is_some() {
+            self.precache_some(std::time::Duration::from_millis(100));
+        }
         let mut parts = Vec::new();
         for (index, item) in shown.into_iter().enumerate() {
             let Some((image, area)) = item else { continue };
@@ -4085,6 +4056,11 @@ impl Gles {
 
     fn texture(&mut self, bound: &BoundTexture) -> Result<(glow::Texture, Option<glow::Texture>), String> {
         let _timed = timed(6);
+        if let Some(material) = &bound.replacement {
+            if let Some(texture) = self.replacement(material)? {
+                return Ok((texture, None));
+            }
+        }
         let key = bound.packed.as_ref().map_or(Arc::as_ptr(&bound.texels) as *const u8, |(_, bytes)| Arc::as_ptr(bytes) as *const u8) as usize;
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.flushes;
@@ -4168,6 +4144,35 @@ impl Gles {
         });
         self.textures.insert(key, Texture { texture, alpha, texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
         Ok((texture, alpha))
+    }
+
+    /// a texture pack's picture on the GPU, once it has been read, none
+    /// until then, the texture drawing as it is meanwhile.
+    fn replacement(&mut self, material: &Arc<crate::pack::Material>) -> Result<Option<glow::Texture>, String> {
+        if let Some(&texture) = self.replaced.get(&material.hash()) {
+            return Ok(Some(texture));
+        }
+        // read in the background, asked for again by each draw until it is
+        let Some(picture) = material.picture(4096) else { return Ok(None) };
+        let texture = self.texture_name()?;
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            disturb();
+            // SAFETY: on the GL thread, the name is new and each level's
+            // texels lie inside the picture's
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_storage_2d(glow::TEXTURE_2D, picture.levels.len() as i32, glow::RGBA8, picture.width as i32, picture.height as i32);
+                for (index, level) in picture.levels.iter().enumerate() {
+                    let bytes = &picture.texels[level.offset..level.offset + (level.width * level.height * 4) as usize];
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, index as i32, 0, 0, level.width as i32, level.height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(bytes)));
+                }
+            }
+        });
+        // the GPU's copy is the one kept, read again should it go
+        material.release();
+        self.replaced.insert(material.hash(), texture);
+        Ok(Some(texture))
     }
 
     /// a sampler magnifying bilinear or not, minifying as lod has it,
@@ -4730,7 +4735,9 @@ impl Gles {
                 let hash = fnv(&[&source]);
                 self.vertex_sources.insert(hash, source);
                 self.vertex_inputs.insert(hash, key);
-                if let (false, Some(path)) = (self.preloading, manifest_path()) {
+                // the manifest's lines need it, a vertex shader from the
+                // kit's list included
+                if let Some(path) = manifest_path() {
                     let file = vertex_path(&path, key.0);
                     let bytes: Vec<u8> = unit.program.iter().chain(unit.descriptors.iter()).flat_map(|word| word.to_le_bytes()).collect();
                     if std::fs::metadata(&file).map(|meta| meta.len()).ok() != Some(bytes.len() as u64) {
@@ -4813,6 +4820,27 @@ mod tests {
         })
     }
 
+    /// a program the driver turned down is remembered beside its saved
+    /// copy, and the next build of it is turned down without the driver.
+    #[test]
+    fn a_program_the_driver_turned_down_is_not_built_again() {
+        let gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let dir = std::env::temp_dir().join(format!("zakuro-refused-{}", std::process::id()));
+        let cached = dir.join("0.bin");
+        let broken = "#version 310 es\nvoid main() { not a shader }\n";
+        let build = || gles.worker.run(|| build_program(&gles.gl, broken, broken, Some(&cached)));
+        assert!(build().is_err());
+        assert!(cached.with_extension("refused").exists());
+        assert_eq!(build().unwrap_err(), REFUSED);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_drawn_texture_that_starts_in_memory_is_copied_on_the_gpu() {
         let mut gles = match Gles::new() {
@@ -4876,7 +4904,7 @@ mod tests {
                 return;
             }
         };
-        let bound = |texels: Arc<[[u8; 4]]>| BoundTexture { texels, packed: None, drawn: None, linear: false, wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge, width: 8, height: 8, border: [0.0; 4], levels: 1, lod: Lod::default() };
+        let bound = |texels: Arc<[[u8; 4]]>| BoundTexture { texels, packed: None, replacement: None, drawn: None, linear: false, wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::ClampToEdge, width: 8, height: 8, border: [0.0; 4], levels: 1, lod: Lod::default() };
         // one the cache keeps, and a video's pictures, each held only until
         // the next takes its place
         let kept: Arc<[[u8; 4]]> = vec![[1, 2, 3, 4]; 64].into();
@@ -5054,7 +5082,7 @@ mod tests {
         let job = |name: &str, stand_in: bool| {
             let mut constants = [0u32; FRAGMENT_CONSTANTS];
             constants[29] = stand_in as u32;
-            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None }
+            Compile { key: (constants, false, Vec::new(), 0), vertex: name.to_owned(), fragment: String::new(), cached: None, preload: false, saved: false }
         };
         let queue = Queue::new();
         for (name, stand_in) in [("stand-in 1", true), ("stand-in 2", true), ("draw 1", false), ("stand-in 3", true), ("draw 2", false)] {

@@ -22,9 +22,16 @@ usage, 3dsrecomp analyze <rom>
        3dsrecomp build <rom> [<dir>] [--overrides <file or dir>]
        3dsrecomp port <rom> <dir> [--overrides <file or dir>] [--name <name>] [--zakuro <checkout>]
        3dsrecomp verify <rom> <library> [count]
+       3dsrecomp shaders <rom> [<dir> [precache [<title list> [<other titles' lists>...]]]]
+       3dsrecomp learn <rom> <a run's shaders.txt> <title list>
 
 build without a dir works in the cache and installs the library where
-Zakuro finds it on its own.";
+Zakuro finds it on its own. shaders with precache also lists the shaders
+the title's models need, those its title list holds and those of other
+titles' lists for shaders it has too, for the engine to build before the
+game starts. learn adds the shaders a run
+used, from its shaders.txt and the vertex programs kept beside it, to a
+title list, which holds no game data.";
 
 /// what the options on the command line ask for.
 #[derive(Default)]
@@ -64,6 +71,10 @@ fn main() {
         ["build", rom] => build(rom, None, &options),
         ["build", rom, dir] => build(rom, Some(Path::new(dir)), &options),
         ["port", rom, dir] => port(rom, Path::new(dir), &options),
+        ["shaders", rom] => shaders(rom, None, None),
+        ["shaders", rom, dir] => shaders(rom, Some(Path::new(dir)), None),
+        ["shaders", rom, dir, "precache", ref lists @ ..] => shaders(rom, Some(Path::new(dir)), Some(lists.iter().map(Path::new).collect())),
+        ["learn", rom, recorded, list] => learn(rom, Path::new(recorded), Path::new(list)),
         #[cfg(feature = "verify")]
         ["verify", rom, library] => check(rom, Path::new(library), 500),
         #[cfg(feature = "verify")]
@@ -277,6 +288,24 @@ fn analyze(path: &str) {
     println!("thumb       {thumb} functions");
     println!("decoded     {instructions} instructions, shared code once per function");
     println!("analysis    {elapsed:.2?}");
+    // what the AArch64 translator would take of the executable, and what
+    // keeps it off the rest
+    let names: std::collections::BTreeMap<u32, String> = analyses[0].functions.keys().map(|&entry| (entry, format!("f_{entry:08X}"))).collect();
+    let (mut worth, mut covered, mut lacking) = (0, 0, std::collections::BTreeMap::<&str, usize>::new());
+    for (&entry, function) in &analyses[0].functions {
+        let taken = recomp3ds::codegen::a64::coverage(&programs[0].1, entry, function, &function.labels, &names, "");
+        covered += taken;
+        worth += recomp3ds::codegen::a64::worth(&programs[0].1, entry, function, &function.labels, &names, "") as usize;
+        for (kind, run) in recomp3ds::codegen::a64::refusals(&programs[0].1, entry, function, &function.labels, &names, "") {
+            *lacking.entry(kind).or_default() += run;
+        }
+    }
+    println!("a64         {worth} functions worth it, {covered} of {} instructions in blocks it takes", executable_instructions(&analyses[0]));
+    let mut lacking: Vec<_> = lacking.into_iter().collect();
+    lacking.sort_by_key(|&(_, run)| std::cmp::Reverse(run));
+    for (kind, run) in lacking.iter().take(8) {
+        println!("  {run:>9}  in blocks held back by {kind}");
+    }
     println!();
 
     if !missed.is_empty() {
@@ -443,4 +472,71 @@ impl Totals {
             self.dead_ends
         );
     }
+}
+
+/// the title's shader binaries, and with a folder each one's words written
+/// there with an index, for what a run's shader list holds to be checked
+/// against.
+/// a run's shaders as a title list, added to what the list had.
+fn learn(rom: &str, recorded: &Path, list: &Path) {
+    let title = Title::load(rom).unwrap_or_else(|e| {
+        eprintln!("{rom}: {e}");
+        exit(1);
+    });
+    let found = recomp3ds::shaders::find(&title);
+    let (mut lines, unknown) = recomp3ds::precache::learn(&|file| recomp3ds::shaders::files(&title, file), &found, recorded).unwrap_or_else(|e| {
+        eprintln!("{}: {e}", recorded.display());
+        exit(1);
+    });
+    let learned = lines.len();
+    let before = std::fs::read_to_string(list).unwrap_or_default();
+    if before.lines().next() == Some(recomp3ds::precache::TITLE_HEADER) {
+        lines.extend(before.lines().skip(1).map(str::to_owned));
+    }
+    let added = lines.len() - before.lines().count().saturating_sub(1);
+    let text = std::iter::once(recomp3ds::precache::TITLE_HEADER.to_owned()).chain(lines).collect::<Vec<_>>().join("\n") + "\n";
+    if let Err(e) = list.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(list, text)) {
+        eprintln!("{}: {e}", list.display());
+        exit(1);
+    }
+    println!("{learned} shaders from the run, {added} new to {}{}", list.display(), if unknown > 0 { format!(", {unknown} with a vertex program the game's files have not") } else { String::new() });
+}
+
+fn shaders(rom: &str, dir: Option<&Path>, precache: Option<Vec<&Path>>) {
+    let title = Title::load(rom).unwrap_or_else(|e| {
+        eprintln!("{rom}: {e}");
+        exit(1);
+    });
+    let found = recomp3ds::shaders::find(&title);
+    let mut index = String::new();
+    for (n, shbin) in found.iter().enumerate() {
+        let entries: Vec<String> = shbin.entries.iter().map(|e| format!("{}{:x}-{:x}", if e.geometry { "g" } else { "v" }, e.main, e.end)).collect();
+        println!("{n:4} {:5} words {:3} descriptors {} {}", shbin.code.len(), shbin.descriptors.len(), entries.join(","), shbin.source);
+        index += &format!("{n}\t{}\t{}\t{}\n", shbin.code.len(), entries.join(","), shbin.source);
+        if let Some(dir) = dir {
+            let words: Vec<u8> = shbin.code.iter().chain(&shbin.descriptors).flat_map(|w| w.to_le_bytes()).collect();
+            let _ = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(format!("{n}.bin")), words));
+        }
+    }
+    if let Some(dir) = dir {
+        let _ = std::fs::write(dir.join("index.tsv"), index);
+        match recomp3ds::shaders::write_vertex_list(&found, dir) {
+            Ok(0) => println!("no vertex shaders to list"),
+            Ok(count) => println!("{count} vertex shaders listed in {}", dir.join("vertex.txt").display()),
+            Err(error) => eprintln!("could not write the vertex list: {error}"),
+        }
+        if let Some(lists) = precache {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recomp3ds::precache::write(&title, &found, dir, &lists))) {
+                Ok(Ok(0)) => println!("no shaders to precache, they get built as the game needs them"),
+                Ok(Ok(count)) => println!("{count} shaders to precache listed in {}", dir.join("precache.txt").display()),
+                Ok(Err(error)) => eprintln!("could not write the precache list, the shaders get built as the game needs them: {error}"),
+                Err(_) => eprintln!("could not work out the shaders to precache, they get built as the game needs them"),
+            }
+        }
+    }
+    println!("{} shader binaries, {} shaders", found.len(), found.iter().map(|s| s.entries.len()).sum::<usize>());
+}
+
+fn executable_instructions(analysis: &Analysis) -> usize {
+    analysis.functions.values().map(|f| f.instructions.len()).sum()
 }

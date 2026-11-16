@@ -1,12 +1,14 @@
 #!/bin/bash
-# build.sh <rom>... [--keys aes_keys.txt] [--out dir] [--wait]
+# build.sh <rom>... [--keys aes_keys.txt] [--out dir] [--precache] [--wait]
 #
 # Builds Pocket Native and games for the handheld from your own ROMs,
 # .3ds/.cci or .cia files, compressed (.zcci/.zcia) or not, with your
 # console's aes_keys.txt where they are encrypted, inside a container
-# (podman or docker). With no ROM it asks for them, and
-# --wait waits for Enter at the end. Leaves "Pocket Native" in the output
-# directory, build/ by default, to copy into roms/ports on the card.
+# (podman or docker). With no ROM it asks for them, --precache (or
+# PN_PRECACHE=1) lists the shaders the games' models need for the handheld
+# to build when a game first starts, and --wait waits for Enter at the end.
+# Leaves "Pocket Native" in the output directory, build/ by default, to copy
+# into roms/ports on the card.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,8 +17,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --keys) keys="$(realpath "$2")"; shift 2 ;;
         --out) out="$(realpath -m "$2")"; shift 2 ;;
+        --precache) export PN_PRECACHE=1; shift ;;
         --wait) trap 'code=$?; read -rp "press Enter to close " _ || true; exit $code' EXIT; shift ;;
-        -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
         *) roms+=("$(realpath -m "$1")"); shift ;;
     esac
 done
@@ -72,7 +75,7 @@ for rom in "${roms[@]}"; do
         mounts+=(-v "$(dirname "$rom_keys"):/keys:ro")
         args+=("/keys/$(basename "$rom_keys")")
     fi
-    "$engine" run --rm "${user[@]}" "${mounts[@]}" -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work \
+    "$engine" run --rm "${user[@]}" "${mounts[@]}" -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work -e PN_PRECACHE="${PN_PRECACHE:-}" \
         "$image" bash /src/scripts/container/inside.sh "${args[@]}" || failed+=("$rom")
 done
 bash "$repo/scripts/update.sh" --check || true

@@ -1,0 +1,17 @@
+[package]
+name = "pocket-native-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pocket-native-kit"
+path = "src/main.rs"
+
+[dependencies]
+zakuro-fs.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+rfd = "0.17"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11"] }

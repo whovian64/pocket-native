@@ -66,11 +66,13 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Crimson Shroud | Playable | Reported: H700 (knulli), 0.6 test | The opening video and menu at about 6 fps with choppy sound, then 21 to 30 fps |
 | Donkey Kong Country Returns 3D | Starts | Reported: RX6H, 0.4.6, RG CubeXX, 0.4.7 | Keeps up full speed by skipping pictures, about 20 a second on the RG CubeXX. Crashed once in the Mali driver's shader compiler on the RX6H |
 | Dragon Ball Z: Extreme Butoden | Playable | Reported: H700 (muOS), 0.4.7 | 95% speed on average in a tester's log |
+| Etrian Odyssey Untold | Playable | Reported: RG DS (Android), 0.5.0 | Full speed and 60 fps on the first floor, its videos close to full speed. Menus, portraits and some text flicker every few seconds |
 | Fantasy Life | Plays well | Reported: RG DS (ROCKNIX), 0.5.0 | Full speed through a 48-minute log, dipping only while its shaders built |
 | Final Fantasy Explorers | Plays well | Reported: RG DS (ROCKNIX), 0.5.0 | Full speed through a 6-minute log once its first shaders built |
 | Fire Emblem: Awakening | Starts | PC | Reaches the avatar maker. If it stutters, try **Frame skip** off in the advanced settings |
 | Fire Emblem Fates | Slow | Reported: Logitech G Cloud (Android), 0.4.0, 0.4.6 | US Special Edition. Plays without crashing, battles and cutscenes at 10 to 15 fps. From chapter 2 most character sprites on the map show as grey boxes, still on 0.4.6. Didn't start with **Most compatible** on |
 | Hyrule Warriors Legends | Starts | PC | The opening plays, but it keeps the 3DS's CPU three quarters busy, so expect it to be slow on a handheld |
+| Inazuma Eleven 3: Team Ogre Attacks! | Playable | Reported: RG DS (Android), 0.5.5 | European release with an undub patch. 16 to 18 fps, the sound no longer stutters and the touch screen answers. Its intro flashes less than before |
 | Kid Icarus: Uprising | Starts | PC | Plays into the first chapter. Text in menus and dialogue showed as bars up to 0.4.7, fixed in 0.5.0, which also draws its effects made with the geometry shader's fixed primitive mode, left out before. Crashed a few seconds in on 0.4.5. 0.5.5 stops reading a depth buffer back every frame, a third faster on the PC |
 | Kingdom Hearts 3D: Dream Drop Distance | Slow | PC, R36S sim, reported: H700 (muOS), 0.4.7 | The opening plays into Destiny Islands. About 60% speed in the R36S sim, three quarters on average on an H700, dropping to a fifth in places |
 | Kirby Battle Royale | Playable | PC, R36S sim | Full speed at 30 fps in the R36S sim, not played on a handheld yet |
@@ -78,7 +80,7 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Kirby: Triple Deluxe | Starts | PC | Gets into the first stage. Since 0.4.3 it no longer asks you to accept the Service User Agreement |
 | Kirby's Extra Epic Yarn | Slow | Reported: R36S clone, 0.4.7 | Cutscenes up to 30 fps, levels around 12. Some backgrounds glitch or go black while the camera moves. Since 0.4.7 a transformation no longer drops it to 1 fps |
 | The Legend of Zelda: A Link Between Worlds | Playable | PC, reported: RX6H, 0.2, RG DS (Android), 0.4.3, H700 (muOS), 0.4.7 | About 40 fps on the RG DS, with glitches during transitions. Good speed on an H700 with **Frame skip** at 2, where grass popped in and out: most likely the culling bug 0.5.0 fixes for Super Mario 3D Land. Some glitches in effects reported. Some R36S players find 0.4.3 slower than 0.4.0 here: if it is for you, try **Compressed alpha textures** off in the advanced settings |
-| The Legend of Zelda: Ocarina of Time 3D | Playable | PC, R36S sim | Full speed in Link's house in the R36S sim, about half in the Kokiri Forest fly-in. Stutter reported on 0.2 |
+| The Legend of Zelda: Ocarina of Time 3D | Playable | PC, R36S sim, reported: RG DS (Android), 0.5.0 | Full speed in Link's house in the R36S sim, about half in the Kokiri Forest fly-in. Stutter reported on 0.2. Full speed and 60 fps on the RG DS on 0.5.0, shaders taking 5 to 10 seconds to build. The bottom screen's menu slips out of place for a second or two when Link gets a new item |
 | Luigi's Mansion | Starts | PC, R36S sim | The opening plays into the mansion. About 20 fps in the R36S sim, with dips. Both screens were black on 0.1 |
 | Mario & Luigi: Dream Team | Broken | Reported: 0.2 | Black screen |
 | Mario Kart 7 | Playable | R36S, PC | Tuned on the US version. Races run well once a track's shaders are built, the first race on a track stutters. Some testers report it slower than that. On 0.5.5 races run at full speed on my R36S on the default settings, dipping at the countdown. Since 0.4.3 a first start goes straight to the menus, where it used to stop at "There are currently no Mii characters" |
@@ -99,8 +101,10 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Pokémon X and Y | Playable | R36S, PC, reported: RG DS (Android) | 20 to 30 fps in towns on the R36S. The intro runs heavy, it settles once you're in the game |
 | Project X Zone | Playable | Reported: H700 (muOS), 0.4.7 | Close to full speed with **Frame skip** at 3. Text in the intro and dialogue glitched up to 0.4.7, fixed in 0.5.0 |
 | Project X Zone 2 | Playable | Reported: H700 (muOS), 0.4.7 | Close to the console, with dips in demanding scenes that **Frame skip** at 2 smooths out |
+| Radiant Historia: Perfect Chronology | Playable | Reported: RG DS (Android), 0.5.5 | Text and some 3D pieces get black pops and shadows, and the bottom screen clips against the top. With **Clears on the GPU** off only the text keeps its pops |
 | Rayman Origins | Playable | Reported: R36S clone, 0.2, RG DS (Android), 0.4.6 | Plays well. The intro stutters, and the picture holds for a second when changing characters or skins |
 | Resident Evil: Revelations | Starts | PC, reported: RX6H, 0.4.6, 0.4.9 | The opening runs at full speed, then the RX6H's Mali driver crashed in its shader compiler within a minute, every time, and at the start on 0.4.9. From 0.5.0 the next start should get past that. On the PC it plays into the first episode |
+| Resident Evil: The Mercenaries 3D | Broken | Reported: R36H (dArkOSen), 0.5.5 | Black screen from the start, with **Most compatible** too. The log has it running at full speed with nothing drawn on the bottom screen |
 | Shantae and the Pirate's Curse | Playable | Reported: H700 (muOS), 0.4.7 | Full speed with **Frame skip** on |
 | Shin Megami Tensei IV | Playable | Reported: RX6H, 0.2 | Slows down at times |
 | Shin Megami Tensei: Strange Journey Redux | Playable | Reported: RX6H, 0.2 | Slows down at times |
@@ -111,6 +115,7 @@ an RX6H. From 0.5.0 such a crash names the shader in the game's
 | Super Smash Bros. for Nintendo 3DS | Playable | R36S, PC, reported: RG DS (Android), 0.4.3, R36S clone, RX6H, 0.4.6, H700 (muOS), 0.4.7 | Menus are fine. 25 to 30 fps in matches on an R36S clone on 0.4.6, about three quarters speed on our R36S on a busy stage. Frequent slowdowns on the RG DS on 0.4.3. Crashed once in the Mali driver's shader compiler on an RX6H. 96% speed on average on an H700 on 0.4.7, but crashed about three minutes in: 0.5.0 answers the system calls Smash got nothing back from (the console's country, its save's secure value), likely the cause |
 | Tomodachi Life | Plays well | Reported: RG DS (ROCKNIX), 0.5.0 | Full speed through a 6-minute log |
 | Xenoblade Chronicles 3D | Starts | PC | A New 3DS title. Gets into the opening battle. Its top screen was tinted red and its bottom screen wrong up to 0.4.7, fixed in 0.5.0 |
+| Yo-kai Watch | Starts | Reported: RG DS (Android), 0.5.5 | European release. The intro plays at about 12 fps and the menu at full speed, then the top screen stays black from the first dialogue |
 | Yoshi's New Island | Playable | Reported: 0.2 | Hold L2 and use the right stick for the parts you tilt the console in |
 
 ## Games with a profile but no report

@@ -2,6 +2,18 @@
 //! the layout of the screens, the overlay and presenting.
 
 use super::*;
+use std::ffi::{c_char, CStr, OsStr};
+
+type SdlGetError = unsafe extern "C" fn() -> *const c_char;
+
+unsafe fn sdl_failure(get_error: SdlGetError, action: &str) -> String {
+    let error = unsafe { get_error() };
+    if error.is_null() {
+        return action.to_owned();
+    }
+    let detail = unsafe { CStr::from_ptr(error) }.to_string_lossy();
+    format!("{action}: {detail}")
+}
 
 #[repr(C)]
 pub(super) struct DrmModeRes {
@@ -288,6 +300,29 @@ pub(super) fn monotonic_micros() -> u64 {
 
 pub(super) const GBM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 
+/// whether this is BananaOS, the RG DS's light Linux, which its port
+/// launcher says with /run/banana and BANANA_TOP.
+fn banana_os() -> bool {
+    std::path::Path::new("/run/banana").is_dir() || std::env::var_os("BANANA_TOP").is_some()
+}
+
+/// BananaOS's port launcher turns the bottom panel's backlight off for a
+/// port, and leaves /run/banana/panel-off for it to go off again after a
+/// wake-up: both panels are lit and the marker cleared.
+fn light_panels() {
+    match std::fs::remove_file("/run/banana/panel-off") {
+        Ok(()) => log::info!("BananaOS: cleared /run/banana/panel-off"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("BananaOS: could not clear /run/banana/panel-off, {error}"),
+    }
+    for entry in std::fs::read_dir("/sys/class/backlight").into_iter().flatten().flatten() {
+        let power = entry.path().join("bl_power");
+        if let Err(error) = std::fs::write(&power, "0") {
+            log::warn!("BananaOS: could not light {}, {error}", power.display());
+        }
+    }
+}
+
 /// the panel, driven through KMS from a GBM surface the context draws into.
 pub(super) struct Kms {
     pub(super) drm: libloading::Library,
@@ -349,6 +384,7 @@ impl Kms {
             return Err("no KMS resources".into());
         }
         let res = &*resources;
+        let banana = banana_os();
         let mut panels = Vec::new();
         for i in 0..res.count_connectors as usize {
             let connector = call!(drm, "drmModeGetConnector", fn(i32, u32) -> *mut DrmModeConnector, fd, *res.connectors.add(i));
@@ -377,6 +413,17 @@ impl Kms {
                     possible = (*encoder).possible_crtcs;
                     call!(drm, "drmModeFreeEncoder", fn(*mut DrmModeEncoder) -> (), encoder);
                 }
+                // BananaOS leaves the encoder unset until a mode is: any of
+                // them may drive it
+                if banana {
+                    for e in 0..c.count_encoders.max(0) as usize {
+                        let encoder = call!(drm, "drmModeGetEncoder", fn(i32, u32) -> *mut DrmModeEncoder, fd, *c.encoders.add(e));
+                        if !encoder.is_null() {
+                            possible |= (*encoder).possible_crtcs;
+                            call!(drm, "drmModeFreeEncoder", fn(*mut DrmModeEncoder) -> (), encoder);
+                        }
+                    }
+                }
                 panels.push((c.connector_id, connector_name(c.connector_type, c.connector_type_id), mode, crtc, possible));
             }
             call!(drm, "drmModeFreeConnector", fn(*mut DrmModeConnector) -> (), connector);
@@ -388,7 +435,7 @@ impl Kms {
         }
         // the panel the top screen goes on: ZAKURO_KMS_TOP=DSI-1 names it,
         // DSI-2 on the RG DS under ROCKNIX, else the first connected
-        let top = std::env::var("ZAKURO_KMS_TOP").unwrap_or_else(|_| "DSI-2".into());
+        let top = std::env::var("ZAKURO_KMS_TOP").or_else(|_| std::env::var("BANANA_TOP")).unwrap_or_else(|_| "DSI-2".into());
         let (connector, name, mode, crtc, possible) = panels.remove(panels.iter().position(|panel| panel.1 == top).unwrap_or(0));
         // how the kernel says the panel is mounted
         let properties = call!(drm, "drmModeObjectGetProperties", fn(i32, u32, u32) -> *mut DrmModeObjectProperties, fd, connector, 0xC0C0_C0C0);
@@ -435,6 +482,9 @@ impl Kms {
         });
         let second = second.filter(|&(bottom, ..)| bottom != 0 && bottom != crtc);
         set_stacked(second.is_some());
+        if banana && second.is_some() {
+            light_panels();
+        }
         // sway lets go of the panels a moment after it stopped, as under
         // ROCKNIX, and a modeset before then fails. only busy is worth
         // waiting out: ArkOS's kernel keeps the call to root, where the
@@ -445,6 +495,16 @@ impl Kms {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
             while master(fd) != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBUSY) && std::time::Instant::now() < until {
                 std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        // a desktop that keeps the panel while a port runs, nuubOS's labwc,
+        // leaves its Wayland session to draw in: only a master may
+        // authenticate, so the call is turned away when we aren't one
+        let auth = symbol(&drm, "drmAuthMagic");
+        if !auth.is_null() && wayland(std::env::var_os("ZAKURO_WAYLAND").as_deref(), wayland_session()) == Wayland::WhenHeld {
+            let auth: extern "C" fn(i32, u32) -> i32 = std::mem::transmute(auth);
+            if auth(fd, 0) == -libc::EACCES {
+                return Err(HELD.into());
             }
         }
         let refresh = mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
@@ -702,12 +762,13 @@ pub(super) fn panel_shape(output: &Output) -> ((i32, i32), Option<i32>) {
         Output::Kms(kms) => kms.size(),
         Output::Fbdev(window) => (window[0] as i32, window[1] as i32),
         Output::Window(size) => *size,
+        Output::Wayland(window) => window.size,
         Output::Offscreen(_) => offscreen_size(),
     };
     // a window turns with the device itself
     let turn = match output {
         Output::Kms(_) | Output::Fbdev(_) => panel_turn(size.0, size.1),
-        Output::Window(_) | Output::Offscreen(_) => None,
+        Output::Window(_) | Output::Wayland(_) | Output::Offscreen(_) => None,
     };
     (size, turn)
 }
@@ -987,6 +1048,10 @@ pub(super) unsafe fn draw_parts(
     parts: Vec<Part>,
 ) -> Result<(), String> {
             let framebuffer_height = height;
+            let bottom = parts.iter().find_map(|part| match part {
+                Part::Surface { top: false, area, .. } | Part::Pixels { index: 1, area, .. } => Some(*area),
+                _ => None,
+            });
             for part in parts {
                 let (texture, screen, upright, area, smooth, clip) = match part {
                     Part::Cursor { x, y } => {
@@ -1027,6 +1092,12 @@ pub(super) unsafe fn draw_parts(
                         }
                         gl.use_program(Some(program));
                         (texture, screen, 0, area, smooth, clip)
+                    }
+                    Part::Overlay(overlay) if overlay.bottom && bottom.is_some() => {
+                        let (left, top, scale) = crate::fitted(bottom.unwrap_or_default());
+                        let over = Fit { scale: fit.scale * scale, left: fit.left + left * fit.scale, top: fit.top + top * fit.scale };
+                        draw_overlay(gl, panel, &overlay, height, over, (640, 480))?;
+                        continue;
                     }
                     Part::Overlay(overlay) if overlay.whole => {
                         draw_overlay(gl, panel, &overlay, height, fit, layout)?;
@@ -1122,6 +1193,18 @@ pub(super) fn show(gl: GlRef, parts: Vec<Part>, frames: u32) -> Result<(), Strin
                     set_layout(*size);
                 }
             }
+            if let Output::Wayland(window) = &mut panel.output {
+                window.pump_events();
+                let (width, height) = window.size;
+                if width > 0 && height > 0 && (width, height) != window.layout_size {
+                    log::info!("the Wayland window is now {width}x{height}");
+                    window.layout_size = (width, height);
+                    set_layout((width, height));
+                }
+                if width <= 0 || height <= 0 {
+                    return Ok(());
+                }
+            }
             let ((panel_width, panel_height), turn) = panel_shape(&panel.output);
             let panel_framebuffer = match &panel.output {
                 Output::Offscreen(framebuffer) => Some(*framebuffer),
@@ -1192,7 +1275,8 @@ pub(super) fn show(gl: GlRef, parts: Vec<Part>, frames: u32) -> Result<(), Strin
                         Part::Surface { top: is_top, .. } => *is_top != top,
                         Part::Pixels { index, .. } => (*index == 0) != top,
                         Part::Cursor { .. } => top,
-                        Part::Overlay(_) => true,
+                        // one over the bottom screen goes where it is
+                        Part::Overlay(overlay) => !overlay.bottom || top,
                     })
                 }
                 None => (parts, Vec::new()),
@@ -1245,9 +1329,51 @@ pub(super) fn show(gl: GlRef, parts: Vec<Part>, frames: u32) -> Result<(), Strin
         }
         match &mut panel.output {
             Output::Kms(kms) => kms.flip(frames),
-            Output::Fbdev(_) | Output::Window(_) | Output::Offscreen(_) => Ok(()),
+            Output::Fbdev(_) | Output::Window(_) | Output::Wayland(_) | Output::Offscreen(_) => Ok(()),
         }
     })
+}
+
+pub(super) struct WaylandWindow {
+    _sdl: libloading::Library,
+    window: *mut c_void,
+    context: *mut c_void,
+    size: (i32, i32),
+    layout_size: (i32, i32),
+    pump_events: unsafe extern "C" fn(),
+    get_window_size: unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32),
+    delete_context: unsafe extern "C" fn(*mut c_void),
+    destroy_window: unsafe extern "C" fn(*mut c_void),
+    quit_subsystem: unsafe extern "C" fn(u32),
+}
+
+impl WaylandWindow {
+    fn pump_events(&mut self) {
+        let (mut width, mut height) = (0, 0);
+        // SAFETY: the SDL window and function pointers remain alive together.
+        unsafe {
+            (self.pump_events)();
+            (self.get_window_size)(self.window, &mut width, &mut height);
+        }
+        if width > 0 && height > 0 {
+            self.size = (width, height);
+        }
+    }
+}
+
+impl Drop for WaylandWindow {
+    fn drop(&mut self) {
+        // SAFETY: these are the SDL objects created for this window.
+        unsafe {
+            if !self.context.is_null() {
+                (self.delete_context)(self.context);
+            }
+            if !self.window.is_null() {
+                (self.destroy_window)(self.window);
+            }
+            (self.quit_subsystem)(0x0000_0020);
+        }
+    }
 }
 
 /// where the panel's picture goes: the handheld's screen, or for working on
@@ -1260,6 +1386,8 @@ pub(super) enum Output {
     Fbdev(Box<[u16; 2]>),
     /// a window set_window was given, its size.
     Window((i32, i32)),
+    /// a fullscreen Wayland window made through SDL2.
+    Wayland(Box<WaylandWindow>),
     Offscreen(glow::Framebuffer),
 }
 
@@ -1554,8 +1682,16 @@ impl Egl {
             if loaded.ChooseConfig(display, attributes.as_ptr(), &mut config, 1, &mut count) == 0 || count == 0 {
                 return Err("no EGL config for /dev/fb0".into());
             }
-            // the driver flips on the framebuffer, at the next refresh
-            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, window.as_ptr() as glutin_egl_sys::EGLNativeWindowType, 1)?;
+            // the driver flips on the framebuffer, at the next refresh. A
+            // PowerVR driver such as the TrimUI Smart Pro's takes no window
+            // for the screen and faults on the size Mali's takes, so
+            // ZAKURO_FBDEV_NULL_WINDOW gives it none
+            let native = if std::env::var_os("ZAKURO_FBDEV_NULL_WINDOW").is_some() {
+                std::ptr::null_mut::<c_void>() as glutin_egl_sys::EGLNativeWindowType
+            } else {
+                window.as_ptr() as glutin_egl_sys::EGLNativeWindowType
+            };
+            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, native, 1)?;
             Ok((egl, gl, window))
         }
     }
@@ -1615,6 +1751,141 @@ impl Egl {
                 return Err(format!("the window has no size, {width}x{height}"));
             }
             Ok((egl, gl, (width, height)))
+        }
+    }
+
+    /// a context drawing in a fullscreen Wayland window managed by SDL2.
+    pub(super) fn new_wayland() -> Result<(Egl, glow::Context, WaylandWindow), String> {
+        const SDL_INIT_VIDEO: u32 = 0x0000_0020;
+        const SDL_GL_CONTEXT_MAJOR_VERSION: i32 = 17;
+        const SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18;
+        const SDL_GL_CONTEXT_EGL: i32 = 19;
+        const SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21;
+        const SDL_GL_CONTEXT_PROFILE_ES: i32 = 4;
+        const SDL_WINDOW_OPENGL_FULLSCREEN: u32 = 0x0000_1003;
+        const SDL_WINDOWPOS_UNDEFINED: i32 = 0x1FFF_0000;
+
+        type SdlInit = unsafe extern "C" fn(u32) -> i32;
+        type SdlSetAttribute = unsafe extern "C" fn(i32, i32) -> i32;
+        type SdlCreateWindow = unsafe extern "C" fn(*const c_char, i32, i32, i32, i32, u32) -> *mut c_void;
+        type SdlCreateContext = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+        type SdlGetVideoDriver = unsafe extern "C" fn() -> *const c_char;
+        type SdlPumpEvents = unsafe extern "C" fn();
+        type SdlGetWindowSize = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32);
+        type SdlDeleteContext = unsafe extern "C" fn(*mut c_void);
+        type SdlDestroyWindow = unsafe extern "C" fn(*mut c_void);
+        type SdlQuit = unsafe extern "C" fn(u32);
+
+        macro_rules! sdl_function {
+            ($library:expr, $name:literal, $function:ty) => {{
+                let address = symbol($library, $name);
+                if address.is_null() {
+                    return Err(format!("SDL2 has no {}", $name));
+                }
+                std::mem::transmute::<*const c_void, $function>(address)
+            }};
+        }
+
+        unsafe {
+            let sdl = open(&["libSDL2-2.0.so.0", "libSDL2.so"]).map_err(|why| format!("could not load SDL2, {why}"))?;
+            let init: SdlInit = sdl_function!(&sdl, "SDL_InitSubSystem", SdlInit);
+            let set_attribute: SdlSetAttribute = sdl_function!(&sdl, "SDL_GL_SetAttribute", SdlSetAttribute);
+            let create_window: SdlCreateWindow = sdl_function!(&sdl, "SDL_CreateWindow", SdlCreateWindow);
+            let create_context: SdlCreateContext = sdl_function!(&sdl, "SDL_GL_CreateContext", SdlCreateContext);
+            let get_error: SdlGetError = sdl_function!(&sdl, "SDL_GetError", SdlGetError);
+            let get_video_driver: SdlGetVideoDriver = sdl_function!(&sdl, "SDL_GetCurrentVideoDriver", SdlGetVideoDriver);
+            let pump_events: SdlPumpEvents = sdl_function!(&sdl, "SDL_PumpEvents", SdlPumpEvents);
+            let get_window_size: SdlGetWindowSize = sdl_function!(&sdl, "SDL_GetWindowSize", SdlGetWindowSize);
+            let delete_context: SdlDeleteContext = sdl_function!(&sdl, "SDL_GL_DeleteContext", SdlDeleteContext);
+            let destroy_window: SdlDestroyWindow = sdl_function!(&sdl, "SDL_DestroyWindow", SdlDestroyWindow);
+            let quit_subsystem: SdlQuit = sdl_function!(&sdl, "SDL_QuitSubSystem", SdlQuit);
+            if init(SDL_INIT_VIDEO) != 0 {
+                return Err(sdl_failure(get_error, "SDL2 video initialization failed"));
+            }
+            let mut window = WaylandWindow {
+                _sdl: sdl,
+                window: std::ptr::null_mut(),
+                context: std::ptr::null_mut(),
+                size: (640, 480),
+                layout_size: (640, 480),
+                pump_events,
+                get_window_size,
+                delete_context,
+                destroy_window,
+                quit_subsystem,
+            };
+            let driver = get_video_driver();
+            if driver.is_null() || CStr::from_ptr(driver).to_bytes() != b"wayland" {
+                let driver = if driver.is_null() { "none".into() } else { CStr::from_ptr(driver).to_string_lossy().into_owned() };
+                return Err(format!("SDL2 selected the {driver} video driver, not Wayland"));
+            }
+            for (attribute, value) in [
+                (SDL_GL_CONTEXT_MAJOR_VERSION, 3),
+                (SDL_GL_CONTEXT_MINOR_VERSION, 1),
+                (SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES),
+                (SDL_GL_CONTEXT_EGL, 1),
+            ] {
+                if set_attribute(attribute, value) != 0 {
+                    return Err(sdl_failure(get_error, "could not configure an OpenGL ES 3.1 context"));
+                }
+            }
+            window.window = create_window(c"Pocket Native".as_ptr(), SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 640, 480, SDL_WINDOW_OPENGL_FULLSCREEN);
+            if window.window.is_null() {
+                return Err(sdl_failure(get_error, "could not create the Wayland window"));
+            }
+            window.context = create_context(window.window);
+            if window.context.is_null() {
+                return Err(sdl_failure(get_error, "could not create the Wayland OpenGL ES context"));
+            }
+            let (mut width, mut height) = (0, 0);
+            get_window_size(window.window, &mut width, &mut height);
+            if width > 0 && height > 0 {
+                window.size = (width, height);
+                window.layout_size = (width, height);
+            }
+
+            let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
+            let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
+            let loaded = egl::Egl::load_with(|name| symbol(&library, name));
+            let display = loaded.GetCurrentDisplay();
+            let surface = loaded.GetCurrentSurface(0x3059);
+            let context = loaded.GetCurrentContext();
+            if display.is_null() || surface.is_null() || context.is_null() {
+                return Err(format!("SDL2 did not provide a current Wayland EGL context, 0x{:X}", loaded.GetError()));
+            }
+            let mut config_id = 0;
+            if loaded.QuerySurface(display, surface, 0x3028, &mut config_id) == 0 {
+                return Err(format!("could not query the Wayland EGL config, 0x{:X}", loaded.GetError()));
+            }
+            let mut count = 0;
+            if loaded.GetConfigs(display, std::ptr::null_mut(), 0, &mut count) == 0 || count == 0 {
+                return Err(format!("could not list the Wayland EGL configs, 0x{:X}", loaded.GetError()));
+            }
+            let mut configs = vec![std::ptr::null(); count as usize];
+            if loaded.GetConfigs(display, configs.as_mut_ptr(), count, &mut count) == 0 {
+                return Err(format!("could not read the Wayland EGL configs, 0x{:X}", loaded.GetError()));
+            }
+            let config = configs
+                .into_iter()
+                .find(|&config| {
+                    let mut id = 0;
+                    loaded.GetConfigAttrib(display, config, 0x3028, &mut id) != 0 && id == config_id
+                })
+                .ok_or("could not find SDL2's Wayland EGL config")?;
+            loaded.SwapInterval(display, 1);
+            let gl = glow::Context::from_loader_function(|name| {
+                let direct = gles.as_ref().map_or(std::ptr::null(), |gles| symbol(gles, name));
+                if !direct.is_null() {
+                    return remember(name, direct);
+                }
+                let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
+                remember(name, loaded.GetProcAddress(c_name.as_ptr()) as *const c_void)
+            });
+            Ok((
+                Egl { libraries: (library, gles), egl: loaded, display, config, context, surface: std::sync::atomic::AtomicPtr::new(surface as *mut c_void) },
+                gl,
+                window,
+            ))
         }
     }
 
@@ -1702,9 +1973,19 @@ impl Egl {
             log::info!("the screens go to a {}x{} window", size.0, size.1);
             return Ok((egl, gl, Some(Output::Window(size))));
         }
+        if wayland(std::env::var_os("ZAKURO_WAYLAND").as_deref(), wayland_session()) == Wayland::First {
+            let (egl, gl, window) = Egl::new_wayland()?;
+            log::info!("the screens go to a {}x{} Wayland window", window.size.0, window.size.1);
+            return Ok((egl, gl, Some(Output::Wayland(Box::new(window)))));
+        }
         if std::env::var_os("ZAKURO_KMS").is_some() {
             return match Egl::new_kms() {
                 Ok((egl, gl, kms)) => Ok((egl, gl, Some(Output::Kms(Box::new(kms))))),
+                Err(error) if error == HELD => {
+                    let (egl, gl, window) = Egl::new_wayland().map_err(|wayland| format!("{error}, and {wayland}"))?;
+                    log::info!("{error}, the screens go to a {}x{} Wayland window", window.size.0, window.size.1);
+                    Ok((egl, gl, Some(Output::Wayland(Box::new(window)))))
+                }
                 Err(error) if std::path::Path::new("/dev/fb0").exists() => {
                     let (egl, gl, window) = Egl::new_fbdev().map_err(|fbdev| format!("{error}, and {fbdev}"))?;
                     log::info!("{error}, the screens go through /dev/fb0, {}x{}", window[0], window[1]);
@@ -1715,5 +1996,44 @@ impl Egl {
         }
         let (egl, gl) = Egl::new()?;
         Ok((egl, gl, None))
+    }
+}
+
+/// what KMS says when a desktop holds the panel.
+const HELD: &str = "a desktop holds the panel";
+
+#[derive(Debug, PartialEq)]
+enum Wayland {
+    First,
+    WhenHeld,
+    Never,
+}
+
+/// when the screens go to a Wayland window: ZAKURO_WAYLAND=1 rather than
+/// the panel, 0 never, unset when a desktop holds the panel and a Wayland
+/// session is there.
+fn wayland(force: Option<&OsStr>, session: bool) -> Wayland {
+    match force {
+        Some(value) if value == OsStr::new("0") => Wayland::Never,
+        Some(_) => Wayland::First,
+        None if session => Wayland::WhenHeld,
+        None => Wayland::Never,
+    }
+}
+
+fn wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("SDL_VIDEODRIVER").is_some_and(|driver| driver == "wayland")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wayland_is_selected_only_for_wayland_sessions_or_explicitly() {
+        assert_eq!(wayland(None, true), Wayland::WhenHeld);
+        assert_eq!(wayland(None, false), Wayland::Never);
+        assert_eq!(wayland(Some(OsStr::new("1")), false), Wayland::First);
+        assert_eq!(wayland(Some(OsStr::new("0")), true), Wayland::Never);
     }
 }

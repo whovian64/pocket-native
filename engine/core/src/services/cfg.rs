@@ -119,7 +119,7 @@ fn write_config_block(system: &mut System, block_id: u32, out: u32, size: u32) {
     match block_id {
         // user name, UTF-16, 0x1C bytes.
         0x000A_0000 => {
-            let name: Vec<u16> = "Zakuro".encode_utf16().collect();
+            let name: Vec<u16> = system.config.user_name.encode_utf16().take(10).collect();
             for (i, unit) in name.iter().enumerate() {
                 if i * 2 + 1 < data.len() {
                     data[i * 2..i * 2 + 2].copy_from_slice(&unit.to_le_bytes());

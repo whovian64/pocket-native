@@ -371,7 +371,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             }
             let result = if super::mii_selector::APPLET_IDS.contains(&applet) {
                 log::info!("apt: the Mii selector picks the console's Mii");
-                super::mii_selector::result()
+                super::mii_selector::result(&system.config.user_name)
             } else {
                 log::info!(
                     "apt: library applet 0x{applet:03X} started with {} bytes, closing it right away",

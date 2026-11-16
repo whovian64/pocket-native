@@ -51,6 +51,17 @@ pub fn shown(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
     if settings.swapped { [alone, filled] } else { [filled, alone] }
 }
 
+/// the areas while the keyboard is up over the bottom screen: as shown when
+/// that screen has a display of its own or the panel's pixels for the
+/// keyboard's 640 across, else by itself.
+pub fn typing(settings: &crate::settings::Settings) -> [Option<[i32; 4]>; 2] {
+    let shown = shown(settings);
+    if zakuro_gpu::second_window() || zakuro_gpu::stacked() || shown[1].is_some_and(|area| area[2] as f32 * zakuro_gpu::layout_scale() >= 600.0) {
+        return shown;
+    }
+    areas(Layout::TopOnly, true, settings.aspect, zakuro_gpu::layout_size())
+}
+
 /// both panels of a dual-screen handheld as one window, stacked: a screen
 /// on each half, the top one above unless swapped, each in the shape the
 /// aspect ratio gives it, or stretched over its half as the settings say.

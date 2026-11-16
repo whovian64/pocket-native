@@ -187,6 +187,8 @@ pub struct Settings {
     /// buttons and sticks drawn over the screens, for a touch screen with
     /// no gamepad.
     pub touch_controls: bool,
+    /// the owner's name games are told.
+    pub name: String,
 }
 
 impl Default for Settings {
@@ -216,6 +218,7 @@ impl Default for Settings {
             reverse_tilt_x: false,
             reverse_tilt_y: false,
             touch_controls: cfg!(target_os = "android"),
+            name: "Zakuro".into(),
         }
     }
 }
@@ -231,11 +234,31 @@ pub struct GameSettings {
     pub region: u8,
     pub options: BTreeMap<String, bool>,
     pub advanced: Option<Advanced>,
+    /// the screens' layout and swap the game was last left in.
+    pub layout: Option<Layout>,
+    pub swapped: Option<bool>,
+    /// the game's own buttons: a 3DS button, by name, to the handheld's that
+    /// presses it, the others as the controls set them.
+    pub buttons: BTreeMap<String, Key>,
+}
+
+/// a handheld button in a game's mapping, or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Key {
+    A,
+    B,
+    X,
+    Y,
+    L,
+    R,
+    Select,
+    Start,
+    Off,
 }
 
 impl Default for GameSettings {
     fn default() -> Self {
-        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None }
+        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None, layout: None, swapped: None, buttons: BTreeMap::new() }
     }
 }
 

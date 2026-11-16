@@ -269,7 +269,7 @@ fn open_host_archive(system: &System, archive_id: u32, path: &[u8]) -> Result<Ho
         if !archive.exists() {
             make_play_coins(&archive)?;
         }
-        make_mii_database(&archive)?;
+        make_mii_database(&archive, &system.config.user_name)?;
     }
     if archive.exists() {
         return Ok(archive);
@@ -286,12 +286,12 @@ const PLAY_COINS: u32 = 0xF000_000B;
 
 /// the Mii database with the console's Mii, when there is none: Mario Kart 7
 /// stops at "There are currently no Mii characters" without one.
-fn make_mii_database(archive: &HostArchive) -> Result<(), ResultCode> {
+fn make_mii_database(archive: &HostArchive, name: &str) -> Result<(), ResultCode> {
     let file = archive.resolve("CFL_DB.dat")?;
     if file.exists() {
         return Ok(());
     }
-    std::fs::write(file, super::mii_selector::database()).map_err(|_| errors::FS_NOT_FORMATTED)
+    std::fs::write(file, super::mii_selector::database(name)).map_err(|_| errors::FS_NOT_FORMATTED)
 }
 
 /// makes the play coins' extra data the way a console that never walked

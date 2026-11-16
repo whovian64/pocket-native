@@ -15,6 +15,7 @@ const PLATFORM_CTR: u32 = 2;
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
     let command = header.command_id();
     let (region, language) = (system.config.region, system.config.language);
+    let user_name = system.config.user_name.clone();
     let memory = &mut system.memory;
     match command {
         // HasLoggedIn and IsOnline, neither
@@ -38,7 +39,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // GetMyScreenName, the user's name in eleven UTF-16 units
         0x0009 => {
             let mut name = [0u8; 24];
-            for (i, unit) in "Zakuro".encode_utf16().enumerate() {
+            for (i, unit) in user_name.encode_utf16().take(10).enumerate() {
                 name[i * 2..i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
             }
             let words: Vec<u32> = name.as_chunks::<4>().0.iter().map(|&w| u32::from_le_bytes(w)).collect();

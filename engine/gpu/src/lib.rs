@@ -5,6 +5,7 @@ pub mod blend;
 pub mod fog;
 pub mod proctex;
 pub mod format;
+pub mod pack;
 pub mod journal;
 pub mod lighting;
 pub mod raster;
@@ -16,10 +17,10 @@ pub mod texture;
 
 use format::ColorFormat;
 use registers::*;
-pub use overlay::{Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
+pub use overlay::{fitted, Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
 pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
 #[cfg(feature = "gles")]
-pub use raster::gles::{compiling, compiling_stand_ins, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
+pub use raster::gles::{compiling, compiling_stand_ins, preparing, skip_preparing, waited_draws, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
 
 /// how the GPU reaches guest memory.
 pub trait GpuMemory {
@@ -1009,6 +1010,19 @@ impl Gpu {
         let name = format!("{} at {scale}x{shaded}", hardware.name());
         self.resources.hardware = Some(hardware);
         Ok(name)
+    }
+
+    /// draws the texture pack's pictures in place of the textures they
+    /// replace, or no pack's. only the host's GPU draws them, so a pack waits
+    /// for enable_hardware_renderer, and says whether it is drawn.
+    pub fn set_texture_pack(&mut self, pack: Option<std::sync::Arc<pack::Pack>>) -> bool {
+        #[cfg(feature = "gles")]
+        let pack = pack.filter(|_| self.resources.hardware.is_some());
+        #[cfg(not(feature = "gles"))]
+        let pack = pack.filter(|_| false);
+        let drawn = pack.is_some();
+        self.resources.textures.set_pack(pack);
+        drawn
     }
 
     /// the host's GPU for the panel alone, every draw left to the software

@@ -12,6 +12,16 @@ pub struct Overlay {
     /// in the layout's size, over all of it, rather than in the menu's
     /// 640x480 in the middle.
     pub whole: bool,
+    /// over the bottom screen, wherever it is shown, its 640x480 twice the
+    /// screen's size, rather than in the middle.
+    pub bottom: bool,
+}
+
+/// where 640x480 sits fitted into an area of the layout, centred: left, top
+/// and how many times over.
+pub fn fitted([left, top, width, height]: [i32; 4]) -> (f32, f32, f32) {
+    let scale = (width as f32 / 640.0).min(height as f32 / 480.0);
+    (left as f32 + (width as f32 - 640.0 * scale) / 2.0, top as f32 + (height as f32 - 480.0 * scale) / 2.0, scale)
 }
 
 /// pixels for a texture of the overlay.

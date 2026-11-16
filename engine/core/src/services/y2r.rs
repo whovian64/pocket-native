@@ -288,7 +288,12 @@ fn gather(system: &mut System, from: Buffer, count: usize, width: usize) -> Vec<
     let mut piece = vec![0u8; transfer];
     while out.len() < count {
         system.memory.read_bytes(address, &mut piece);
-        out.extend(piece.iter().step_by(width).take(count - out.len()));
+        let left = count - out.len();
+        if width == 1 {
+            out.extend_from_slice(&piece[..left.min(transfer)]);
+        } else {
+            out.extend(piece.iter().step_by(width).take(left));
+        }
         address = address.wrapping_add(transfer as u32 + from.gap as u32);
     }
     out
@@ -347,22 +352,6 @@ fn convert(system: &mut System) {
         ),
         _ => (Vec::new(), Vec::new(), Vec::new(), gather(system, yuyv_buffer, pixels * 2, 1)),
     };
-    let yuv = |x: usize, y: usize| -> (i32, i32, i32) {
-        match format {
-            0 | 2 => {
-                let i = y * width + x;
-                (luma[i] as i32, chroma_u[i / 2] as i32, chroma_v[i / 2] as i32)
-            }
-            1 | 3 => {
-                let i = (y / 2) * (width / 2) + x / 2;
-                (luma[y * width + x] as i32, chroma_u[i] as i32, chroma_v[i] as i32)
-            }
-            _ => {
-                let pair = (y * width + x / 2 * 2) * 2;
-                (interleaved[(y * width + x) * 2] as i32, interleaved[pair + 1] as i32, interleaved[pair + 3] as i32)
-            }
-        }
-    };
     let color = match system.services.y2r.output_format {
         0 => zakuro_gpu::format::ColorFormat::Rgba8,
         1 => zakuro_gpu::format::ColorFormat::Rgb8,
@@ -370,31 +359,7 @@ fn convert(system: &mut System) {
         _ => zakuro_gpu::format::ColorFormat::Rgb565,
     };
     let bytes = color.bytes_per_pixel();
-    // eight lines at a time, in rows or in 8x8 tiles in the order their
-    // pixels go in a texture
-    let mut out = vec![0u8; pixels * bytes];
-    let mut at = 0;
-    for strip in (0..lines).step_by(8) {
-        let rows = (lines - strip).min(8);
-        let mut place = |x: usize, y: usize| {
-            let [r, g, b] = {
-                let (luma, u, v) = yuv(x, strip + y);
-                rgb(&coefficients, luma, u, v)
-            };
-            let index = if tiled {
-                (x / 8) * 64 + zakuro_gpu::format::morton_offset(x as u32 % 8, y as u32, 8, 1) as usize
-            } else {
-                y * width + x
-            };
-            color.encode([r, g, b, alpha], &mut out[at + index * bytes..at + (index + 1) * bytes]);
-        };
-        for y in 0..rows {
-            for x in 0..width {
-                place(x, y);
-            }
-        }
-        at += rows * width * bytes;
-    }
+    let out = converted(format, width, lines, [&luma, &chroma_u, &chroma_v, &interleaved], &coefficients, tiled, alpha, color);
     let end = output.address.wrapping_add((pixels * bytes) as u32 / output.transfer.max(1) as u32 * (output.transfer as u32 + output.gap as u32));
     let len = end.wrapping_sub(output.address);
     if output.gap == 0 {
@@ -406,6 +371,57 @@ fn convert(system: &mut System) {
         system.sync_gpu_from(output.address, len, "y2r");
     }
     scatter(system, output, &out);
+}
+
+/// the converted pixels eight lines at a time, their colors first, then put
+/// in place in order: in rows, or in 8x8 tiles in the order their pixels go
+/// in a texture
+#[allow(clippy::too_many_arguments)]
+fn converted(format: u32, width: usize, lines: usize, [luma, chroma_u, chroma_v, interleaved]: [&[u8]; 4], c: &[i32; 8], tiled: bool, alpha: u8, color: zakuro_gpu::format::ColorFormat) -> Vec<u8> {
+    use zakuro_gpu::format::ColorFormat;
+    let bytes = color.bytes_per_pixel();
+    let mut tile = [(0, 0); 64];
+    for (x, y) in (0..64).map(|i| (i % 8, i / 8)) {
+        tile[zakuro_gpu::format::morton_offset(x as u32, y as u32, 8, 1) as usize] = (x, y);
+    }
+    let mut out = vec![0u8; width * lines * bytes];
+    let mut strip = vec![[0u8; 3]; width * 8];
+    for (number, out) in out.chunks_mut(width * 8 * bytes).enumerate() {
+        let rows = out.len() / (width * bytes);
+        for (row, line) in strip.chunks_exact_mut(width).take(rows).enumerate() {
+            let at = number * 8 + row;
+            if format < 4 {
+                // 4:2:2 a chroma line each line, 4:2:0 one for two
+                let chroma = if format & 1 == 0 { at * width / 2 } else { at / 2 * width / 2 };
+                let (y, u, v) = (&luma[at * width..][..width], &chroma_u[chroma..][..width / 2], &chroma_v[chroma..][..width / 2]);
+                for ((pixels, y), (&u, &v)) in line.as_chunks_mut::<2>().0.iter_mut().zip(y.as_chunks::<2>().0).zip(u.iter().zip(v)) {
+                    pixels[0] = rgb(c, y[0] as i32, u as i32, v as i32);
+                    pixels[1] = rgb(c, y[1] as i32, u as i32, v as i32);
+                }
+            } else {
+                for (pixels, yuyv) in line.as_chunks_mut::<2>().0.iter_mut().zip(interleaved[at * width * 2..][..width * 2].as_chunks::<4>().0) {
+                    pixels[0] = rgb(c, yuyv[0] as i32, yuyv[1] as i32, yuyv[3] as i32);
+                    pixels[1] = rgb(c, yuyv[2] as i32, yuyv[1] as i32, yuyv[3] as i32);
+                }
+            }
+        }
+        let strip = &strip;
+        let order = (0..rows * width).map(|i| if tiled { let (x, y) = tile[i % 64]; strip[y * width + i / 64 * 8 + x] } else { strip[i] });
+        match color {
+            ColorFormat::Rgba8 => put::<4>(out, order, alpha, ColorFormat::Rgba8),
+            ColorFormat::Rgb8 => put::<3>(out, order, alpha, ColorFormat::Rgb8),
+            ColorFormat::Rgb5A1 => put::<2>(out, order, alpha, ColorFormat::Rgb5A1),
+            _ => put::<2>(out, order, alpha, ColorFormat::Rgb565),
+        }
+    }
+    out
+}
+
+/// pixels encoded one after another, a format a loop of its own
+fn put<const N: usize>(out: &mut [u8], pixels: impl Iterator<Item = [u8; 3]>, alpha: u8, color: zakuro_gpu::format::ColorFormat) {
+    for (to, [r, g, b]) in out.as_chunks_mut::<N>().0.iter_mut().zip(pixels) {
+        color.encode([r, g, b, alpha], to);
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +440,54 @@ mod tests {
         // pure red in YUV
         let red = rgb(c, 76, 85, 255);
         assert!(red[0] > 240 && red[1] < 15 && red[2] < 15, "{red:?}");
+    }
+
+    /// a line at a time gives what a pixel at a time gave, every input and
+    /// output format, in rows and in tiles
+    #[test]
+    fn converts_lines_as_pixels() {
+        use zakuro_gpu::format::ColorFormat;
+        let mut seed = 0x1234_5678u32;
+        let mut noise = |n: usize| (0..n).map(|_| { seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); (seed >> 24) as u8 }).collect::<Vec<u8>>();
+        let (width, lines) = (24, 16);
+        let pixels = width * lines;
+        let (luma, half, quarter, pairs) = (noise(pixels), noise(pixels / 2), noise(pixels / 4), noise(pixels * 2));
+        let half_v = noise(pixels / 2);
+        let quarter_v = noise(pixels / 4);
+        for format in 0..5u32 {
+            let (u, v) = if format & 1 == 0 { (&half, &half_v) } else { (&quarter, &quarter_v) };
+            let yuv = |x: usize, y: usize| -> (i32, i32, i32) {
+                match format {
+                    0 | 2 => (luma[y * width + x] as i32, u[(y * width + x) / 2] as i32, v[(y * width + x) / 2] as i32),
+                    1 | 3 => {
+                        let i = (y / 2) * (width / 2) + x / 2;
+                        (luma[y * width + x] as i32, u[i] as i32, v[i] as i32)
+                    }
+                    _ => {
+                        let pair = (y * width + x / 2 * 2) * 2;
+                        (pairs[(y * width + x) * 2] as i32, pairs[pair + 1] as i32, pairs[pair + 3] as i32)
+                    }
+                }
+            };
+            for color in [ColorFormat::Rgba8, ColorFormat::Rgb8, ColorFormat::Rgb5A1, ColorFormat::Rgb565] {
+                for tiled in [false, true] {
+                    let bytes = color.bytes_per_pixel();
+                    let mut want = vec![0u8; pixels * bytes];
+                    for strip in (0..lines).step_by(8) {
+                        for y in 0..8 {
+                            for x in 0..width {
+                                let (l, cu, cv) = yuv(x, strip + y);
+                                let [r, g, b] = rgb(&STANDARD[1], l, cu, cv);
+                                let index = if tiled { (x / 8) * 64 + zakuro_gpu::format::morton_offset(x as u32 % 8, y as u32, 8, 1) as usize } else { y * width + x };
+                                let at = strip * width * bytes + index * bytes;
+                                color.encode([r, g, b, 0x80], &mut want[at..at + bytes]);
+                            }
+                        }
+                    }
+                    let got = converted(format, width, lines, [&luma, u, v, &pairs], &STANDARD[1], tiled, 0x80, color);
+                    assert!(got == want, "format {format}, {color:?}, tiled {tiled}");
+                }
+            }
+        }
     }
 }

@@ -9,12 +9,18 @@ use crate::System;
 pub const APPLET_ID: u32 = 0x401;
 
 // where the fields the keyboard reads and writes sit in its configuration
+const KIND: usize = 0x00;
 const BUTTON_COUNT: usize = 0x04;
 const VALID_INPUT: usize = 0x08;
+const PASSWORD: usize = 0x0C;
+const FILTERS: usize = 0x18;
 const MAX_TEXT_LENGTH: usize = 0x20;
+const MAX_DIGITS: usize = 0x24;
 /// three labels of up to 16 UTF-16 units, each with its terminating zero.
 const BUTTON_TEXT: usize = 0x26;
 const BUTTON_TEXT_UNITS: usize = 17;
+/// the number pad's two keys beside the 0.
+const NUMPAD_KEYS: usize = 0x8C;
 const HINT_TEXT: usize = 0x90;
 const HINT_TEXT_UNITS: usize = 65;
 // eight flags, which buttons submit text and the language come between
@@ -26,7 +32,7 @@ const TEXT_LENGTH: usize = 0x148;
 const CONFIG_SIZE: usize = 0x14C;
 
 /// what a title asks the keyboard for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Request {
     pub hint: String,
     /// the text the keyboard starts with.
@@ -37,10 +43,19 @@ pub struct Request {
     pub buttons: Vec<String>,
     /// what the text has to be for the confirming button to take it.
     pub valid: Valid,
+    /// a number pad, with the keys beside its 0, rather than letters.
+    pub numpad: Option<[Option<char>; 2]>,
+    /// the text hidden as it is typed.
+    pub password: bool,
+    /// characters the title's filters turn down.
+    pub banned: Vec<char>,
+    /// the most digits the title's filter lets through.
+    pub max_digits: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Valid {
+    #[default]
     Anything,
     NotEmpty,
     NotEmptyNotBlank,
@@ -64,16 +79,30 @@ impl Valid {
 impl Request {
     /// whether the confirming button takes text.
     pub fn accepts(&self, text: &str) -> bool {
+        self.refusal(text).is_none()
+    }
+
+    /// why the confirming button turns text down, as the console's keyboard
+    /// would.
+    pub fn refusal(&self, text: &str) -> Option<String> {
         let length = text.encode_utf16().count();
         let blank = !text.is_empty() && text.chars().all(char::is_whitespace);
-        length <= self.max_length
-            && match self.valid {
-                Valid::Anything => true,
-                Valid::NotEmpty => length > 0,
-                Valid::NotEmptyNotBlank => length > 0 && !blank,
-                Valid::NotBlank => !blank,
-                Valid::FixedLength => length == self.max_length,
-            }
+        if length > self.max_length {
+            return Some(format!("{} characters at most", self.max_length));
+        }
+        if let Some(c) = text.chars().find(|c| self.banned.contains(c)) {
+            return Some(format!("It can't have {c}"));
+        }
+        let digits = text.chars().filter(char::is_ascii_digit).count();
+        if let Some(most) = self.max_digits.filter(|&most| digits > most) {
+            return Some(format!("{most} numbers at most"));
+        }
+        match self.valid {
+            Valid::NotEmpty | Valid::NotEmptyNotBlank if length == 0 => Some("It needs some text".into()),
+            Valid::NotEmptyNotBlank | Valid::NotBlank if blank => Some("It can't be only spaces".into()),
+            Valid::FixedLength if length != self.max_length => Some(format!("It needs {} characters", self.max_length)),
+            _ => None,
+        }
     }
 }
 
@@ -110,11 +139,14 @@ pub fn start(system: &mut System, mut config: Vec<u8>, memory: Option<ObjectId>)
         })
         .collect();
     let block = block(system, memory);
-    let max_length = match u16::from_le_bytes([config[MAX_TEXT_LENGTH], config[MAX_TEXT_LENGTH + 1]]) as usize {
-        // no limit, as much as the block holds
-        0 => block.map_or(64, |(_, size)| (size as usize / 2).saturating_sub(1)),
-        length => length,
+    let half = |at: usize| u16::from_le_bytes([config[at], config[at + 1]]);
+    // as much as the block holds at most, and when there is no limit
+    let room = block.map_or(64, |(_, size)| (size as usize / 2).saturating_sub(1));
+    let max_length = match half(MAX_TEXT_LENGTH) as usize {
+        0 => room,
+        length => length.min(room),
     };
+    let filters = word(FILTERS);
     let initial = word(INITIAL_TEXT_OFFSET);
     let text = match block {
         Some((paddr, size)) if initial < size => {
@@ -133,6 +165,10 @@ pub fn start(system: &mut System, mut config: Vec<u8>, memory: Option<ObjectId>)
         max_length,
         buttons: labels,
         valid: Valid::from_raw(word(VALID_INPUT)),
+        numpad: (word(KIND) == 2).then(|| [NUMPAD_KEYS, NUMPAD_KEYS + 2].map(|at| char::from_u32(half(at) as u32).filter(|&c| c != '\0'))),
+        password: word(PASSWORD) != 0,
+        banned: [(1, '@'), (2, '%'), (3, '\\')].into_iter().filter(|&(bit, _)| filters >> bit & 1 != 0).map(|(_, c)| c).collect(),
+        max_digits: (filters & 1 != 0).then(|| half(MAX_DIGITS) as usize),
     };
     log::info!("keyboard: a title asks for text, {request:?}");
     system.services.apt.keyboard = Some(Pending { request, config, memory });
@@ -211,11 +247,34 @@ mod tests {
             max_length: 8,
             buttons: vec!["Cancel".to_owned(), "OK".to_owned()],
             valid: Valid::NotEmptyNotBlank,
+            ..Request::default()
         };
         assert!(request.accepts("Link"));
         assert!(!request.accepts(""));
         assert!(!request.accepts("   "));
         assert!(!request.accepts("Linkkkkkk"));
+    }
+
+    /// a number pad's keys, a hidden text and the title's filters come from
+    /// the configuration, and the filters turn text down.
+    #[test]
+    fn the_configuration_says_the_keys_and_filters() {
+        let mut system = System::new(crate::Config::default());
+        let mut config = vec![0u8; 0x400];
+        config[KIND] = 2;
+        config[PASSWORD] = 1;
+        config[FILTERS] = 1 | 2;
+        config[MAX_TEXT_LENGTH] = 8;
+        config[MAX_DIGITS] = 3;
+        config[NUMPAD_KEYS] = b'-';
+        start(&mut system, config, None);
+        let asked = request(&system).unwrap().clone();
+        assert_eq!(asked.numpad, Some([Some('-'), None]));
+        assert!(asked.password);
+        assert_eq!((asked.banned.as_slice(), asked.max_digits), (&['@'][..], Some(3)));
+        assert!(asked.accepts("12-3"));
+        assert_eq!(asked.refusal("1234").as_deref(), Some("3 numbers at most"));
+        assert_eq!(asked.refusal("a@b").as_deref(), Some("It can't have @"));
     }
 
     /// the text and the button go back where titles look for them, in a

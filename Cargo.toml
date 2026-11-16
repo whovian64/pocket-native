@@ -10,10 +10,11 @@ members = [
     "recompiler/abi",
     "frontend",
     "android",
+    "kit",
 ]
 
 [workspace.package]
-version = "0.5.5"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"

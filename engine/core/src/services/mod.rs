@@ -502,6 +502,6 @@ pub(crate) mod tests {
         assert_eq!(reply, [0, 0x402, 10, 0x84]);
         let mut answer = vec![0; 0x84];
         system.memory.read_bytes(page + 0xC00, &mut answer);
-        assert_eq!(answer, mii_selector::result());
+        assert_eq!(answer, mii_selector::result("Zakuro"));
     }
 }

@@ -20,6 +20,7 @@ mod busy;
 mod crash;
 mod font;
 pub mod input;
+mod keyboard;
 mod layout;
 mod menu;
 mod playback;
@@ -41,7 +42,7 @@ use zakuro_core::{loader, Config, FrameOutcome, System};
 use zakuro_gpu::Overlay;
 
 use crate::font::{Canvas, Font};
-use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, SELECT, START, Y};
+use crate::input::{Pad, B, FN, L1, L2, L3, R1, R2, R3, SELECT, START, Y};
 use crate::menu::{Action, Menu, Status};
 use crate::profile::Profile;
 use crate::settings::{Advanced, Cursor, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings};
@@ -130,6 +131,8 @@ pub fn run(mut args: Vec<String>) {
     advanced.export();
     let settings_path = settings::config_dir().join("settings.toml");
     let mut settings: Settings = settings::load(&settings_path);
+    // the layout this game was left in, over the one used last
+    (settings.layout, settings.swapped) = (game.layout.unwrap_or(settings.layout), game.swapped.unwrap_or(settings.swapped));
     // the menu's rotation over ZAKURO_PANEL_ROTATE, before the panel starts
     let rotate = match settings.rotation {
         Rotation::Auto => None,
@@ -147,6 +150,7 @@ pub fn run(mut args: Vec<String>) {
         data_dir: Some(data.clone()),
         language: game.language,
         region: game.region,
+        user_name: settings.name.clone(),
         new3ds: advanced.new3ds,
         // ZAKURO_RESOLUTION=2.5 over the menu's, for trying one
         resolution: std::env::var("ZAKURO_RESOLUTION").ok().and_then(|v| v.parse().ok()).unwrap_or(settings.resolution),
@@ -162,6 +166,17 @@ pub fn run(mut args: Vec<String>) {
             std::process::exit(1);
         }
     };
+
+    // a Citra or Azahar texture pack in the game's data folder, what the pack
+    // puts in load/textures/<title id>/
+    let pack_dir = data.join("textures");
+    if let Some(pack) = zakuro_gpu::pack::Pack::open(&pack_dir) {
+        if system.gpu.set_texture_pack(Some(std::sync::Arc::new(pack))) {
+            log::info!("texture pack from {}", pack_dir.display());
+        } else {
+            log::warn!("a texture pack in {} needs the GPU drawing", pack_dir.display());
+        }
+    }
 
     let title_id = system.title.as_ref().map_or(0, |title| title.program_id());
     let title = if profile.name.is_empty() { format!("{title_id:016X}") } else { profile.name.clone() };
@@ -201,6 +216,9 @@ pub fn run(mut args: Vec<String>) {
     let mut controls = touch::Controls::load();
     // whether the menu went up, and with which of the touch controls' overlays
     let (mut menu_drawn, mut menu_controls) = (false, None);
+    // the software keyboard a title or the menu's name has open, whether it
+    // went up, and whether it is the name's
+    let (mut typing, mut typing_drawn, mut naming): (Option<keyboard::Keyboard>, bool, bool) = (None, false, false);
     let (mut fps, mut last_fps, mut status, mut fps_since) = (0u32, 0u32, None, Instant::now());
     // since when shaders have been building, said on screen after a second
     let mut building_since: Option<Instant> = None;
@@ -273,6 +291,7 @@ pub fn run(mut args: Vec<String>) {
     let mut logs = 0u32;
     // ZAKURO_SLOW_FRAMES=ms logs every frame that took longer to run
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
+    prepare_shaders(&mut system, &font, &settings, &pad);
     loop {
         let began = Instant::now();
         let (mut keys, mut axes, fingers, second_touch, pad_used, osh_pb, motion) = {
@@ -342,6 +361,51 @@ pub fn run(mut args: Vec<String>) {
         // L3 and R2 together do the same, for handhelds with no FN
         let tapped = tapped || [L3, R2].iter().all(|key| keys.contains(key)) && ![L3, R2].iter().all(|key| held.contains(key));
 
+        if let Some(open) = typing.as_mut() {
+            // a finger in the keyboard's pixels, over the bottom screen
+            let areas = layout::typing(&settings);
+            let finger = match (second_touch, areas[1]) {
+                (Some((across, down)), _) if zakuro_gpu::second_window() && !settings.swapped => Some((across * 640.0, down * 480.0)),
+                (_, Some(area)) => {
+                    let (left, top, scale) = zakuro_gpu::fitted(area);
+                    fingers.first().map(|&(_, x, y)| ((x - left) / scale, (y - top) / scale))
+                }
+                _ => None,
+            };
+            match open.input(&keys, finger) {
+                keyboard::Outcome::None => {}
+                keyboard::Outcome::Redraw => typing_drawn = false,
+                keyboard::Outcome::Answer(text, button) => {
+                    if naming {
+                        if button == 1 {
+                            system.config.user_name = text.clone();
+                            settings.name = text;
+                            settings::save(&settings_path, &settings);
+                        }
+                        (naming, menu_drawn) = (false, false);
+                    } else {
+                        log::info!("keyboard: answered with button {button}, {} characters", text.chars().count());
+                        system.answer_keyboard(&text, button);
+                    }
+                    (typing, overlay, status, next) = (None, None, None, Instant::now());
+                }
+            }
+            held = keys.clone();
+            if let Some(open) = &typing {
+                if !typing_drawn {
+                    let mut canvas = Canvas::new(&font, PANEL);
+                    open.draw(&mut canvas);
+                    let mut drawn = canvas.finish();
+                    drawn.bottom = true;
+                    overlay = Some(Arc::new(drawn));
+                    system.present_panel(areas, None, overlays(&overlay, &controls_overlay), settings.smooth, false);
+                    typing_drawn = true;
+                }
+                std::thread::sleep(frame);
+                continue;
+            }
+        }
+
         if menu.open || tapped {
             let action = if !menu.open {
                 menu.show();
@@ -365,6 +429,7 @@ pub fn run(mut args: Vec<String>) {
                 }
                 Action::Resume => {
                     settings::save(&settings_path, &settings);
+                    (game.layout, game.swapped) = (Some(settings.layout), Some(settings.swapped));
                     settings::save(&game_path, &game);
                     (overlay, status, next) = (None, None, Instant::now());
                 }
@@ -376,6 +441,18 @@ pub fn run(mut args: Vec<String>) {
                     settings::save(&settings_path, &settings);
                     (overlay, status) = (None, None);
                     controls.start_editing();
+                    continue;
+                }
+                Action::EditName => {
+                    let request = zakuro_core::services::keyboard::Request {
+                        hint: "Your name".into(),
+                        text: settings.name.clone(),
+                        max_length: 10,
+                        buttons: vec!["Cancel".into(), "OK".into()],
+                        valid: zakuro_core::services::keyboard::Valid::NotEmptyNotBlank,
+                        ..Default::default()
+                    };
+                    (typing, typing_drawn, naming) = (Some(keyboard::Keyboard::new(request, &keys, !fingers.is_empty())), false, true);
                     continue;
                 }
                 Action::Quit => break,
@@ -473,7 +550,7 @@ pub fn run(mut args: Vec<String>) {
         let every = if interpolating { 60 / settings.interpolate_to as u64 } else { playback.presentation_stride(cap) };
         let unshown = shown_only && as_played && (settings.interpolate_to == 0 || playback.fast_forward) && frame_number + 1 < presented + every;
         system.skip_frames(skip, unshown, most_skipped);
-        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
+        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings, &game.buttons) };
         let (c_stick_x, c_stick_y) = if c_stick && !hotkey { (input::stick(axes[3]), -input::stick(axes[4])) } else { (0.0, 0.0) };
         if c_stick && !hotkey {
             buttons.set(PadState::ZL, keys.contains(&L2));
@@ -548,9 +625,14 @@ pub fn run(mut args: Vec<String>) {
                 break;
             }
         }
-        if let Some(request) = system.keyboard_request() {
-            let confirm = request.buttons.len().saturating_sub(1);
-            system.answer_keyboard("Zakuro", confirm);
+        if let Some(request) = system.keyboard_request().filter(|_| typing.is_none()) {
+            // a probe has nobody to type
+            if probe.is_some() {
+                let confirm = request.buttons.len().saturating_sub(1);
+                system.answer_keyboard("Zakuro", confirm);
+            } else {
+                (typing, typing_drawn) = (Some(keyboard::Keyboard::new(request.clone(), &keys, !fingers.is_empty())), false);
+            }
         }
         let audio = system.take_audio();
         if !audio.is_empty() && probe.is_none() {
@@ -666,6 +748,7 @@ pub fn run(mut args: Vec<String>) {
         std::process::exit(code);
     }
     settings::save(&settings_path, &settings);
+    (game.layout, game.swapped) = (Some(settings.layout), Some(settings.swapped));
     settings::save(&game_path, &game);
     system.stop_gpu();
     if let Some(before) = BEFORE_EXIT.get() {
@@ -676,6 +759,59 @@ pub fn run(mut args: Vec<String>) {
 
 /// the overlays drawn over the screens, the menu or the status line, then
 /// the touch controls.
+/// waits for the shaders the game's list and the kit's precache list have
+/// the start build, showing how far along they are when that takes a
+/// moment, so none is built in game. B, Start or a tap skips the rest, which
+/// are built as the game needs them.
+fn prepare_shaders(system: &mut System, font: &Font, settings: &Settings, pad: &Mutex<Pad>) {
+    let (total, _) = zakuro_gpu::preparing();
+    if total == 0 {
+        return;
+    }
+    let started = Instant::now();
+    // how far along it was a few seconds in, for the time left to go by
+    let mut from: Option<(Duration, usize)> = None;
+    // a press from before the screen came up is no skip
+    let (mut held, mut touched) = {
+        let pad = pad.lock().unwrap();
+        (pad.keys.clone(), !pad.fingers.is_empty())
+    };
+    while let (total, left @ 1..) = zakuro_gpu::preparing() {
+        let (keys, touching) = {
+            let mut pad = pad.lock().unwrap();
+            let keys: HashSet<u16> = pad.keys.union(&pad.let_go).copied().collect();
+            let touching = !pad.fingers.is_empty() || !pad.lifted.is_empty();
+            pad.let_go.clear();
+            pad.lifted.clear();
+            (keys, touching)
+        };
+        let pressed = [B, START].into_iter().find(|key| keys.contains(key) && !held.contains(key));
+        let tapped = touching && !touched;
+        (held, touched) = (keys, touching);
+        if pressed.is_some() || tapped {
+            zakuro_gpu::skip_preparing();
+            let by = pressed.map_or("a tap".to_owned(), |key| format!("key {key}"));
+            log::info!("shaders skipped with {left} of {total} left, after {:.1} s, by {by}", started.elapsed().as_secs_f64());
+            return;
+        }
+        // the screens go up all along, the kit's list handed out as they do
+        let elapsed = started.elapsed();
+        let done = total - left;
+        if from.is_none() && elapsed >= Duration::from_secs(3) {
+            from = Some((elapsed, done));
+        }
+        let screen = (elapsed >= Duration::from_millis(250)).then(|| {
+            let remaining = from.filter(|&(_, then)| done > then).map(|(at, then)| (elapsed - at).mul_f64(left as f64 / (done - then) as f64));
+            let mut canvas = Canvas::new(font, PANEL);
+            menu::preparing(&mut canvas, PANEL, done, total, remaining);
+            Arc::new(canvas.finish())
+        });
+        system.present_panel(layout::shown(settings), None, overlays(&screen, &None), settings.smooth, false);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    log::info!("prepared {} shaders in {:.1} s", zakuro_gpu::preparing().0, started.elapsed().as_secs_f64());
+}
+
 fn overlays(overlay: &Option<Arc<Overlay>>, controls: &Option<Arc<Overlay>>) -> Vec<Arc<Overlay>> {
     overlay.iter().chain(controls).cloned().collect()
 }

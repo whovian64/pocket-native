@@ -1,14 +1,14 @@
 //! the handheld's buttons and sticks from evdev, and what they are to the
 //! title under the controls settings.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use zakuro_core::services::hid::PadState;
 
-use crate::settings::{Buttons, Dpad, Settings, Speed, Stick};
+use crate::settings::{Buttons, Dpad, Key, Settings, Speed, Stick};
 
 pub const A: u16 = 305;
 pub const B: u16 = 304;
@@ -41,6 +41,34 @@ const BUTTONS: [(u16, PadState); 12] = [
     (LEFT, PadState::LEFT),
     (RIGHT, PadState::RIGHT),
 ];
+/// the 3DS buttons a game's mapping can move, by name, each with the key
+/// that presses it otherwise.
+pub const MAPPED: [(&str, PadState, u16); 8] = [
+    ("A", PadState::A, A),
+    ("B", PadState::B, B),
+    ("X", PadState::X, X),
+    ("Y", PadState::Y, Y),
+    ("L", PadState::L, L1),
+    ("R", PadState::R, R1),
+    ("Start", PadState::START, START),
+    ("Select", PadState::SELECT, SELECT),
+];
+
+/// the handheld key a mapping names, none for one turned off.
+fn key_code(key: Key) -> Option<u16> {
+    Some(match key {
+        Key::A => A,
+        Key::B => B,
+        Key::X => X,
+        Key::Y => Y,
+        Key::L => L1,
+        Key::R => R1,
+        Key::Select => SELECT,
+        Key::Start => START,
+        Key::Off => return None,
+    })
+}
+
 /// a stick's travel, the most it reports.
 pub const STICK: f32 = 1800.0;
 
@@ -96,9 +124,10 @@ pub fn gamepad() -> Option<(String, String)> {
 
 /// the pad in /proc/bus/input/devices' text, its event device and name.
 fn pad_among(devices: &str) -> Option<(String, String)> {
-    // muOS hides the pad it reads behind its own, so that one goes first
+    // muOS hides the pad it reads behind its own, so that one goes first, and
+    // a pad's keyboard half, ROCKNIX's "OSH PB Controller Keyboard", last
     let mut blocks: Vec<&str> = devices.split("\n\n").collect();
-    blocks.sort_by_key(|block| !block.contains("N: Name=\"muOS-Keys\""));
+    blocks.sort_by_key(|block| (!block.contains("N: Name=\"muOS-Keys\""), block.lines().any(|line| line.starts_with("N: Name=") && line.contains("Keyboard"))));
     blocks.into_iter().find_map(|block| {
         // the name comes in quotes
         let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?.trim_matches('"');
@@ -309,10 +338,11 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
 
 /// the handheld's touch screens, those giving ABS_MT_POSITION_X, and
 /// whether each is the bottom panel's: on the RG DS under ROCKNIX the one on
-/// fe5e0000.i2c, or where ZAKURO_TOUCH_BOTTOM says.
+/// fe5e0000.i2c, or where ZAKURO_TOUCH_BOTTOM says, BANANA_TOUCH under
+/// BananaOS.
 pub fn touchscreens() -> Vec<(String, bool)> {
     let devices = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
-    let bottom = std::env::var("ZAKURO_TOUCH_BOTTOM").unwrap_or_else(|_| "fe5e0000.i2c".into());
+    let bottom = std::env::var("ZAKURO_TOUCH_BOTTOM").or_else(|_| std::env::var("BANANA_TOUCH")).unwrap_or_else(|_| "fe5e0000.i2c".into());
     devices
         .split("\n\n")
         .filter_map(|block| {
@@ -632,15 +662,21 @@ pub fn circle(x: i32, y: i32) -> (f32, f32) {
     (x * scale, y * scale)
 }
 
-/// the title's buttons and circle pad for the keys held and the sticks.
-pub fn controls(keys: &HashSet<u16>, axes: &[i32; 8], settings: &Settings) -> (PadState, f32, f32) {
+/// the title's buttons and circle pad for the keys held and the sticks,
+/// with the game's own mapping over the controls' A and B.
+pub fn controls(keys: &HashSet<u16>, axes: &[i32; 8], settings: &Settings, mapping: &BTreeMap<String, Key>) -> (PadState, f32, f32) {
     let mut buttons = PadState::empty();
     for (key, button) in BUTTONS {
-        let key = match (settings.buttons, key) {
-            (Buttons::Xbox, A) => B,
-            (Buttons::Xbox, B) => A,
-            (Buttons::Xbox, X) => Y,
-            (Buttons::Xbox, Y) => X,
+        let mapped = MAPPED.iter().find(|(_, mapped, _)| *mapped == button).and_then(|(name, ..)| mapping.get(*name));
+        let key = match (mapped, settings.buttons, key) {
+            (Some(&chosen), ..) => match key_code(chosen) {
+                Some(key) => key,
+                None => continue,
+            },
+            (None, Buttons::Xbox, A) => B,
+            (None, Buttons::Xbox, B) => A,
+            (None, Buttons::Xbox, X) => Y,
+            (None, Buttons::Xbox, Y) => X,
             _ => key,
         };
         if keys.contains(&key) && (settings.dpad == Dpad::Dpad || ![UP, DOWN, LEFT, RIGHT].contains(&key)) {
@@ -698,6 +734,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(pad_among(&devices), Some(("/dev/input/event4".to_owned(), "TRIMUI Player1".to_owned())));
+    }
+
+    #[test]
+    fn the_osh_pb_pad_wins_over_its_keyboard_half() {
+        // an RG351P's devices under ROCKNIX, the keyboard half listed first
+        let devices = ["rk805 pwrkey", "OpenSimHardware OSH PB Controller Keyboard", "OpenSimHardware OSH PB Controller", "adc-keys"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("I: Bus=0003 Vendor=1209 Product=3100 Version=0111\nN: Name=\"{name}\"\nH: Handlers=event{i}\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(pad_among(&devices), Some(("/dev/input/event2".to_owned(), "OpenSimHardware OSH PB Controller".to_owned())));
     }
 
     #[test]
@@ -797,5 +845,21 @@ mod tests {
         assert!(super::has_bit("260800000000003", super::MT_X));
         // a gamepad's sticks only
         assert!(!super::has_bit("3003b", super::MT_X));
+    }
+
+    /// a game's mapping puts one handheld button on another 3DS button and
+    /// turns one off, the rest keep the controls' layout, Xbox's swap too.
+    #[test]
+    fn a_games_mapping_moves_its_buttons() {
+        use crate::settings::{Buttons, Key, Settings};
+        use zakuro_core::services::hid::PadState;
+        let settings = Settings { buttons: Buttons::Xbox, ..Settings::default() };
+        let mapping = std::collections::BTreeMap::from([("A".to_owned(), Key::Y), ("Start".to_owned(), Key::Off)]);
+        let pressed = |keys: &[u16]| super::controls(&keys.iter().copied().collect(), &[0; 8], &settings, &mapping).0;
+        // one key can press two buttons: Y stays X's as well, as Xbox has it
+        assert_eq!(pressed(&[Y]), PadState::A | PadState::X);
+        assert_eq!(pressed(&[START]), PadState::empty());
+        // B as the controls have it, from the handheld's A under Xbox
+        assert_eq!(pressed(&[A]), PadState::B);
     }
 }

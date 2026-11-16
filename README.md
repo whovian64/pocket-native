@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo/pocket-native.png" alt="" width="200"></p>
+
 # Pocket Native
 
 Nintendo 3DS games on cheap handhelds and Android, rebuilt for them
@@ -78,7 +80,7 @@ working or not.
 |---|---|---|---|
 | R36S and its clones | RK3326, Mali-G31 | ArkOS, dArkOS, dArkOSRE, ArkOS and dArkOS for clones, ROCKNIX | The main target, developed and tested on an R36S with ArkOS |
 | Powkiddy RX6H | RK3326, Mali-G31 | dArkOS for clones | Played by testers. No FN button: L3 does its job. Its Mali driver crashes while building some games' shaders: from 0.5.0 the game notes the shader and gets past it on its next start |
-| Anbernic RG351P and RG351M | RK3326, Mali-G31 | ArkOS | From 0.5.5 the OSH PB board's buttons and sticks are mapped, not yet tried on one |
+| Anbernic RG351P and RG351M | RK3326, Mali-G31 | ArkOS, ROCKNIX | The OSH PB board's buttons and sticks are mapped, under ROCKNIX from 0.6.0 |
 | Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | H700, Mali-G31 | Knulli, muOS | Played by testers: Super Mario 3D Land, A Link Between Worlds, Smash, Project X Zone 1 and 2, Shantae and the Pirate's Curse, Dragon Ball Z: Extreme Butoden, Kingdom Hearts 3D, Pokémon Omega Ruby, Donkey Kong Country Returns 3D |
 | Anbernic RG353 and RG503 | RK3566, Mali-G52 | ArkOS, ROCKNIX | Buttons mapped, no tester report yet |
 | Miyoo Flip | RK3566, Mali-G52 | spruceOS 4.2 | Played: Ocarina of Time 3D, Majora's Mask 3D, Pokémon Omega Ruby/Sun/Y, Metroid: Samus Returns, Mario Kart 7, NSMB2, SM3DL, ALBW. Pad `MIYOO Player1`; spruce leaves two cores offline, `run.sh` wakes them |
@@ -102,6 +104,8 @@ Rotation** turns the picture for a panel mounted sideways.
 | spruceOS 4.2 | Played on the Miyoo Flip. From 0.5.5 the TrimUI Smart Pro's pad is found under it too |
 | ROCKNIX | Played on the RG DS, with Mali's own driver. The launcher hands sway's panels to the game and back. Pads numbering their buttons the usual way are read (the R36S's `r36s_Gamepad` among them), and from 0.5.0 the PS5 pad InputPlumber stands in for the RK3566 handhelds' own from ROCKNIX 20261101. On the R36S, its Mali driver crashed before the first picture until the 0.4.9 test build, Panfrost worked: not confirmed since |
 | Android 11 or newer, 64-bit | Works on phones, the AYN Thor and the RG DS, with one screen or two. On one RK3566 handheld 0.4.7 drew on the CPU, its driver refusing a kind of buffer: 0.5.0 uses the GPU there. From 0.5.5 the device's motion sensors stand in for the console's |
+| BananaOS | Played by testers on the RG DS, the bottom panel staying dark. From 0.6.0 both panels should be lit, with the picture stacked as under ROCKNIX |
+| nuubOS | Not yet. Its desktop keeps the panel while a port runs: from 0.6.0 the screens should go to a Wayland window there instead, slowly so far |
 | AmberELEC | Not yet |
 
 ### The RG DS under ROCKNIX
@@ -198,13 +202,18 @@ Every setting has a line of help at the bottom of the menu.
 - **Controls:** touch cursor speed, the touch cursor shown or hidden
   (on two screens Auto shows it only while the stick moves it), Nintendo
   or Xbox A/B, left stick as
-  circle pad or D-pad, the D-pad's job, tilt directions, and the touch
-  controls on Android
+  circle pad or D-pad, the D-pad's job, tilt directions, the touch
+  controls on Android, and **Button mapping**: which of the handheld's
+  buttons press the 3DS's, for each game
 - **Game:** resume, advanced settings, reset, quit
+
+The layout and which screen is on top are kept per game, a game played
+for the first time starting with the last one used.
 
 **Advanced settings** are saved per game. They switch the engine's speed
 hacks and its graphics, CPU and loading options for a game that doesn't
-run or look right, and set the language and region the game is told.
+run or look right, and set the language and region the game is told,
+and **Your name**, which every game is told.
 **Most compatible** turns off every speed hack at once: if that fixes a
 game, turn them back on one at a time to find the one it trips over.
 Settings under a "requires restart" heading need **Restart game**.
@@ -217,6 +226,17 @@ top screen fills it.
 below the target, up to 30 or 60 fps. It follows motion in 16 pixel
 blocks, so slow scenes come out smooth and fast ones can smear thin
 details. It's off by default.
+
+**Typing.** A game that asks for a name or other text opens a keyboard
+over the bottom screen, the game waiting under it: the d-pad and A type,
+or a finger on the bottom screen. On one panel where the bottom screen
+is small, it's shown by itself while you type.
+
+**Texture packs.** A Citra or Azahar texture pack goes in a `textures`
+folder in the game's `data` folder, next to its `log.txt`: what the pack
+puts in `load/textures/<title id>/`, its PNGs and `pack.json`. It needs
+the GPU drawing, and its pictures take memory, so a big pack may be too
+much for a handheld with 1 GB.
 
 ## For developers
 

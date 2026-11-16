@@ -56,6 +56,27 @@ Several games can go at once. A `.cia` or an encrypted `.3ds` needs your
 console's `aes_keys.txt`: put it next to the game or in the kit's folder
 and the build finds it, otherwise it asks for a `.cia`.
 
+**Precache shaders**, a box in the kit's window (`--precache` or
+`-Precache` in a terminal), works out from a game's files the shaders its
+3D models need, and the handheld builds them the first time the game
+starts instead of while you play. That first start takes longer, several
+minutes on a Mali-G31 device like the R36S, and B skips the rest. It reads
+the 3D models of games made with Nintendo's own formats (NintendoWare and
+the SDK's H3D: Mario Kart 7, Super Mario 3D Land, Animal Crossing, the
+Pokémon X/Y and Omega Ruby/Alpha Sapphire games, Kirby, A Link Between
+Worlds and many more), and games the kit has a shader list for. Menus,
+text, effects and other games' shaders are built the first time they're
+drawn, as before.
+
+**Share your shaders.** Each game keeps a list of the shaders it built on
+your handheld. Copy the card's `Pocket Native` folder back into the kit's
+build folder and run Rebuild all games with Precache shaders ticked: the
+kit builds those shaders in too, and writes `Pocket Native/shaders to
+share/<title id>.txt`. That file holds only GPU settings, no game data.
+Send it to us (a GitHub issue or the Discord) and it goes into the kit, so
+everyone's first start of that game has them, and other games' too where
+they use the same shaders.
+
 A window shows the build as it goes and stays open at the end so you
 can read how it went. The very first build sets up the build container,
 which downloads a few hundred MB and takes a while. After that, each
@@ -87,7 +108,7 @@ ports in:
 
 | System | Where it goes |
 |---|---|
-| ArkOS, dArkOS, dArkOSRE | `roms/ports`, or `roms2/ports` with two cards |
+| ArkOS, ArkOS4Clones, dArkOS, dArkOSRE | `roms/ports`, or `roms2/ports` with two cards |
 | Knulli | `roms/ports` on the SHARE partition |
 | muOS | `ROMS/Ports` |
 | ROCKNIX | `roms/ports` on the GAMES partition (`/storage/roms/ports`) |

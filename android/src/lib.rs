@@ -158,6 +158,7 @@ fn set_up(own: &Path, folder: &Path, data: &Path) {
     }
     std::env::set_var("ZAKURO_HINTS", hints);
     std::env::set_var("ZAKURO_SHADER_MANIFEST", data.join("shaders.txt"));
+    std::env::set_var("ZAKURO_VERTEX_LIST", folder.join("vertex").join("vertex.txt"));
     std::env::set_var("POCKET_NATIVE_TITLES", own.join("titles"));
     std::env::set_var("POCKET_NATIVE_CONFIG", own.join("config"));
     let drops = data.join("drops.txt");
