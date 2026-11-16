@@ -137,7 +137,19 @@ for sysdata in "$pn"/games/*/sysdata; do
         cp /work/mii_placeholder.dat "$sysdata/CFL_Res.placeholder.dat"
     fi
 done
-cp "$game" "$pn/games/$id/game.3ds"
+# the card's padding left off, the image ending with its last partition, so
+# a 4 GB card fits a FAT32 card
+size=$(stat -c %s "$game")
+if [ "$(dd if="$game" bs=4 skip=64 count=1 2>/dev/null)" = NCSD ]; then
+    unit=$(( 0x200 << $(od -An -tu1 -j$((0x18E)) -N1 "$game") ))
+    end=0
+    for i in 0 1 2 3 4 5 6 7; do
+        read -r offset length < <(od -An -tu4 -j$((0x120 + 8 * i)) -N8 "$game")
+        (( offset + length > end )) && end=$(( offset + length ))
+    done
+    (( end > 0 && end * unit < size )) && size=$(( end * unit ))
+fi
+head -c "$size" "$game" > "$pn/games/$id/game.3ds"
 rm -rf "${pn:?}/games/${id:?}/vertex"
 [ -f /work/vertex/vertex.txt ] && mkdir -p "$pn/games/$id/vertex" && cp /work/vertex/vertex.txt /work/vertex/*.pica "$pn/games/$id/vertex/"
 [ -f /work/vertex/precache.txt ] && [ -d "$pn/games/$id/vertex" ] && cp /work/vertex/precache.txt "$pn/games/$id/vertex/"
