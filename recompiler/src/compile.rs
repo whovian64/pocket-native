@@ -170,15 +170,29 @@ pub fn shared(objects: &[PathBuf], library: &Path) -> Result<(), String> {
     if !cfg!(windows) {
         command.arg("-nostdlib");
     }
+    // and for the handhelds nothing left to find at load time, which
+    // Android's loader would refuse the whole library over
+    if compiler.contains("aarch64") {
+        command.arg("-Wl,--no-undefined");
+    }
     command.arg("-shared").arg("-o").arg(library).args(objects);
     if !cfg!(windows) && compiler.contains("gcc") {
         command.arg("-lgcc");
     }
-    let status = command.status();
-    match status {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err("linking failed".to_owned()),
+    let first = command.output();
+    if first.as_ref().is_ok_and(|output| output.status.success()) {
+        return Ok(());
     }
+    // the build image's ld puts no long branch stub in for a call to a
+    // hidden function out of reach, as past 128 MB of a big game's code:
+    // gold does
+    if !cfg!(windows) && compiler.contains("gcc") && command.arg("-fuse-ld=gold").status().is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+    if let Ok(output) = first {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+    Err("linking failed".to_owned())
 }
 
 /// puts objects into a static library.
