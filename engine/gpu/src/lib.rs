@@ -963,15 +963,23 @@ impl Gpu {
             return;
         }
 
-        let mut remaining = size;
-        let chunk = input_width.min(output_width);
-        let mut buffer = vec![0u8; chunk as usize];
-        while remaining >= chunk && chunk > 0 {
+        // one run of bytes, each side's lines ending where its own width
+        // says: MK7 copies lines of 4 KiB into one line of 128 KiB
+        let (mut remaining, mut input_left, mut output_left) = (size, input_width, output_width);
+        let mut buffer = Vec::new();
+        while remaining > 0 {
+            let step = remaining.min(input_left).min(output_left);
+            buffer.resize(step as usize, 0);
             memory.read(src, &mut buffer);
             memory.write(dst, &buffer);
-            src += input_width + input_skip;
-            dst += output_width + output_skip;
-            remaining -= chunk;
+            (src, dst, remaining) = (src + step, dst + step, remaining - step);
+            (input_left, output_left) = (input_left - step, output_left - step);
+            if input_left == 0 {
+                (src, input_left) = (src + input_skip, input_width);
+            }
+            if output_left == 0 {
+                (dst, output_left) = (dst + output_skip, output_width);
+            }
         }
         self.transfers += 1;
     }
@@ -1882,6 +1890,21 @@ mod tests {
             let start = addr as usize;
             self.0[start..start + data.len()].copy_from_slice(data);
         }
+    }
+
+    #[test]
+    fn a_texture_copy_runs_on_across_lines_of_other_widths() {
+        let mut memory = FlatMemory((0..0x4000).map(|i| (i % 251) as u8).collect());
+        let mut gpu = Gpu::new();
+        // lines of 0x20 bytes into one line of 0x80, then the other way with
+        // a gap of 0x10 after each line written
+        gpu.texture_copy(&mut memory, 0x0000, 0x1000, 0x80, 0x2, 0x8);
+        assert_eq!(memory.0[0x1000..0x1080], memory.0[0x0000..0x0080]);
+        assert!(memory.0[0x1080..0x2000].iter().zip(0x1080..).all(|(&b, i)| b == (i % 251) as u8), "nothing written past the copy");
+        gpu.texture_copy(&mut memory, 0x2000, 0x3000, 0x40, 0x4, 0x0001_0001);
+        assert_eq!(memory.0[0x3000..0x3010], memory.0[0x2000..0x2010]);
+        assert_eq!(memory.0[0x3020..0x3030], memory.0[0x2010..0x2020]);
+        assert_eq!(memory.0[0x3040..0x3050], memory.0[0x2020..0x2030]);
     }
 
     /// the inverse of [shader::isa::decode_float24], for normal values.
