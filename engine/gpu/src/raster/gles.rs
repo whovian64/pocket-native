@@ -36,7 +36,7 @@ use display::*;
 use prepare::Precache;
 use programs::*;
 use sources::*;
-pub use display::{layout_scale, layout_size, panel_timing, second_window, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
+pub use display::{layout_scale, layout_size, panel_timing, second_window, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, set_window_display, stacked};
 pub use programs::{compiling, compiling_stand_ins, note_compiler_crash, preparing, skip_preparing, waited_draws};
 pub(crate) use programs::{COMPILING, WAITED};
 

@@ -143,6 +143,20 @@ pub(super) fn connector_name(kind: u32, number: u32) -> String {
 /// activity's, that the screens go to in place of the panel, null for none.
 pub(super) static WINDOW: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
+/// the Wayland display the window is on, a wl_display, when the window
+/// set_window gives is a wl_egl_window, null when it is a native window
+/// EGL's default display takes (an X11 window, an ANativeWindow).
+pub(super) static WINDOW_DISPLAY: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// says the window set_window gives next is a wl_egl_window on this
+/// wl_display, the connection its wl_surface was made on (SDL2's, from
+/// SDL_GetWindowWMInfo), before the title is loaded. A Wayland surface
+/// works on its own connection only, which EGL's default display is not.
+/// Null goes back to a native window EGL's default display takes.
+pub fn set_window_display(display: *mut c_void) {
+    WINDOW_DISPLAY.store(display, std::sync::atomic::Ordering::Release);
+}
+
 /// whether the window is both of a dual-screen handheld's panels stacked,
 /// as GammaOS's DualStack gives an app them, its top half on the top panel
 /// and its bottom half on the bottom one.
@@ -1704,10 +1718,27 @@ impl Egl {
             let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
             let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
             let loaded = egl::Egl::load_with(|name| symbol(&library, name));
-            let display = loaded.GetDisplay(egl::DEFAULT_DISPLAY);
+            let wayland = WINDOW_DISPLAY.load(std::sync::atomic::Ordering::Acquire);
+            let display = if wayland.is_null() {
+                loaded.GetDisplay(egl::DEFAULT_DISPLAY)
+            } else {
+                // the window's own connection: a wl_egl_window made on
+                // SDL2's wl_display is no window on another one
+                const EGL_PLATFORM_WAYLAND_KHR: u32 = 0x31D8;
+                let address = ["eglGetPlatformDisplay", "eglGetPlatformDisplayEXT"]
+                    .iter()
+                    .map(|name| symbol(&library, name))
+                    .find(|address| !address.is_null())
+                    .ok_or("EGL has no eglGetPlatformDisplay for the Wayland window")?;
+                let get: extern "C" fn(u32, *mut c_void, *const i32) -> egl::types::EGLDisplay = std::mem::transmute(address);
+                get(EGL_PLATFORM_WAYLAND_KHR, wayland, std::ptr::null())
+            };
             let (mut major, mut minor) = (0, 0);
             if display.is_null() || loaded.Initialize(display, &mut major, &mut minor) == 0 {
                 return Err(format!("could not initialize EGL for the window, 0x{:X}", loaded.GetError()));
+            }
+            if !wayland.is_null() {
+                log::info!("EGL on the window's Wayland display, {}", drawing_libraries());
             }
             loaded.BindAPI(egl::OPENGL_ES_API);
             let attributes = [
@@ -2035,5 +2066,73 @@ mod tests {
         assert_eq!(wayland(None, false), Wayland::Never);
         assert_eq!(wayland(Some(OsStr::new("1")), false), Wayland::First);
         assert_eq!(wayland(Some(OsStr::new("0")), true), Wayland::Never);
+    }
+
+    /// an SDL2 window on a Wayland desktop, its wl_surface in a
+    /// wl_egl_window and its wl_display given to set_window_display, shows
+    /// what is drawn: run on a Wayland session, cargo test -p zakuro-gpu
+    /// --features gles -- --ignored window_on_wayland
+    #[test]
+    #[ignore]
+    fn window_on_wayland() {
+        const SDL_INIT_VIDEO: u32 = 0x0000_0020;
+        const SDL_WINDOW_SHOWN: u32 = 0x0000_0004;
+        const SDL_SYSWM_WAYLAND: u32 = 6;
+        // SDL_SysWMinfo: its SDL_version, the subsystem, then the
+        // wl_display and the wl_surface first in the union
+        #[repr(C)]
+        struct WmInfo {
+            version: [u8; 3],
+            subsystem: u32,
+            display: *mut c_void,
+            surface: *mut c_void,
+            rest: [u8; 48],
+        }
+        // SAFETY: SDL2 and wayland-egl as their headers declare them, the
+        // window kept until the end
+        unsafe {
+            std::env::set_var("SDL_VIDEODRIVER", "wayland");
+            let sdl = open(&["libSDL2-2.0.so.0", "libSDL2.so"]).expect("SDL2");
+            let wayland_egl = open(&["libwayland-egl.so.1", "libwayland-egl.so"]).expect("wayland-egl");
+            macro_rules! function {
+                ($library:expr, $name:literal, $function:ty) => {{
+                    let address = symbol($library, $name);
+                    assert!(!address.is_null(), "no {}", $name);
+                    std::mem::transmute::<*const c_void, $function>(address)
+                }};
+            }
+            let init = function!(&sdl, "SDL_InitSubSystem", unsafe extern "C" fn(u32) -> i32);
+            let get_error = function!(&sdl, "SDL_GetError", SdlGetError);
+            let create_window = function!(&sdl, "SDL_CreateWindow", unsafe extern "C" fn(*const c_char, i32, i32, i32, i32, u32) -> *mut c_void);
+            let window_info = function!(&sdl, "SDL_GetWindowWMInfo", unsafe extern "C" fn(*mut c_void, *mut WmInfo) -> i32);
+            let pump_events = function!(&sdl, "SDL_PumpEvents", unsafe extern "C" fn());
+            let destroy_window = function!(&sdl, "SDL_DestroyWindow", unsafe extern "C" fn(*mut c_void));
+            let create = function!(&wayland_egl, "wl_egl_window_create", unsafe extern "C" fn(*mut c_void, i32, i32) -> *mut c_void);
+            let destroy = function!(&wayland_egl, "wl_egl_window_destroy", unsafe extern "C" fn(*mut c_void));
+            assert_eq!(init(SDL_INIT_VIDEO), 0, "{}", sdl_failure(get_error, "SDL2 video"));
+            let window = create_window(c"window_on_wayland".as_ptr(), 0, 0, 400, 240, SDL_WINDOW_SHOWN);
+            assert!(!window.is_null(), "{}", sdl_failure(get_error, "the window"));
+            let mut info = WmInfo { version: [2, 0, 22], subsystem: 0, display: std::ptr::null_mut(), surface: std::ptr::null_mut(), rest: [0; 48] };
+            assert_eq!(window_info(window, &mut info), 1, "{}", sdl_failure(get_error, "the window's information"));
+            assert_eq!(info.subsystem, SDL_SYSWM_WAYLAND, "SDL2 did not give a Wayland window");
+            let native = create(info.surface, 400, 240);
+            assert!(!native.is_null());
+            set_window_display(info.display);
+            let (egl, gl, size) = Egl::new_window(native).expect("EGL on the Wayland window");
+            assert_eq!(size, (400, 240));
+            let mut pixel = [0u8; 4];
+            for _ in 0..30 {
+                pump_events();
+                gl.clear_color(1.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                gl.read_pixels(200, 120, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixel)));
+                assert_ne!(egl.egl.SwapBuffers(egl.display, egl.surface()), 0, "swap, 0x{:X}", egl.egl.GetError());
+            }
+            assert_eq!(pixel, [255, 0, 0, 255]);
+            set_window_display(std::ptr::null_mut());
+            drop(egl);
+            destroy(native);
+            destroy_window(window);
+        }
     }
 }
