@@ -1,0 +1,4 @@
+name = "RESIDENT EVIL REVELATIONS"
+
+[advanced]
+realtime_gpu = true

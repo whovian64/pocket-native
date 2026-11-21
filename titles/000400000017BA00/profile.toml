@@ -1,0 +1,4 @@
+name = "Bravely Second - End Layer"
+
+[advanced]
+realtime_gpu = true

@@ -1,0 +1,4 @@
+name = "Dragon Quest Monsters - Terry's Wonderland 3D"
+
+[advanced]
+realtime_gpu = true

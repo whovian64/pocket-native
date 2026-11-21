@@ -1,1 +1,4 @@
 name = "Super Smash Bros. for Nintendo 3DS"
+
+[advanced]
+realtime_gpu = true

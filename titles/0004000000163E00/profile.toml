@@ -1,0 +1,4 @@
+name = "Dragon Fantasy - The Black Tome of Ice"
+
+[advanced]
+realtime_gpu = true
