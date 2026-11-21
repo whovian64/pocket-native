@@ -1,0 +1,4 @@
+name = "Cave Story 3D"
+
+[advanced]
+realtime_gpu = true

@@ -1,0 +1,4 @@
+name = "Disney Art Academy"
+
+[advanced]
+realtime_gpu = true
